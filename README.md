@@ -1,130 +1,778 @@
 # vue-ssr-lite
 
-An API-client-neutral managed Vue 3 SSR runtime. It owns server creation, host
-classification, isolated Vue applications and routers, rendering, generic
-plugin hydration state, browser hydration, assets, errors, timeouts, metrics,
-and request cleanup.
+A simple, production-ready SSR runtime for Vue 3 and Vite.
 
-It does not import or understand Apollo, GraphQL, REST clients, authentication,
-or application queries.
+Use it to run:
 
-## Minimal application
+- A server-rendered Vue website
+- A normal Vue SPA
+- Multiple SSR applications
+- SPA and SSR applications together
+- Applications on different domains or subdomains
+
+It includes routing, browser hydration, production builds, a managed Node server, health checks, custom endpoints, caching, timeouts, and Vue plugin support.
+
+## Features
+
+- Vue 3 server-side rendering
+- Normal Vue SPA support
+- SPA and SSR in one project
+- Vue Router support
+- Automatic browser hydration
+- Multiple applications and HTML entries
+- Domain and subdomain routing
+- Apollo, GraphQL, REST, Pinia, and i18n support
+- SEO metadata and status codes
+- Custom server endpoints
+- Health and readiness checks
+- Request timeouts
+- Optional response caching
+- Graceful shutdown
+- TypeScript support
+
+## Installation
+
+```bash
+npm install vue-ssr-lite vue vue-router @vue/server-renderer
+npm install --save-dev vite @vitejs/plugin-vue
+```
+
+Using Yarn:
+
+```bash
+yarn add vue-ssr-lite vue vue-router @vue/server-renderer
+yarn add --dev vite @vitejs/plugin-vue
+```
+
+## Choose Your Application Type
+
+`vue-ssr-lite` supports two application types.
+
+### SPA
+
+Use `kind: 'spa'` for a normal Vue application that runs in the browser.
+
+Examples:
+
+- Admin dashboard
+- Internal application
+- Editor
+- Authenticated application
+- Client-side portal
+
+A SPA keeps its normal Vite `main.ts` entry.
+
+### SSR
+
+Use `kind: 'ssr'` for a Vue application that should render on the server and hydrate in the browser.
+
+Examples:
+
+- Public website
+- Storefront
+- Blog
+- Marketing website
+- Documentation website
+- SEO-focused application
+
+An SSR application is defined with `defineSsrApplication()`.
+
+## Quick Start: SPA and SSR Together
+
+The following example creates:
+
+- A dashboard SPA on `app.example.com`
+- A server-rendered website on all other hosts
+
+## 1. Create the SPA Application
+
+Create a normal Vue entry:
 
 ```ts
-import { defineSsrApplication } from 'vue-ssr-lite'
-import apolloConfiguration from './config/ApolloConfiguration'
-import StorefrontApp from './StorefrontApp.vue'
-import { storefrontRoutes } from './routes'
+// src/spa/main.ts
+import { createApp } from 'vue'
+import App from './App.vue'
+import router from './router'
 
-export const storefrontApplication = defineSsrApplication({
-  id: 'storefront',
-  rootComponent: StorefrontApp,
-  routes: storefrontRoutes,
-  plugins: [apolloConfiguration],
+const app = createApp(App)
+
+app.use(router)
+app.mount('#app')
+```
+
+Create the SPA root component:
+
+```vue
+<!-- src/spa/App.vue -->
+<script setup lang="ts">
+import { RouterView } from 'vue-router'
+</script>
+
+<template>
+	<RouterView />
+</template>
+```
+
+Create the SPA HTML entry:
+
+```html
+<!-- index.html -->
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1" />
+		<title>Dashboard</title>
+	</head>
+
+	<body>
+		<div id="app"></div>
+
+		<script
+			type="module"
+			src="/src/spa/main.ts"></script>
+	</body>
+</html>
+```
+
+This remains a normal Vue and Vite SPA. No special SPA application definition is required.
+
+## 2. Create the SSR Application
+
+Create the SSR root component:
+
+```vue
+<!-- src/website/App.vue -->
+<script setup lang="ts">
+import { RouterView } from 'vue-router'
+</script>
+
+<template>
+	<RouterView />
+</template>
+```
+
+Create the SSR routes:
+
+```ts
+// src/website/routes.ts
+import type { RouteRecordRaw } from 'vue-router'
+
+import HomePage from './pages/HomePage.vue'
+import AboutPage from './pages/AboutPage.vue'
+import NotFoundPage from './pages/NotFoundPage.vue'
+
+export const websiteRoutes: RouteRecordRaw[] = [
+	{
+		path: '/',
+		component: HomePage,
+	},
+	{
+		path: '/about',
+		component: AboutPage,
+	},
+	{
+		path: '/:pathMatch(.*)*',
+		component: NotFoundPage,
+	},
+]
+```
+
+Define the SSR application:
+
+```ts
+// src/website/SsrApplication.ts
+import { defineSsrApplication } from 'vue-ssr-lite'
+
+import App from './App.vue'
+import { websiteRoutes } from './routes'
+
+export const websiteApplication = defineSsrApplication({
+	id: 'website',
+	rootComponent: App,
+	routes: websiteRoutes,
 })
 ```
 
-`plugins` contains ordinary Vue plugins. `vue-ssr-lite` provides the generic
-request and hydration contexts before installing them, so each plugin can
-derive request scope and contribute serializable state without a framework
-adapter or application `install` callback.
+Create its HTML template:
 
-Declare SPA/SSR host routing and minimal public configuration:
+```html
+<!-- site.html -->
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1" />
+	</head>
+
+	<body>
+		<div id="app"></div>
+	</body>
+</html>
+```
+
+The SSR browser entry and hydration setup are added automatically.
+
+## 3. Create the Runtime
+
+The runtime tells the package which application should handle each host.
 
 ```ts
+// src/SsrRuntime.ts
 import { defineSsrRuntime } from 'vue-ssr-lite'
-import { storefrontApplication } from './StorefrontApplication'
+
+import { websiteApplication } from './website/SsrApplication'
 
 export default defineSsrRuntime({
-  name: 'unified-app',
-  entries: [
-    {
-      id: 'admin',
-      kind: 'spa',
-      template: 'index.html',
-      hosts: ['admin.example.com'],
-    },
-    {
-      id: 'storefront',
-      kind: 'ssr',
-      template: 'site.html',
-      hosts: ['*'],
-      application: storefrontApplication,
-    },
-  ],
-  server: {
-    publicConfig: { shopBaseDomain: 'shop.example.com' },
-  },
+	name: 'my-platform',
+
+	entries: [
+		{
+			id: 'dashboard',
+			kind: 'spa',
+			template: 'index.html',
+			hosts: ['app.example.com', 'localhost'],
+		},
+		{
+			id: 'website',
+			kind: 'ssr',
+			template: 'site.html',
+			hosts: ['*'],
+			application: websiteApplication,
+		},
+	],
+
+	server: {
+		host: '0.0.0.0',
+		port: Number(process.env.PORT || 4173),
+
+		publicConfig: {
+			apiUrl: process.env.PUBLIC_API_URL || 'http://localhost:4000',
+		},
+	},
 })
 ```
 
-Register the SSR browser entry in Vite:
+The specific SPA hostname is checked first. The `*` SSR entry handles all remaining hosts.
+
+## 4. Configure Vite
+
+Register the SSR application and the normal SPA HTML entry:
 
 ```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 
-export default {
-  plugins: [
-    vueSsrLite({
-      applications: [{
-        id: 'storefront',
-        definition: 'src/StorefrontApplication.ts',
-        exportName: 'storefrontApplication',
-        template: 'site.html',
-      }],
-      spaEntries: { admin: 'index.html' },
-    }),
-  ],
-}
+export default defineConfig({
+	plugins: [
+		vue(),
+
+		vueSsrLite({
+			applications: [
+				{
+					id: 'website',
+					definition: 'src/website/SsrApplication.ts',
+					exportName: 'websiteApplication',
+					template: 'site.html',
+				},
+			],
+
+			spaEntries: {
+				dashboard: 'index.html',
+			},
+		}),
+	],
+})
 ```
 
-The package Vite plugin owns Vue/Router deduplication and keeps
-`vue-ssr-lite` external so the managed server and consumer bundle share the
-same runtime. API-client Vite plugins own their own dependency identity.
+### `applications`
 
-## Request lifecycle
+Contains applications that use server-side rendering and browser hydration.
 
-For every SSR request the package:
+### `spaEntries`
 
-1. classifies the normalized host and deployment role;
-2. creates a new Vue app, memory router, state, head, response, abort signal,
-   request context, and hydration controller;
-3. provides globally stable request/hydration injection keys;
-4. installs generic application plugins;
-5. resolves the route and waits for native Vue server-prefetch work;
-6. renders HTML and collects plugin hydration state;
-7. serializes escaped state into the application document; and
-8. disposes all request-owned plugin resources.
+Contains normal Vite SPA HTML entries.
 
-Browser hydration restores the serialized application/plugin state before
-component setup and mounts through the same application definition.
+Do not add SPA applications to the `applications` array.
 
-## Public package boundaries
-
-- `vue-ssr-lite`: isomorphic definitions, request context, hydration contract,
-  serialization, and public types.
-- `vue-ssr-lite/client`: browser hydration only.
-- `vue-ssr-lite/server`: renderer, Node lifecycle, host/proxy/cookie handling,
-  assets, readiness, response caching, and shutdown.
-- `vue-ssr-lite/vite`: HTML transformation, virtual browser entries, framework
-  identity, and build inputs.
-
-Application code may define routes, generic plugins, typed state/extensions,
-head/status/redirect behavior, host entries, response caches, endpoints, and
-service readiness. It never calls `renderToString`, manages API-client caches,
-injects hydration HTML, starts the server, or performs request cleanup.
-
-## Commands
+## 5. Add Commands
 
 ```json
 {
-  "scripts": {
-    "dev": "vue-ssr-lite dev --runtime src/SsrRuntime.ts",
-    "build": "vue-ssr-lite build --runtime src/SsrRuntime.ts",
-    "start": "vue-ssr-lite start"
-  }
+	"scripts": {
+		"dev": "vue-ssr-lite dev --runtime src/SsrRuntime.ts",
+		"build": "vue-ssr-lite build --runtime src/SsrRuntime.ts",
+		"start": "vue-ssr-lite start"
+	}
 }
 ```
 
-Production emits the consumer server runtime at
-`dist/server/SsrRuntime.js` and browser assets under `dist/client`.
+## 6. Start Development
+
+```bash
+npm run dev
+```
+
+Build and run production:
+
+```bash
+npm run build
+npm run start
+```
+
+## SSR-Only Application
+
+For a project that only needs SSR:
+
+```ts
+export default defineSsrRuntime({
+	name: 'my-website',
+
+	entries: [
+		{
+			id: 'website',
+			kind: 'ssr',
+			template: 'site.html',
+			hosts: ['*'],
+			application: websiteApplication,
+		},
+	],
+
+	server: {
+		publicConfig: {},
+	},
+})
+```
+
+Vite configuration:
+
+```ts
+vueSsrLite({
+	applications: [
+		{
+			id: 'website',
+			definition: 'src/website/SsrApplication.ts',
+			exportName: 'websiteApplication',
+			template: 'site.html',
+		},
+	],
+})
+```
+
+## SPA-Only Application
+
+A runtime can also serve a normal SPA without an SSR application:
+
+```ts
+export default defineSsrRuntime({
+	name: 'my-dashboard',
+
+	entries: [
+		{
+			id: 'dashboard',
+			kind: 'spa',
+			template: 'index.html',
+			hosts: ['*'],
+		},
+	],
+
+	server: {
+		publicConfig: {},
+	},
+})
+```
+
+Vite configuration still requires at least one SSR application in the current `vueSsrLite()` API. For a completely SPA-only project, use normal Vite without the `vueSsrLite()` plugin.
+
+## Using the Same Vue Plugins
+
+You may use the same plugin configuration in your SPA and SSR applications.
+
+For example:
+
+```ts
+// src/config/apollo.ts
+import { defineApollo } from 'vue-apollo-client'
+
+export default defineApollo(({ publicConfig }) => ({
+	endPoints: {
+		default:
+			publicConfig?.graphqlEndpoint ||
+			import.meta.env.VITE_GRAPHQL_ENDPOINT,
+	},
+}))
+```
+
+Use it in the SPA:
+
+```ts
+// src/spa/main.ts
+import { createApp } from 'vue'
+
+import apollo from '../config/apollo'
+import App from './App.vue'
+import router from './router'
+
+const app = createApp(App)
+
+app.use(apollo)
+app.use(router)
+app.mount('#app')
+```
+
+Use the same configuration in SSR:
+
+```ts
+// src/website/SsrApplication.ts
+import { defineSsrApplication } from 'vue-ssr-lite'
+
+import apollo from '../config/apollo'
+import App from './App.vue'
+import { websiteRoutes } from './routes'
+
+export const websiteApplication = defineSsrApplication({
+	id: 'website',
+	rootComponent: App,
+	routes: websiteRoutes,
+	plugins: [apollo],
+})
+```
+
+This allows one plugin configuration to support both application types.
+
+You can use the same approach with:
+
+- Apollo and GraphQL
+- Pinia
+- i18n
+- Theme providers
+- REST clients
+- Authentication plugins
+- Analytics plugins
+- Custom Vue plugins
+
+## Using GraphQL in SSR
+
+Keep GraphQL operations in `.graphql` files:
+
+```graphql
+query GetPosts {
+	posts {
+		id
+		title
+	}
+}
+```
+
+Use the generated composable in the Vue page:
+
+```vue
+<script setup lang="ts">
+import { useGetPostsQuery } from '../graphql'
+
+const { result, loading, error } = useGetPostsQuery(
+	{},
+	{
+		ssr: true,
+		fetchPolicy: 'cache-first',
+	},
+)
+</script>
+
+<template>
+	<main>
+		<p v-if="loading">Loading...</p>
+
+		<p v-else-if="error">
+			{{ error.message }}
+		</p>
+
+		<article
+			v-for="post in result?.posts ?? []"
+			:key="post.id">
+			<h2>{{ post.title }}</h2>
+		</article>
+	</main>
+</template>
+```
+
+The same generated composable can also be used inside the SPA.
+
+Use `ssr: true` for public data that should be included in server-rendered HTML.
+
+Use `ssr: false` for browser-only or private queries.
+
+## Using REST APIs
+
+REST APIs can be used through:
+
+- Native `fetch`
+- Axios
+- Ky
+- A custom Vue plugin
+- Another SSR-compatible data package
+
+Example:
+
+```vue
+<script setup lang="ts">
+import { onServerPrefetch, ref } from 'vue'
+
+interface Post {
+	id: string
+	title: string
+}
+
+const posts = ref<Post[]>([])
+
+const loadPosts = async () => {
+	const response = await fetch('https://api.example.com/posts')
+
+	posts.value = await response.json()
+}
+
+onServerPrefetch(loadPosts)
+</script>
+
+<template>
+	<article
+		v-for="post in posts"
+		:key="post.id">
+		<h2>{{ post.title }}</h2>
+	</article>
+</template>
+```
+
+For reusable REST caching and hydration, register an SSR-compatible Vue plugin in the `plugins` array.
+
+## Public Configuration
+
+Pass public values from the runtime:
+
+```ts
+server: {
+  publicConfig: {
+    apiUrl:
+      'https://api.example.com',
+    graphqlEndpoint:
+      'https://api.example.com/graphql',
+  },
+}
+```
+
+Access them in an SSR component:
+
+```ts
+import { useSsrRequestContext } from 'vue-ssr-lite'
+
+const context = useSsrRequestContext()
+
+const apiUrl = context.publicConfig.apiUrl
+```
+
+Only include values that are safe to expose to the browser.
+
+## SEO
+
+Set page metadata from a component:
+
+```ts
+import { useSsrRequestContext } from 'vue-ssr-lite'
+
+const context = useSsrRequestContext()
+
+context.head.value = {
+	title: 'Products',
+	description: 'Browse our latest products.',
+	robots: 'index, follow',
+	canonicalUrl: 'https://example.com/products',
+	ogTitle: 'Products',
+	ogDescription: 'Browse our latest products.',
+	ogImage: 'https://example.com/social.jpg',
+	twitterCard: 'summary_large_image',
+}
+```
+
+## Status Codes
+
+```ts
+const context = useSsrRequestContext()
+
+context.response.statusCode = 404
+```
+
+## Redirects
+
+```ts
+const context = useSsrRequestContext()
+
+context.response.redirect = {
+	location: '/new-page',
+	statusCode: 307,
+}
+```
+
+## Domain Routing
+
+Exact hostname:
+
+```ts
+hosts: ['example.com']
+```
+
+Subdomains:
+
+```ts
+hosts: ['*.example.com']
+```
+
+Exact hostname and subdomains:
+
+```ts
+hosts: ['example.com', '*.example.com']
+```
+
+Catch-all:
+
+```ts
+hosts: ['*']
+```
+
+Do not include protocols or paths in host values.
+
+## Custom Endpoints
+
+```ts
+endpoints: [
+	{
+		id: 'robots',
+
+		match(request) {
+			return request.pathname === '/robots.txt'
+		},
+
+		handle() {
+			return {
+				statusCode: 200,
+				body: 'User-agent: *\nAllow: /',
+				headers: {
+					'content-type': 'text/plain; charset=utf-8',
+				},
+			}
+		},
+	},
+]
+```
+
+Custom endpoints can be used for:
+
+- `robots.txt`
+- `sitemap.xml`
+- Verification files
+- Public JSON endpoints
+
+## Health Checks
+
+The server includes:
+
+```text
+/healthz
+/readyz
+```
+
+Add readiness checks:
+
+```ts
+readiness: [
+	{
+		id: 'api',
+
+		async run() {
+			const response = await fetch('https://api.example.com/health')
+
+			if (!response.ok) {
+				throw new Error('API is unavailable.')
+			}
+		},
+	},
+]
+```
+
+## Response Caching
+
+```ts
+import { createSsrMemoryResponseCache } from 'vue-ssr-lite/server'
+
+const responseCache = createSsrMemoryResponseCache({
+	maxEntries: 500,
+})
+```
+
+Add it to an SSR entry:
+
+```ts
+{
+  id: 'website',
+  kind: 'ssr',
+  template: 'site.html',
+  hosts: ['*'],
+  application: websiteApplication,
+
+  responseCache: {
+    store: responseCache,
+    ttlMs: 60_000,
+  },
+}
+```
+
+## Server Configuration
+
+```ts
+server: {
+  host: '0.0.0.0',
+  port: 4173,
+
+  publicConfig: {},
+
+  requestTimeoutMs: 15_000,
+  shutdownTimeoutMs: 10_000,
+
+  healthPath: '/healthz',
+  readinessPath: '/readyz',
+
+  trustProxy: false,
+
+  cookieAllowlist: [],
+  cookieDenylist: [],
+}
+```
+
+## Summary
+
+For a SPA:
+
+1. Create a normal Vue `main.ts`.
+2. Create a normal HTML entry.
+3. Register the HTML file in `spaEntries`.
+4. Add a runtime entry with `kind: 'spa'`.
+
+For SSR:
+
+1. Create the Vue root component and routes.
+2. Define it with `defineSsrApplication()`.
+3. Create an SSR HTML template.
+4. Register it in `applications`.
+5. Add a runtime entry with `kind: 'ssr'`.
+
+Both application types can run from the same project, build process, and production server.
+
+## License
+
+MIT
