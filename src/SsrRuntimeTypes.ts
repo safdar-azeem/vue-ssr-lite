@@ -1,5 +1,5 @@
 import type { App, Component, Plugin } from 'vue'
-import type { Router, RouteRecordRaw } from 'vue-router'
+import type { Router, RouteRecordRaw, RouterScrollBehavior } from 'vue-router'
 import type {
   SsrHydrationContext,
   SsrHydrationController,
@@ -134,6 +134,12 @@ export interface SsrApplicationDefinition<
   rootComponent: Component
   mountSelector?: string
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+  /**
+   * Optional router scroll behaviour. When omitted, a sensible default is used
+   * (restore saved position, scroll to hash, otherwise top). Provide one to keep
+   * an application's existing behaviour exactly when adopting the definition.
+   */
+  scrollBehavior?: RouterScrollBehavior
   /** Generic Vue plugins installed for every isolated server/browser app. */
   plugins?: readonly Plugin[]
   createInitialState?: () => TApplicationState
