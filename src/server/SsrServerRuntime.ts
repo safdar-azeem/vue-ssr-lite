@@ -492,9 +492,16 @@ export const createSsrManagedServer = async (
         template,
         entry.mountSelector || application.mountSelector || '#app'
       )
+      const requestTimeoutMs = serverOptions.requestTimeoutMs ?? 15_000
       const rendered = await withTimeout(
-        renderSsrApplication(application, renderRequest),
-        serverOptions.requestTimeoutMs ?? 15_000,
+        renderSsrApplication(application, renderRequest, {
+          maxResolutionPasses: serverOptions.maxResolutionPasses,
+          resolutionDeadlineMs:
+            serverOptions.resolutionDeadlineMs ?? requestTimeoutMs,
+          diagnostics: serverOptions.diagnostics ?? !options.production,
+          logger: serverOptions.logger,
+        }),
+        requestTimeoutMs,
         controller
       )
       if (rendered.response.redirect) {
