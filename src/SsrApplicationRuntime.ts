@@ -76,12 +76,14 @@ export const createSsrApplication = async <
     ? createRouter({
         history: options.server ? createMemoryHistory() : createWebHistory(),
         routes,
-        scrollBehavior(to, from, savedPosition) {
-          if (savedPosition) return savedPosition
-          if (to.hash) return { el: to.hash, top: 24 }
-          if (to.fullPath === from.fullPath) return
-          return { left: 0, top: 0 }
-        },
+        scrollBehavior:
+          definition.scrollBehavior ??
+          ((to, from, savedPosition) => {
+            if (savedPosition) return savedPosition
+            if (to.hash) return { el: to.hash, top: 24 }
+            if (to.fullPath === from.fullPath) return
+            return { left: 0, top: 0 }
+          }),
       })
     : null
 
