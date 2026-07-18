@@ -45,10 +45,14 @@ It includes routing, browser hydration, production builds, a managed Node server
 CLI binary:
 
 ```bash
-vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--server-output dist/server/SsrRuntime.js]
+vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--server-output dist/server/SsrRuntime.js] [--hmr-port 31001]
 ```
 
 Requires Node.js 20 or newer.
+
+Development servers use an operating-system-assigned HMR WebSocket port, so
+multiple `vue-ssr-lite dev` processes can run concurrently. Use `--hmr-port`
+or `VUE_SSR_LITE_HMR_PORT` when a proxy or container requires a fixed port.
 
 ## Installation
 
