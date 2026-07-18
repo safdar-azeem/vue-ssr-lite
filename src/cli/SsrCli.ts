@@ -2,12 +2,14 @@
 import { resolve, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
+import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 
 interface SsrCliOptions {
   command: 'dev' | 'build' | 'start'
   root: string
   runtime: string
   serverOutput: string
+  hmrPort?: string
 }
 
 const readFlag = (args: string[], name: string): string | undefined => {
@@ -19,7 +21,7 @@ const parseArguments = (args: string[]): SsrCliOptions => {
   const command = args[0]
   if (!['dev', 'build', 'start'].includes(command)) {
     throw new Error(
-      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts]'
+      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--hmr-port 31001]'
     )
   }
   const root = resolve(readFlag(args, '--root') || process.cwd())
@@ -31,10 +33,14 @@ const parseArguments = (args: string[]): SsrCliOptions => {
       root,
       readFlag(args, '--server-output') || 'dist/server/SsrRuntime.js'
     ),
+    hmrPort: readFlag(args, '--hmr-port') || process.env.VUE_SSR_LITE_HMR_PORT,
   }
 }
 
 const runServer = async (options: SsrCliOptions, production: boolean) => {
+  const hmrPort = production
+    ? undefined
+    : await resolveSsrCliHmrPort(options.hmrPort)
   const createViteServer = production
     ? undefined
     : (await import('vite')).createServer
@@ -42,7 +48,10 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
     ? undefined
     : await createViteServer!({
         root: options.root,
-        server: { middlewareMode: true },
+        server: {
+          middlewareMode: true,
+          hmr: { port: hmrPort, clientPort: hmrPort },
+        },
         appType: 'custom',
       })
   const runtimeId = `/${relative(options.root, options.runtime).replaceAll('\\', '/')}`
