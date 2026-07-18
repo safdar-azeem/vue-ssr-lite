@@ -1,6 +1,8 @@
 # Builto Website Builder compatibility analysis
 
-Builto was analyzed but intentionally not modified in this phase.
+Builto's public website builder has now been migrated onto the package's SSR,
+hydration and unified-bootstrap contracts. This document records the original
+analysis and the resolution status of each migration item.
 
 ## Current public runtime
 
@@ -19,13 +21,14 @@ The package API supports a later Builto migration without Builto-specific runtim
 - Draft preview may remain client-only by returning an application shell; no builder authentication cookie needs to enter public SSR.
 - Cache keys can be supplied externally using application + normalized hostname/resolved website + route + publication version + locale. The default package cache remains off.
 
-## Migration cautions for the later phase
+## Migration status
 
-- `SiteApp.vue` currently reads `window` at module setup boundaries and must receive location from the request context/router.
-- The current `network-only` public shell policy would intentionally bypass hydration cache; it should become cache-first for published initial data or explicitly rely on restored state.
-- Public template dynamic imports and every `vlite3` block must pass server-render smoke tests.
-- Router v5 compatibility must be validated against the package's declared `>=4 <6` peer range.
-- Draft and published data must remain isolated, and only verified published snapshots may be anonymously cacheable.
-- The builder entry and its authenticated Apollo/global stores must remain outside the public client/server entry graphs.
+- **Resolved.** `SiteApp.vue` no longer reads `window` at setup; it is a thin root over the shared runtime and derives location from the router/request context. Section data enters `WebsiteSectionDataState` through `ssrWatch` and the section loaders, never a discarded watcher.
+- **Resolved.** The public shell query is `cache-first`; hydration serves from the restored Apollo cache with no duplicate request (single restore path in `vue-apollo-client`).
+- **Resolved.** The public portfolio template registers an eager renderer, and `WebsiteRenderer` resolves it synchronously; the registry now rejects an SSR template that lacks a synchronous renderer.
+- **Resolved.** Router v5 compatibility is validated. `builto-webBuilder` runs on `vue-router` v5 and its route contract test passes against the package's `>=4 <6` peer range; `erp-app` and the package's own suite exercise v4. Route matching, memory/web history replay and `resolve()` behaviour are identical across both majors for the record shapes used here.
+- **Resolved.** Home, dynamic pages, blog/project listings and detail slugs, and unknown depths are real route records (`WebsitePublicRoutes.ts`), producing correct 200/404 status naturally. Draft and published data remain isolated; only verified published snapshots are anonymously cacheable.
+- **Resolved.** The builder entry uses a separate application id (`website-builder`) and auth boundary (`admin`); the public client (`website-public`) reads no token on the server. Only the request-scoped, allow-listed preview cookie is forwarded.
 
-These are generic extension-point requirements; none requires an application-name conditional in `vue-ssr-lite`.
+These are generic extension-point requirements; none required an
+application-name conditional in `vue-ssr-lite`.
