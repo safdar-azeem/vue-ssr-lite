@@ -1,4 +1,4 @@
-import { createSSRApp, ref } from 'vue'
+import { createApp, createSSRApp, ref } from 'vue'
 import {
   createMemoryHistory,
   createRouter,
@@ -9,6 +9,11 @@ import {
   createSsrHydrationController,
   SSR_HYDRATION_CONTEXT,
 } from './SsrHydrationRuntime'
+import {
+  createSsrResolutionController,
+  SSR_REQUEST_RESOLUTION,
+  type SsrResolutionController,
+} from './SsrRequestResolution'
 import type {
   SsrApplicationDefinition,
   SsrCreatedApplication,
@@ -24,6 +29,21 @@ export interface SsrCreateApplicationOptions<
   server: boolean
   request: SsrRenderRequest<TPublicConfig>
   hydrationState?: SsrHydrationState<TApplicationState, TPublicConfig> | null
+  /**
+   * Pure client-side SPA mount (no server markup to hydrate). Uses `createApp`
+   * instead of `createSSRApp` so Vue performs a full client render.
+   */
+  spa?: boolean
+  /**
+   * Server re-render only: opaque plugin state carried from the previous pass,
+   * restored so plugins (an API client cache, an i18n loader) resume warm.
+   */
+  resumeState?: Record<string, unknown> | null
+  /**
+   * Reuse a resolution controller across render passes of the same request.
+   * A fresh one is created when omitted.
+   */
+  resolution?: SsrResolutionController
 }
 
 export const createSsrApplication = async <
@@ -77,11 +97,16 @@ export const createSsrApplication = async <
 
   // The hydration controller owns generic plugin state contribution and
   // restoration. On the browser it carries the plugin state serialized during
-  // the server render so installed plugins can restore before mount.
+  // the server render so installed plugins can restore before mount. On a
+  // server re-render pass it carries `resumeState` so plugins resume warm.
   const hydration = createSsrHydrationController(
-    options.hydrationState?.plugins,
+    options.hydrationState?.plugins ?? options.resumeState,
     options.server
   )
+  // The resolution controller is shared across render passes of one request so
+  // registered work and pass requests accumulate coherently.
+  const resolution =
+    options.resolution ?? createSsrResolutionController(options.server)
 
   const baseContext = {
     applicationId: definition.id,
@@ -93,6 +118,7 @@ export const createSsrApplication = async <
     head: ref(null),
     response,
     hydration,
+    resolution,
   }
   const extension = definition.createExtension
     ? await definition.createExtension(baseContext as any)
@@ -104,12 +130,16 @@ export const createSsrApplication = async <
   > = { ...baseContext, extension }
 
   try {
-    const app = createSSRApp(definition.rootComponent)
+    const app = options.spa
+      ? createApp(definition.rootComponent)
+      : createSSRApp(definition.rootComponent)
     if (router) app.use(router)
-    // Provide the generic hydration contract BEFORE the application installs
-    // its own plugins, so a plugin's `install()` can inject it (via
-    // `app.runWithContext`) to restore state ahead of the first component.
+    // Provide the generic hydration and resolution contracts BEFORE the
+    // application installs its own plugins, so a plugin's `install()` can
+    // inject them (via `app.runWithContext`) to restore state ahead of the
+    // first component and register in-flight work.
     app.provide(SSR_HYDRATION_CONTEXT, hydration)
+    app.provide(SSR_REQUEST_RESOLUTION, resolution)
     app.provide(SSR_REQUEST_CONTEXT, context)
     for (const plugin of definition.plugins ?? []) app.use(plugin)
     await definition.install?.({
@@ -117,10 +147,11 @@ export const createSsrApplication = async <
       router,
       context,
       hydration,
+      resolution,
       server: options.server,
     })
 
-    return { app, router, context, hydration }
+    return { app, router, context, hydration, resolution }
   } catch (error) {
     hydration.dispose()
     throw error
