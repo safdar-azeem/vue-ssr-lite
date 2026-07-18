@@ -74,7 +74,7 @@ yarn add --dev vite @vitejs/plugin-vue
 
 ### SPA
 
-Use `kind: 'spa'` for a normal Vue application that runs in the browser.
+Use `kind: 'spa'` for a Vue application that runs in the browser.
 
 Examples:
 
@@ -84,7 +84,23 @@ Examples:
 - Authenticated application
 - Client-side portal
 
-A SPA keeps its normal Vite `main.ts` entry.
+A single application definition is mountable in three modes — server render,
+browser hydration of a server render, and pure client-side SPA. Define the app
+once with `defineSsrApplication()` and mount it in the SPA entry with
+`mountSpaApplication()`, so the SPA and SSR paths of the same application share
+one plugin set, router and public-config delivery and cannot drift:
+
+```ts
+// src/main.ts — thin SPA entry over the shared definition
+import { mountSpaApplication } from 'vue-ssr-lite/client'
+import { app } from './app' // defineSsrApplication({ ... })
+
+void mountSpaApplication(app)
+```
+
+A plain Vite `main.ts` (`createApp(App).use(router).mount('#app')`) still works
+for an application that never needs SSR, but prefer the unified definition when
+the same app also has an SSR entry.
 
 ### SSR
 
@@ -110,18 +126,30 @@ The following example creates:
 
 ## 1. Create the SPA Application
 
-Create a normal Vue entry:
+Define the application once and mount it through the package. Router creation,
+plugin installation, public-config delivery and mounting are owned by
+`vue-ssr-lite`, identically to the SSR and hydration paths:
 
 ```ts
-// src/spa/main.ts
-import { createApp } from 'vue'
+// src/spa/app.ts
+import { defineSsrApplication } from 'vue-ssr-lite'
 import App from './App.vue'
-import router from './router'
+import routes from './routes'
 
-const app = createApp(App)
+export const app = defineSsrApplication({
+  id: 'dashboard',
+  rootComponent: App,
+  routes,
+  plugins: [/* your Vue plugins */],
+})
+```
 
-app.use(router)
-app.mount('#app')
+```ts
+// src/spa/main.ts — thin entry
+import { mountSpaApplication } from 'vue-ssr-lite/client'
+import { app } from './app'
+
+void mountSpaApplication(app)
 ```
 
 Create the SPA root component:
@@ -161,7 +189,7 @@ Create the SPA HTML entry:
 </html>
 ```
 
-This remains a normal Vue and Vite SPA. No special SPA application definition is required.
+The same definition backs the SSR entry, so the SPA and SSR paths cannot drift.
 
 ## 2. Create the SSR Application
 
@@ -912,12 +940,66 @@ server: {
 
 `/healthz` and `/readyz` include the active `role` in their JSON responses.
 
+## Server-side data resolution
+
+`renderToString` awaits each component's native `onServerPrefetch`, which covers
+data consumed reactively inside the component that declared it. For work started
+OUTSIDE that lifecycle — a store action, an i18n loader, a lazy query — the
+package exposes a generic, API-client-neutral **resolution contract**.
+
+An installed plugin obtains it by injecting `SSR_REQUEST_RESOLUTION`
+(`Symbol.for('vue-ssr:request-resolution')`, resolvable without importing this
+package). It registers in-flight work with `track(promise)` and may call
+`requestAdditionalPass()`. After each render pass the renderer awaits registered
+work and re-renders when a plugin asked for another pass, up to
+`server.maxResolutionPasses` (default 4) and bounded by
+`server.resolutionDeadlineMs` and the request abort signal.
+
+A fully resolvable page completes in **one pass** — extra passes occur only when
+a plugin left work pending or requested one. `vue-ssr-lite` never inspects the
+work; it only awaits it.
+
+## SSR-safe reactivity
+
+During SSR, Vue does not flush the scheduler, so `watch(src, cb)` and
+`watchEffect` run at most once and are then discarded — the most common cause of
+"the shell renders but the content is missing" bugs. Server-safe APIs:
+
+| API | Server behaviour |
+| --- | --- |
+| `computed` | ✅ Lazily evaluated during render |
+| `ssrWatch(src, cb)` / `ssrWatchEffect(fn)` | ✅ Sync flush, active during render |
+| `watch(src, cb)` / `watchEffect(fn)` | ⚠️ Runs once (or never), then discarded |
+| `onServerPrefetch(async fn)` | ✅ Awaited before the component renders |
+| `onMounted` / `onUpdated` | ❌ Browser only |
+
+Use a `computed` to derive a value for the template; reach for `ssrWatch` /
+`ssrWatchEffect` (exported from `vue-ssr-lite` and `vue-ssr-lite/client`) when
+resolved data must drive an imperative side effect during the server render.
+
+## Runtime configuration helpers
+
+`vue-ssr-lite/server` provides declarative helpers so a runtime definition is
+configuration, not boilerplate: `ssrEnvBoolean`, `ssrEnvNumber`, `ssrEnvList`,
+`requireSsrEnv`, `requireSsrHostname`, `requireSsrEnum`, `createSsrConsoleLogger`
+and `createSsrSeoEndpoints` (`robots.txt` / `sitemap.xml` — `served`, `proxy` or
+`disallow` by option). Host helpers such as `normalizeSsrHost` remain exported;
+reuse them rather than re-implementing.
+
+## Development diagnostics
+
+When diagnostics are enabled (`server.diagnostics`, default on outside
+production) the renderer reports, with actionable messages: a loading
+placeholder or `aria-busy="true"` still present after resolution, a route that
+matched no component, and a body that resolved to nothing. These are dev-only
+warnings; production render paths are untouched.
+
 ## Summary
 
 For a SPA:
 
-1. Create a normal Vue `main.ts`.
-2. Create a normal HTML entry.
+1. Define the app once with `defineSsrApplication()`.
+2. Mount it in a thin `main.ts` with `mountSpaApplication()`.
 3. Register the HTML file in `spaEntries`.
 4. Add a runtime entry with `kind: 'spa'`.
 
