@@ -4,6 +4,10 @@ import type {
   SsrHydrationContext,
   SsrHydrationController,
 } from './SsrHydrationRuntime'
+import type {
+  SsrRequestResolution,
+  SsrResolutionController,
+} from './SsrRequestResolution'
 
 export type SsrHeaderValue = string | string[] | undefined
 export type SsrHeaders = Record<string, SsrHeaderValue>
@@ -53,6 +57,8 @@ export interface SsrRenderMetrics {
   totalDurationMs: number
   htmlBytes: number
   stateBytes: number
+  /** Number of render passes the resolution contract required. Usually 1. */
+  renderPasses: number
 }
 
 export interface SsrRenderRequest<TPublicConfig = unknown> {
@@ -95,6 +101,12 @@ export interface SsrRequestContext<
   response: SsrResponseState
   /** Generic hydration state contract for installed application plugins. */
   hydration: SsrHydrationContext
+  /**
+   * Generic server-render resolution contract. Installed plugins register
+   * in-flight work so the renderer can await it and re-render when resolution
+   * changes the tree. Present in every mode; a no-op outside the server render.
+   */
+  resolution: SsrRequestResolution
   extension: TExtension
 }
 
@@ -108,6 +120,8 @@ export interface SsrApplicationSetup<
   context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
   /** Generic hydration state contract for installed application plugins. */
   hydration: SsrHydrationContext
+  /** Generic server-render resolution contract for installed plugins. */
+  resolution: SsrRequestResolution
   server: boolean
 }
 
@@ -150,6 +164,8 @@ export interface SsrCreatedApplication<
   context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
   /** Per-request hydration controller owning plugin state and disposal. */
   hydration: SsrHydrationController
+  /** Per-request resolution controller, shared across render passes. */
+  resolution: SsrResolutionController
 }
 
 export interface SsrRenderResult<
@@ -285,6 +301,26 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
   publicConfig: TPublicConfig
   healthPath?: string
   readinessPath?: string
+  /**
+   * Maximum server render passes per request. The first pass always runs; extra
+   * passes only occur when an installed plugin left work pending or asked for
+   * another pass through the resolution contract. A fully resolvable page
+   * completes in one pass. Defaults to 4. Clamped to at least 1.
+   */
+  maxResolutionPasses?: number
+  /**
+   * Upper bound, in milliseconds, for awaiting registered resolution work
+   * BETWEEN passes. Independent of — and additionally capped by — the overall
+   * `requestTimeoutMs` and the request abort signal. Defaults to
+   * `requestTimeoutMs` when unset.
+   */
+  resolutionDeadlineMs?: number
+  /**
+   * Enables development-only render diagnostics (loading-placeholder detection,
+   * empty-route detection, discarded-watcher hints). Defaults to
+   * `NODE_ENV !== 'production'` when unset. Always inert in production.
+   */
+  diagnostics?: boolean
   logger?: SsrLogger
   onMetrics?: (metrics: SsrRenderMetrics) => void
   renderError?: (
