@@ -55,8 +55,6 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
       : () => vite!.ssrLoadModule(runtimeId),
   })
   await managed.listen()
-  const { host, port } = managed.address()
-  console.log(`[vue-ssr-lite] listening on ${host}:${port}`)
 
   let closing = false
   const close = async (signal: string) => {
@@ -64,10 +62,10 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
     closing = true
     try {
       await managed.close()
-      console.log(`[vue-ssr-lite] stopped after ${signal}`)
+      console.log(`stopped after ${signal}`)
       process.exitCode = 0
     } catch (error) {
-      console.error('[vue-ssr-lite] graceful shutdown failed', error)
+      console.error('graceful shutdown failed', error)
       process.exitCode = 1
     }
   }
@@ -98,6 +96,6 @@ const main = async () => {
 }
 
 main().catch((error) => {
-  console.error('[vue-ssr-lite] fatal error', error)
+  console.error('fatal error', error)
   process.exitCode = 1
 })
