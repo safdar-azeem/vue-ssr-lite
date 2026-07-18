@@ -21,14 +21,34 @@ It includes routing, browser hydration, production builds, a managed Node server
 - Automatic browser hydration
 - Multiple applications and HTML entries
 - Domain and subdomain routing
+- Runtime roles for one image / many process modes
 - Apollo, GraphQL, REST, Pinia, and i18n support
 - SEO metadata and status codes
 - Custom server endpoints
 - Health and readiness checks
 - Request timeouts
 - Optional response caching
+- Cookie allowlists and denylists
+- Proxy-aware host and protocol resolution
 - Graceful shutdown
 - TypeScript support
+
+## Package Entry Points
+
+| Import | Purpose |
+| --- | --- |
+| `vue-ssr-lite` | `defineSsrApplication`, `defineSsrRuntime`, request context, hydration helpers |
+| `vue-ssr-lite/client` | Browser hydration only |
+| `vue-ssr-lite/server` | Managed Node server, host matching, cookies, response cache |
+| `vue-ssr-lite/vite` | Vite plugin that wires HTML templates and virtual client entries |
+
+CLI binary:
+
+```bash
+vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--server-output dist/server/SsrRuntime.js]
+```
+
+Requires Node.js 20 or newer.
 
 ## Installation
 
@@ -246,9 +266,12 @@ export default defineSsrRuntime({
 		},
 	],
 
+	defaultEntryId: 'website',
+
 	server: {
 		host: '0.0.0.0',
 		port: Number(process.env.PORT || 4173),
+		role: process.env.APP_RUNTIME || 'unified',
 
 		publicConfig: {
 			apiUrl: process.env.PUBLIC_API_URL || 'http://localhost:4000',
@@ -258,6 +281,16 @@ export default defineSsrRuntime({
 ```
 
 The specific SPA hostname is checked first. The `*` SSR entry handles all remaining hosts.
+`defaultEntryId` is used when no host pattern matches.
+
+When the server starts, the console prints a ready message with a clickable local URL and the active role:
+
+```text
+✓  Server Ready
+
+  ➜ Local:  http://localhost:4173/
+  ➜ Role:   unified
+```
 
 ## 4. Configure Vite
 
@@ -647,6 +680,102 @@ hosts: ['*']
 
 Do not include protocols or paths in host values.
 
+Set `server.trustProxy` to `true` only when the Node process sits behind a trusted reverse proxy. Then `X-Forwarded-Host` and `X-Forwarded-Proto` are used for host matching and absolute URLs. Leave it `false` for direct local traffic.
+
+## Runtime Roles
+
+Roles let one codebase and one Docker image run as different process modes.
+
+- Set `server.role` to the active mode for this process.
+- Set `roles` on each entry to list which modes may serve that entry.
+- Omit `roles` (or omit `server.role`) to keep an entry available in every mode.
+
+Role names are application-defined strings. Common patterns:
+
+| Mode | Typical use |
+| --- | --- |
+| `unified` | Local development or a single process that serves every entry |
+| A private role | SPA / admin / back-office only |
+| A public role | SSR website / marketing / storefront only |
+
+Example:
+
+```ts
+export default defineSsrRuntime({
+	name: 'my-platform',
+
+	entries: [
+		{
+			id: 'admin',
+			kind: 'spa',
+			template: 'index.html',
+			hosts: ['app.example.com', 'localhost'],
+			roles: ['unified', 'admin'],
+		},
+		{
+			id: 'website',
+			kind: 'ssr',
+			template: 'site.html',
+			hosts: ['*'],
+			roles: ['unified', 'website'],
+			application: websiteApplication,
+		},
+	],
+
+	server: {
+		role: process.env.APP_RUNTIME || 'unified',
+		publicConfig: {},
+	},
+})
+```
+
+With that setup:
+
+- `APP_RUNTIME=unified` serves both entries (host routing still applies).
+- `APP_RUNTIME=admin` serves only the SPA entry.
+- `APP_RUNTIME=website` serves only the SSR entry.
+
+If a host matches an entry that the current role does not allow, the server responds with `421`.
+
+You can also load role-specific code only when needed:
+
+```ts
+export default async () => {
+	const role = process.env.APP_RUNTIME || 'unified'
+	const websiteApplication =
+		role === 'admin'
+			? undefined
+			: (await import('./website/SsrApplication')).websiteApplication
+
+	return defineSsrRuntime({
+		name: 'my-platform',
+		entries: [
+			{
+				id: 'admin',
+				kind: 'spa',
+				template: 'index.html',
+				hosts: ['app.example.com'],
+				roles: ['unified', 'admin'],
+			},
+			{
+				id: 'website',
+				kind: 'ssr',
+				template: 'site.html',
+				hosts: ['*'],
+				roles: ['unified', 'website'],
+				application: websiteApplication,
+			},
+		],
+		server: {
+			role,
+			publicConfig: {},
+		},
+	})
+}
+```
+
+`defineSsrRuntime` accepts either a plain object or an async factory function.
+
 ## Custom Endpoints
 
 ```ts
@@ -732,12 +861,29 @@ Add it to an SSR entry:
 }
 ```
 
+## Cookie Filtering
+
+SSR requests can forward a filtered `Cookie` header to upstream APIs.
+
+```ts
+server: {
+  cookieAllowlist: ['session'],
+  cookieDenylist: ['admin_token', 'refresh_token'],
+  publicConfig: {},
+}
+```
+
+- If `cookieAllowlist` is non-empty, only listed cookies are forwarded.
+- `cookieDenylist` always removes matching cookies.
+- Leave both empty when the browser talks to the API directly and SSR needs no cookies.
+
 ## Server Configuration
 
 ```ts
 server: {
   host: '0.0.0.0',
   port: 4173,
+  role: 'unified',
 
   publicConfig: {},
 
@@ -751,8 +897,16 @@ server: {
 
   cookieAllowlist: [],
   cookieDenylist: [],
+
+  logger: {
+    info: (event, details) => console.info(event, details ?? ''),
+    warn: (event, details) => console.warn(event, details ?? ''),
+    error: (event, details) => console.error(event, details ?? ''),
+  },
 }
 ```
+
+`/healthz` and `/readyz` include the active `role` in their JSON responses.
 
 ## Summary
 
@@ -770,6 +924,12 @@ For SSR:
 3. Create an SSR HTML template.
 4. Register it in `applications`.
 5. Add a runtime entry with `kind: 'ssr'`.
+
+Optional for multi-mode deployments:
+
+1. Choose role names for your project.
+2. Set `server.role` from an environment variable.
+3. Restrict each entry with `roles`.
 
 Both application types can run from the same project, build process, and production server.
 
