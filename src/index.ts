@@ -1,8 +1,11 @@
 export * from './SsrApplicationRuntime'
 export * from './SsrHydrationRuntime'
+export * from './SsrReactivityRuntime'
 export * from './SsrRequestContext'
+export * from './SsrRequestResolution'
 export * from './SsrRuntimeTypes'
 export * from './SsrSerialization'
+export * from './SsrDiagnosticsRuntime'
 
 import type {
   SsrApplicationDefinition,
