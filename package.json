@@ -1,10 +1,12 @@
 {
   "name": "vue-ssr-lite",
   "version": "0.1.7",
-  "description": "Fully managed, API-client-neutral Vue 3 SSR runtime with routing, generic plugin hydration, Vite, and Node server lifecycle.",
+  "description": "Vue 3 SSR runtime with routing, generic plugin hydration, Vite, and Node server lifecycle.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
+  "author": "safdar-azeem",
+  "repository": "https://github.com/safdar-azeem/vue-ssr-lite",
   "files": [
     "dist",
     "docs",
