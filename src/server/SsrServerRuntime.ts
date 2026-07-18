@@ -57,6 +57,25 @@ const parsePort = (value: number | undefined): number => {
   return port
 }
 
+const resolveLocalDisplayHost = (host: string): string => {
+  if (host === '0.0.0.0' || host === '::' || host === '::1') return 'localhost'
+  return host
+}
+
+const logServerReady = (host: string, port: number, role: string) => {
+  const localUrl = `http://${resolveLocalDisplayHost(host)}:${port}/`
+  console.log(
+    [
+      '',
+      '✓  Server Ready',
+      '',
+      `  ➜ Local:  ${localUrl}`,
+      `  ➜ Role:   ${role}`,
+      '',
+    ].join('\n')
+  )
+}
+
 const resolveRuntime = async (
   loaded: unknown
 ): Promise<SsrRuntimeDefinition<any>> => {
@@ -624,11 +643,11 @@ export const createSsrManagedServer = async (
         nodeServer.once('error', onError)
         nodeServer.listen(port, host, () => {
           nodeServer.off('error', onError)
-          initialServerOptions.logger?.info?.('ssr.server.listening', {
+          logServerReady(
             host,
             port,
-            role: initialServerOptions.role || 'default',
-          })
+            initialServerOptions.role || 'default'
+          )
           resolveListen()
         })
       }),
