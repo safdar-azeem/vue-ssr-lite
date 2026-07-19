@@ -171,21 +171,23 @@ describe('defineSsrConfig application domains', () => {
       '/app/ssr.config.ts',
       entries.applications
     )
-    expect(runtime).toContain('import __ssrUserConfig from "./ssr.config.ts"')
+    expect(runtime).toContain('import __ssrUserConfig from "/app/ssr.config.ts"')
     expect(runtime).toContain(
-      'import { createErpApplication as __ssrApp0 } from "./src/ErpBootstrap.ts"'
+      'import { createErpApplication as __ssrApp0 } from "/app/src/ErpBootstrap.ts"'
     )
     expect(runtime).toContain(
-      'import { shopSsrApplication as __ssrApp1 } from "./src/ShopSsrApplication.ts"'
+      'import { shopSsrApplication as __ssrApp1 } from "/app/src/ShopSsrApplication.ts"'
     )
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
 
     const spaClient = generateSsrClientModule('/app', entries.applications[0])
     expect(spaClient).toContain('mountSpaApplication')
     expect(spaClient).toContain('id: "erp"')
+    expect(spaClient).toContain('from "/app/src/ErpBootstrap.ts"')
 
     const ssrClient = generateSsrClientModule('/app', entries.applications[1])
     expect(ssrClient).toContain('hydrateSsrApplication')
     expect(ssrClient).toContain('id: "storefront"')
+    expect(ssrClient).toContain('from "/app/src/ShopSsrApplication.ts"')
   })
 })
