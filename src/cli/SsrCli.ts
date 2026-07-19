@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { resolve, relative } from 'node:path'
+import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { resolveSsrConfigPath } from '../SsrConfigCompileRuntime'
+import {
+  resolveSsrConfigPath,
+  SSR_RUNTIME_VIRTUAL_ID,
+} from '../SsrConfigCompileRuntime'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 
@@ -56,14 +59,13 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
         },
         appType: 'custom',
       })
-  const configId = `/${relative(options.root, options.config).replaceAll('\\', '/')}`
   const managed = await createSsrManagedServer({
     production,
     root: options.root,
     vite,
     loadRuntime: production
       ? () => import(pathToFileURL(options.serverOutput).href)
-      : () => vite!.ssrLoadModule(configId),
+      : () => vite!.ssrLoadModule(SSR_RUNTIME_VIRTUAL_ID),
   })
   await managed.listen()
 
@@ -90,7 +92,7 @@ const runBuild = async (options: SsrCliOptions) => {
   await viteBuild({
     root: options.root,
     build: {
-      ssr: options.config,
+      ssr: SSR_RUNTIME_VIRTUAL_ID,
       outDir: resolve(options.root, 'dist/server'),
       emptyOutDir: true,
       rollupOptions: {
