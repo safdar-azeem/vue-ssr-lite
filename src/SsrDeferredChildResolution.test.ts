@@ -12,6 +12,7 @@ import { defineSsrApplication } from './index'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
+import { createTestRenderRequest } from './SsrTestFixtures'
 
 /**
  * The generic "parent query → parent result determines children → children
@@ -126,16 +127,7 @@ const buildApplication = (source: ReturnType<typeof createSource>) =>
     createExtension: () => ({ source }),
   })
 
-const request = (host: string) => ({
-  requestId: host,
-  url: `https://${host}/`,
-  host,
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
-  publicConfig: {},
-  signal: new AbortController().signal,
-})
+const request = (host: string) => createTestRenderRequest(host)
 
 describe('deferred parent → child SSR resolution (no application orchestration)', () => {
   it('discovers and resolves child data after the parent, in a bounded second pass', async () => {
