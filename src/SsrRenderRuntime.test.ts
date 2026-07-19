@@ -4,6 +4,7 @@ import { RouterView, type RouteRecordRaw } from 'vue-router'
 import { defineSsrApplication } from './index'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { renderSsrApplication } from './SsrRenderRuntime'
+import { createTestRenderRequest } from './SsrTestFixtures'
 
 const Root = defineComponent({
   setup() {
@@ -25,16 +26,11 @@ const application = defineSsrApplication({
   },
 })
 
-const request = (host: string) => ({
-  requestId: host,
-  url: `https://${host}/page`,
-  host,
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
-  publicConfig: { label: host },
-  signal: new AbortController().signal,
-})
+const request = (host: string) =>
+  createTestRenderRequest(host, {
+    url: `https://${host}/page`,
+    publicConfig: { label: host },
+  })
 
 describe('SSR request isolation', () => {
   it('isolates concurrent Vue, router, state, head, and request contexts', async () => {
