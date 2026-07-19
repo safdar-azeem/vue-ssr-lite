@@ -1,4 +1,15 @@
 import type { SsrHeaderValue } from '../SsrRuntimeTypes'
+import {
+  normalizeSsrHost,
+  normalizeSsrHostPattern,
+  stripSsrHostPort,
+} from '../SsrHostnameRuntime'
+
+export {
+  normalizeSsrHost,
+  normalizeSsrHostPattern,
+  stripSsrHostPort,
+} from '../SsrHostnameRuntime'
 
 /** Minimal host-owning application shape used by the matcher. */
 export interface SsrHostApplication {
@@ -36,67 +47,6 @@ export class SsrHostConfigurationError extends Error {
     super(message)
     this.name = 'SsrHostConfigurationError'
   }
-}
-
-export const normalizeSsrHost = (host: SsrHeaderValue): string => {
-  const raw = firstHeaderValue(host)
-  if (
-    !raw ||
-    raw.length > 512 ||
-    /[\u0000-\u0020\u007f]/.test(raw) ||
-    /[\\/@?#]/.test(raw)
-  ) {
-    return ''
-  }
-  try {
-    const authority =
-      raw.includes(':') && raw.split(':').length > 2 && !raw.startsWith('[')
-        ? `[${raw}]`
-        : raw
-    const parsed = new URL(`http://${authority}`)
-    if (
-      parsed.username ||
-      parsed.password ||
-      parsed.pathname !== '/' ||
-      parsed.search ||
-      parsed.hash
-    ) {
-      return ''
-    }
-    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '')
-    if (!hostname) return ''
-    const displayHost =
-      hostname.includes(':') && !hostname.startsWith('[')
-        ? `[${hostname}]`
-        : hostname
-    return `${displayHost}${parsed.port ? `:${parsed.port}` : ''}`
-  } catch {
-    return ''
-  }
-}
-
-export const stripSsrHostPort = (host: SsrHeaderValue): string => {
-  const normalized = normalizeSsrHost(host)
-  if (!normalized) return ''
-  if (normalized.startsWith('[')) {
-    const end = normalized.indexOf(']')
-    return end > 0 ? normalized.slice(1, end) : ''
-  }
-  return normalized.replace(/:\d+$/, '')
-}
-
-export const normalizeSsrHostPattern = (pattern: string): string => {
-  const value = pattern.trim().toLowerCase()
-  if (value === '*') return '*'
-  if (value.startsWith('*.')) {
-    const base = stripSsrHostPort(value.slice(2))
-    // A single leading label wildcard only. Reject nested wildcards
-    // (`*.*.example.com`) and ports.
-    return base && !base.includes(':') && !base.includes('*')
-      ? `*.${base}`
-      : ''
-  }
-  return normalizeSsrHost(value)
 }
 
 export const matchesSsrHostPattern = (host: string, pattern: string): boolean => {
