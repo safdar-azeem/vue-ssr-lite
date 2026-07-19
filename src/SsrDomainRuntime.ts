@@ -3,7 +3,9 @@ import type {
   SsrApplicationDomainConfig,
   SsrDomainContext,
   SsrDomainMode,
+  SsrDomainParamDefinition,
 } from './SsrConfigTypes'
+import { normalizeSsrHostname } from './SsrHostnameRuntime'
 import { useSsrRequestContext } from './SsrRequestContext'
 
 export const SSR_DOMAIN_CONTEXT = Symbol.for(
@@ -18,28 +20,46 @@ export interface SsrDomainApplicationRef {
     mode: SsrDomainMode
     localAliases: boolean
     customDomains: boolean
-    expose?: SsrApplicationDomainConfig['expose']
+    params?: SsrApplicationDomainConfig['params']
   }
 }
 
-const normalizeHostname = (value: string): string =>
-  String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/^(?:https?):?(?:\/\/)/i, '')
-    .split(/[/?#]/, 1)[0]
-    .replace(/:\d+$/, '')
-    .replace(/^\[|\]$/g, '')
-    .replace(/^\.+|\.+$/g, '')
+const resolveDomainParams = (
+  definitions: Record<string, SsrDomainParamDefinition> | undefined,
+  options: {
+    hostname: string
+    subdomain: string | null
+    isCustomDomain: boolean
+  }
+): Record<string, string> => {
+  const params: Record<string, string> = {}
+  for (const [name, definition] of Object.entries(definitions || {})) {
+    if (definition.source === 'last-subdomain-label') {
+      if (options.subdomain) {
+        const labels = options.subdomain.split('.').filter(Boolean)
+        params[name] = labels[labels.length - 1] || ''
+      } else {
+        params[name] = ''
+      }
+      continue
+    }
+    if (definition.source === 'subdomain-or-hostname') {
+      params[name] = options.isCustomDomain
+        ? options.hostname
+        : options.subdomain || ''
+    }
+  }
+  return params
+}
 
 export const resolveSsrDomainContext = (
   host: string,
   application: SsrDomainApplicationRef,
   development: boolean
 ): SsrDomainContext => {
-  const hostname = normalizeHostname(host)
-  const productionBase = normalizeHostname(application.domain.production)
-  const developmentBase = normalizeHostname(application.domain.development)
+  const hostname = normalizeSsrHostname(host)
+  const productionBase = normalizeSsrHostname(application.domain.production)
+  const developmentBase = normalizeSsrHostname(application.domain.development)
   const baseDomain = development ? developmentBase : productionBase
   const bases = development
     ? [...new Set([developmentBase, productionBase])]
@@ -63,23 +83,6 @@ export const resolveSsrDomainContext = (
 
   const isCustomDomain = !matchedBase && application.domain.customDomains
   const activeBase = matchedBase || baseDomain
-  const params: Record<string, string> = {}
-  const expose = application.domain.expose || {}
-
-  if (expose.subdomainAs) {
-    if (subdomain) {
-      const labels = subdomain.split('.').filter(Boolean)
-      params[expose.subdomainAs] = labels[labels.length - 1] || ''
-    } else {
-      params[expose.subdomainAs] = ''
-    }
-  }
-
-  if (expose.subdomainOrHostnameAs) {
-    params[expose.subdomainOrHostnameAs] = isCustomDomain
-      ? hostname
-      : subdomain || ''
-  }
 
   return {
     entry: application.id,
@@ -88,30 +91,69 @@ export const resolveSsrDomainContext = (
     subdomain,
     isCustomDomain,
     development,
-    params,
+    params: resolveDomainParams(application.domain.params, {
+      hostname,
+      subdomain,
+      isCustomDomain,
+    }),
   }
 }
 
-export const buildSsrSubdomainUrl = (options: {
+export interface SsrCreateDomainUrlOptions {
+  /** Active apex for the target application. */
   baseDomain: string
-  subdomain: string
+  /**
+   * Nested subdomain labels under the apex (e.g. `department.company1`).
+   * Labels may include dots; each label is sanitized individually.
+   */
+  subdomain?: string | null
   path?: string
+  query?: Record<string, string | number | boolean | null | undefined>
+  hash?: string
   protocol?: 'http' | 'https'
   port?: string | number
   development?: boolean
-}): string => {
-  const sanitized = String(options.subdomain || '')
+}
+
+const sanitizeSubdomainLabel = (label: string): string =>
+  label
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '')
-  const path = !options.path
-    ? '/'
-    : options.path.startsWith('/')
-      ? options.path
-      : `/${options.path}`
-  if (!sanitized) return path
 
-  const base = normalizeHostname(options.baseDomain)
+const sanitizeSubdomain = (value: string): string =>
+  value
+    .split('.')
+    .map(sanitizeSubdomainLabel)
+    .filter(Boolean)
+    .join('.')
+
+const buildPathWithQueryHash = (
+  path: string | undefined,
+  query: SsrCreateDomainUrlOptions['query'],
+  hash: string | undefined
+): string => {
+  const normalizedPath = !path
+    ? '/'
+    : path.startsWith('/')
+      ? path
+      : `/${path}`
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value == null) continue
+    params.set(key, String(value))
+  }
+  const search = params.toString()
+  const hashPart = !hash ? '' : hash.startsWith('#') ? hash : `#${hash}`
+  return `${normalizedPath}${search ? `?${search}` : ''}${hashPart}`
+}
+
+/** Build an absolute URL for a domain family (supports nested subdomains). */
+export const createDomainUrl = (options: SsrCreateDomainUrlOptions): string => {
+  const base = normalizeSsrHostname(options.baseDomain)
+  if (!base) {
+    throw new Error('createDomainUrl requires a baseDomain.')
+  }
   const development =
     options.development ??
     (base === 'localhost' || base.endsWith('.localhost'))
@@ -124,8 +166,31 @@ export const buildSsrSubdomainUrl = (options: {
     development || base === 'localhost' || base.endsWith('.localhost')
       ? port
       : ''
-  return `${protocol}://${sanitized}.${base}${withPort}${path}`
+  const suffix = buildPathWithQueryHash(options.path, options.query, options.hash)
+  const subdomain = options.subdomain ? sanitizeSubdomain(options.subdomain) : ''
+  if (!subdomain) {
+    return `${protocol}://${base}${withPort}${suffix}`
+  }
+  return `${protocol}://${subdomain}.${base}${withPort}${suffix}`
 }
+
+/** @deprecated Prefer createDomainUrl. Kept as a thin wrapper. */
+export const buildSsrSubdomainUrl = (options: {
+  baseDomain: string
+  subdomain: string
+  path?: string
+  protocol?: 'http' | 'https'
+  port?: string | number
+  development?: boolean
+}): string =>
+  createDomainUrl({
+    baseDomain: options.baseDomain,
+    subdomain: options.subdomain,
+    path: options.path,
+    protocol: options.protocol,
+    port: options.port,
+    development: options.development,
+  })
 
 export interface SsrDomainApi extends SsrDomainContext {
   buildSubdomainUrl: (
@@ -133,12 +198,17 @@ export interface SsrDomainApi extends SsrDomainContext {
     path?: string,
     options?: { port?: string | number; protocol?: 'http' | 'https' }
   ) => string
+  createUrl: (
+    options: Omit<SsrCreateDomainUrlOptions, 'baseDomain' | 'development'> & {
+      subdomain?: string | null
+    }
+  ) => string
 }
 
 const toDomainApi = (domain: SsrDomainContext): SsrDomainApi => ({
   ...domain,
   buildSubdomainUrl: (subdomain, path = '/', options = {}) =>
-    buildSsrSubdomainUrl({
+    createDomainUrl({
       baseDomain: domain.baseDomain,
       subdomain,
       path,
@@ -148,13 +218,17 @@ const toDomainApi = (domain: SsrDomainContext): SsrDomainApi => ({
       protocol: options.protocol,
       development: domain.development,
     }),
+  createUrl: (options) =>
+    createDomainUrl({
+      ...options,
+      baseDomain: domain.baseDomain,
+      development: domain.development,
+      port:
+        options.port ??
+        (typeof window !== 'undefined' ? window.location.port : ''),
+    }),
 })
 
-/**
- * Process-local active domain for the current SPA/SSR application instance.
- * Lets route guards and non-setup callers read the same context without
- * requiring Vue `inject()` currentInstance.
- */
 let activeDomainContext: SsrDomainContext | null = null
 
 export const installSsrDomainContext = (
@@ -180,11 +254,6 @@ const readBrowserDomainContext = (): SsrDomainContext | null => {
   }
 }
 
-/**
- * Domain context for the application selected for the current request.
- * Works during SSR, SPA mounting, endpoint handling, route guards, and
- * browser hydration.
- */
 export const useSsrDomain = (): SsrDomainApi => {
   const injected = inject(SSR_DOMAIN_CONTEXT, null)
   if (injected) return toDomainApi(injected)
