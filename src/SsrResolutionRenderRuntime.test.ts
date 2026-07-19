@@ -4,17 +4,9 @@ import { defineSsrApplication } from './index'
 import { SSR_REQUEST_RESOLUTION } from './SsrRequestResolution'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
+import { createTestRenderRequest } from './SsrTestFixtures'
 
-const baseRequest = (host = 'app.test') => ({
-  requestId: host,
-  url: `https://${host}/`,
-  host,
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
-  publicConfig: {},
-  signal: new AbortController().signal,
-})
+const baseRequest = (host = 'app.test') => createTestRenderRequest(host)
 
 /** A generic async store that resolves work OUTSIDE any component prefetch. */
 const createDeferredStore = (loadDelayMs: number) => {
