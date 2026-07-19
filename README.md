@@ -971,29 +971,23 @@ writes into a shared store that a **sibling** component reads — because Vue do
 not block a sibling's render on an earlier sibling's `onServerPrefetch`. The
 sibling renders before the store is populated.
 
-The resolution contract handles this generically. In component setup:
+**Applications write no orchestration for this.** Reconcile resolved data into
+the store with `ssrWatch` exactly as you already would:
 
 ```ts
-import { useSsrResolution } from 'vue-ssr-lite'
-
-const resolution = useSsrResolution()
-let synchronous = true
-onServerPrefetch(async () => {
-  const data = await load()
-  store.set(key, data)
-  // Populated asynchronously, after the sibling already rendered: ask for one
-  // more pass. Inert in the browser.
-  if (resolution?.server && !synchronous) resolution.requestAdditionalPass()
-})
-synchronous = false
+const { result } = useMyQuery(vars, { ssr: true })
+ssrWatch(() => result.value, (data) => {
+  if (data) store.set(key, data)
+}, { immediate: true })
 ```
 
-On the next pass the plugin's cache is carried forward, the child's data
-hydrates the store synchronously at setup, the sibling sees it, and no further
-pass is requested — bounded, with no duplicate work. (This is exactly how
-`vue-apollo-client`'s section-query composables and their consumers behave; a
-warm request cache makes each query settle synchronously on the resumed pass, so
-no operation runs twice.)
+`ssrWatch` automatically requests one more render pass when it fires from the
+awaited prefetch (after a sibling already rendered). On the resumed pass the
+data is warm in the API client's request cache — `vue-apollo-client` settles it
+synchronously at setup — so the same `ssrWatch` runs on its immediate tick, the
+sibling sees the store, and no further pass is requested. Bounded, and each
+operation runs exactly once. Nothing app-specific, and nothing to repeat per
+component or per project.
 
 ## SSR-safe reactivity
 
