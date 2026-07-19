@@ -8,9 +8,13 @@ const [runtime, client, server, vite] = await Promise.all([
 ])
 
 const expectedExports = [
-  [runtime, 'defineSsrRuntime'],
+  [runtime, 'defineSsrConfig'],
+  [runtime, 'defineSsrApplication'],
+  [runtime, 'useSsrDomain'],
   [client, 'hydrateSsrApplication'],
+  [client, 'mountSpaApplication'],
   [server, 'createSsrManagedServer'],
+  [server, 'compileSsrConfig'],
   [vite, 'vueSsrLite'],
 ]
 
