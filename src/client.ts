@@ -1,4 +1,5 @@
 export * from './SsrBrowserRuntime'
+export * from './SsrDomainRuntime'
 export * from './SsrReactivityRuntime'
 export {
   SSR_REQUEST_RESOLUTION,
