@@ -225,10 +225,12 @@ export const compileSsrConfig = async (
     }
 
     const kind: SsrEntryKind = hasSsr ? 'ssr' : 'spa'
-    const loader =
-      appConfig.ssr ||
-      (appConfig.spa && appConfig.spa !== true ? appConfig.spa : undefined)
-    const application = await resolveApplicationLoader(loader, id, kind)
+    // SPA shells are mounted in the browser (`mountSpaApplication` / client
+    // entry). Never resolve SPA loaders on the Node server — they commonly pull
+    // browser-only packages (charts, maps, etc.) that crash without `window`.
+    const application = hasSsr
+      ? await resolveApplicationLoader(appConfig.ssr, id, kind)
+      : undefined
     const publicConfig: Record<string, unknown> = {
       ...(appConfig.publicConfig || {}),
     }
