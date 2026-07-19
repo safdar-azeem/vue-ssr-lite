@@ -17,19 +17,27 @@ afterEach(async () => {
   root = ''
 })
 
-const spaConfig = (template = 'index.html') =>
+const spaConfig = () =>
   defineSsrConfig({
     name: 'test-runtime',
+    runtime: 'unified',
     applications: {
       spa: {
-        spa: true,
-        template,
+        render: 'spa',
+        application: {
+          module: './SpaApp.ts',
+          exportName: 'spaApplication',
+        },
+        template: 'index.html',
         domain: {
           development: 'localhost',
           production: 'localhost',
           mode: 'root',
           localAliases: true,
           customDomains: true,
+        },
+        publicConfig: {
+          api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
         },
       },
     },
@@ -88,15 +96,20 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineSsrConfig({
           name: 'test-runtime',
+          runtime: 'unified',
           server: { requestTimeoutMs: 20 },
           applications: {
             ssr: {
-              ssr: { id: 'test-app', rootComponent: Root },
+              render: 'ssr',
+              application: { id: 'test-app', rootComponent: Root },
               template: 'site.html',
               domain: {
                 development: 'localhost',
                 production: 'localhost',
                 customDomains: true,
+              },
+              publicConfig: {
+                api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
             },
           },
@@ -143,7 +156,8 @@ describe('managed SSR server lifecycle', () => {
           server: { trustProxy: true },
           applications: {
             storefront: {
-              ssr: { id: 'storefront', rootComponent: Root },
+              render: 'ssr',
+              application: { id: 'storefront', rootComponent: Root },
               template: 'site.html',
               roles: ['unified', 'storefront'],
               domain: {
@@ -151,10 +165,20 @@ describe('managed SSR server lifecycle', () => {
                 production: 'shop.localhost',
                 mode: 'root-and-subdomains',
                 customDomains: true,
+                params: {
+                  storeDomain: { source: 'subdomain-or-hostname' },
+                },
+              },
+              publicConfig: {
+                api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
             },
             erp: {
-              spa: true,
+              render: 'spa',
+              application: {
+                module: './Erp.ts',
+                exportName: 'createErpApplication',
+              },
               template: 'index.html',
               roles: ['unified', 'erp'],
               domain: {
@@ -162,6 +186,12 @@ describe('managed SSR server lifecycle', () => {
                 production: 'localhost',
                 mode: 'root-and-subdomains',
                 localAliases: true,
+                params: {
+                  workspace: { source: 'last-subdomain-label' },
+                },
+              },
+              publicConfig: {
+                api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
             },
           },
