@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { hydrateSsrApplication } from './SsrBrowserRuntime'
 import { getSsrStateElementId } from './SsrSerialization'
+import { createTestDomain } from './SsrTestFixtures'
 
 describe('browser hydration cleanup', () => {
   it('disposes registered plugin state when mounting fails', async () => {
@@ -15,6 +16,7 @@ describe('browser hydration cleanup', () => {
       version: 1,
       applicationId: 'browser-failure',
       publicConfig: {},
+      domain: createTestDomain('browser-failure.test'),
       application: {},
       plugins: { demo: { restored: true } },
     })
