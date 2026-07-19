@@ -1,6 +1,6 @@
 import { access, mkdir, writeFile, rm } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
-import { join, relative, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type {
   SsrApplicationConfig,
@@ -377,6 +377,14 @@ export const resolveSsrViteEntries = async (
 }
 
 /**
+ * Absolute POSIX paths for imports emitted into virtual modules. Relative
+ * `./src/...` paths resolve against the virtual id (not the project root) and
+ * fail import-analysis.
+ */
+const absoluteImportPath = (root: string, filePath: string): string =>
+  resolve(root, filePath).replaceAll('\\', '/')
+
+/**
  * Generate a Vite-analyzable runtime module that imports each application
  * module statically and merges it into the user `ssr.config` export.
  */
@@ -385,14 +393,14 @@ export const generateSsrRuntimeModule = (
   configPath: string,
   entries: SsrViteApplicationEntry[]
 ): string => {
-  const configImportPath = normalizePathForImport(root, configPath)
+  const configImportPath = absoluteImportPath(root, configPath)
   const importLines: string[] = [
     `import __ssrUserConfig from ${JSON.stringify(configImportPath)}`,
   ]
   const bindLines: string[] = []
   entries.forEach((entry, index) => {
     const alias = `__ssrApp${index}`
-    const definitionPath = normalizePathForImport(root, resolve(root, entry.definition))
+    const definitionPath = absoluteImportPath(root, entry.definition)
     if (entry.exportName) {
       importLines.push(
         `import { ${entry.exportName} as ${alias} } from ${JSON.stringify(definitionPath)}`
@@ -426,19 +434,11 @@ export const generateSsrRuntimeModule = (
   ].join('\n')
 }
 
-const normalizePathForImport = (root: string, absolutePath: string): string => {
-  const rel = relative(root, absolutePath).replaceAll('\\', '/')
-  return rel.startsWith('.') ? rel : `./${rel}`
-}
-
 export const generateSsrClientModule = (
   root: string,
   entry: SsrViteApplicationEntry
 ): string => {
-  const definitionPath = normalizePathForImport(
-    root,
-    resolve(root, entry.definition)
-  )
+  const definitionPath = absoluteImportPath(root, entry.definition)
   const importStatement = entry.exportName
     ? `import { ${entry.exportName} as loadApplication } from ${JSON.stringify(definitionPath)}`
     : `import loadApplication from ${JSON.stringify(definitionPath)}`
