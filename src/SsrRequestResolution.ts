@@ -1,4 +1,4 @@
-import type { InjectionKey } from 'vue'
+import { inject, type InjectionKey } from 'vue'
 
 /**
  * Generic, framework-neutral server-render resolution contract.
@@ -59,6 +59,21 @@ export interface SsrRequestResolution {
 export const SSR_REQUEST_RESOLUTION = Symbol.for(
   'vue-ssr:request-resolution'
 ) as InjectionKey<SsrRequestResolution>
+
+/**
+ * Resolve the active {@link SsrRequestResolution} from component setup. Returns
+ * `null` when no SSR host is installed (a plain SPA), so callers can no-op.
+ *
+ * The canonical use is the "parent query → child components → child queries via
+ * an external store read by a sibling" pattern: a component that hydrates async
+ * server data into a shared store (read by a sibling that Vue renders without
+ * awaiting this component's prefetch) calls `requestAdditionalPass()` so the
+ * renderer produces one more pass. On the next pass the data is warm in the
+ * request cache and hydrates synchronously at setup, so the sibling sees it. All
+ * of this is inert in the browser.
+ */
+export const useSsrResolution = (): SsrRequestResolution | null =>
+  inject<SsrRequestResolution | null>(SSR_REQUEST_RESOLUTION, null)
 
 export interface SsrResolutionController extends SsrRequestResolution {
   /** Begin a new render pass: clears the additional-pass request flag. */
