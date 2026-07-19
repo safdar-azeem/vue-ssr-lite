@@ -80,9 +80,20 @@ const logServerReady = (host: string, port: number, role: string) => {
   )
 }
 
-const resolveRuntime = async (loaded: unknown): Promise<SsrCompiledConfig> => {
+const resolveRuntime = async (
+  loaded: unknown,
+  options: Pick<SsrManagedServerOptions, 'root' | 'vite' | 'production'>
+): Promise<SsrCompiledConfig> => {
   const definition = await compileSsrConfig(loaded, {
-    development: process.env.NODE_ENV !== 'production',
+    development: !options.production,
+    root: options.root,
+    importModule: options.vite
+      ? async (specifier) =>
+          (await options.vite!.ssrLoadModule(specifier)) as Record<
+            string,
+            unknown
+          >
+      : undefined,
   })
   for (const application of definition.applications) {
     const enabledForRole =
@@ -200,7 +211,7 @@ export const createSsrManagedServer = async (
   options: SsrManagedServerOptions
 ): Promise<SsrManagedServer> => {
   let shuttingDown = false
-  const initialRuntime = await resolveRuntime(await options.loadRuntime())
+  const initialRuntime = await resolveRuntime(await options.loadRuntime(), options)
   const initialServerOptions = initialRuntime.server
   const host = initialServerOptions.host || '0.0.0.0'
   const port = parsePort(initialServerOptions.port)
@@ -212,7 +223,7 @@ export const createSsrManagedServer = async (
   const loadDefinition = async () =>
     options.production
       ? initialRuntime
-      : resolveRuntime(await options.loadRuntime())
+      : resolveRuntime(await options.loadRuntime(), options)
 
   const loadTemplate = async (
     definition: SsrCompiledConfig,
