@@ -172,11 +172,9 @@ describe('defineSsrConfig application domains', () => {
       entries.applications
     )
     expect(runtime).toContain('import __ssrUserConfig from "/app/ssr.config.ts"')
+    expect(runtime).not.toContain('ErpBootstrap')
     expect(runtime).toContain(
-      'import { createErpApplication as __ssrApp0 } from "/app/src/ErpBootstrap.ts"'
-    )
-    expect(runtime).toContain(
-      'import { shopSsrApplication as __ssrApp1 } from "/app/src/ShopSsrApplication.ts"'
+      'import { shopSsrApplication as __ssrApp0 } from "/app/src/ShopSsrApplication.ts"'
     )
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
 
