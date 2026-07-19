@@ -2,6 +2,12 @@ export * from './SsrApplicationRuntime'
 export * from './SsrConfigRuntime'
 export * from './SsrConfigTypes'
 export * from './SsrDomainRuntime'
+export {
+  normalizeSsrHost,
+  normalizeSsrHostname,
+  normalizeSsrHostPattern,
+  stripSsrHostPort,
+} from './SsrHostnameRuntime'
 export * from './SsrHydrationRuntime'
 export * from './SsrReactivityRuntime'
 export * from './SsrRequestContext'
