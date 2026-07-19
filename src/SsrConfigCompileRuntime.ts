@@ -1,7 +1,7 @@
 import { access, mkdir, writeFile, rm } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
   SsrApplicationConfig,
   SsrApplicationDomainConfig,
@@ -11,8 +11,10 @@ import type {
   SsrConfig,
   SsrConfigExport,
   SsrDomainMode,
+  SsrRenderMode,
 } from './SsrConfigTypes'
 import { defineSsrConfig } from './SsrConfigRuntime'
+import { normalizeSsrHost, stripSsrHostPort } from './SsrHostnameRuntime'
 import type {
   SsrApplicationDefinition,
   SsrEndpointDefinition,
@@ -22,9 +24,7 @@ import type {
   SsrServerOptions,
 } from './SsrRuntimeTypes'
 import {
-  normalizeSsrHost,
   SsrHostConfigurationError,
-  stripSsrHostPort,
   validateSsrHostEntries,
 } from './server/SsrHostRuntime'
 
@@ -37,6 +37,9 @@ const CONFIG_CANDIDATES = [
   'ssr.config.js',
   'ssr.config.mjs',
 ] as const
+
+export const SSR_RUNTIME_VIRTUAL_ID = 'virtual:vue-ssr-lite/runtime'
+export const SSR_CLIENT_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/client/'
 
 export interface SsrCompiledApplication {
   id: string
@@ -52,15 +55,14 @@ export interface SsrCompiledApplication {
   cookieAllowlist: string[]
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
-  /** Present when `ssr` was declared as a module reference. */
-  ssrModule?: SsrApplicationModuleRef
+  applicationModule?: SsrApplicationModuleRef
   domain: {
     development: string
     production: string
     mode: SsrDomainMode
     localAliases: boolean
     customDomains: boolean
-    expose: SsrApplicationDomainConfig['expose']
+    params: SsrApplicationDomainConfig['params']
   }
 }
 
@@ -75,6 +77,7 @@ export interface SsrCompiledConfig {
 
 export interface SsrViteApplicationEntry {
   id: string
+  kind: SsrRenderMode
   definition: string
   exportName?: string
   template: string
@@ -83,7 +86,6 @@ export interface SsrViteApplicationEntry {
 
 export interface SsrViteEntries {
   applications: SsrViteApplicationEntry[]
-  spaEntries: Record<string, string>
 }
 
 export const isSsrApplicationModuleRef = (
@@ -128,8 +130,6 @@ const expandApplicationHosts = (
     pushUnique(hosts, `*.${activeBase}`)
   }
 
-  // In development, also own the production apex family when it differs so a
-  // single process can serve both local and production-shaped hosts.
   if (development) {
     const productionBase = normalizeHostname(
       domain.production,
@@ -174,58 +174,67 @@ const parseCookieList = (
     .filter(Boolean)
 }
 
+const isApplicationDefinition = (
+  value: unknown
+): value is SsrApplicationDefinition<any, any, any> =>
+  Boolean(
+    value &&
+      typeof value === 'object' &&
+      typeof (value as SsrApplicationDefinition).id === 'string' &&
+      (value as SsrApplicationDefinition).rootComponent
+  )
+
+const canonicalizeApplicationId = (
+  definition: SsrApplicationDefinition<any, any, any>,
+  applicationId: string
+): SsrApplicationDefinition<any, any, any> =>
+  definition.id === applicationId
+    ? definition
+    : { ...definition, id: applicationId }
+
 const pickModuleExport = (
   mod: Record<string, unknown>,
   exportName: string | undefined,
   applicationId: string,
   kind: SsrEntryKind
-): SsrApplicationDefinition<any, any, any> => {
-  const resolved = (
-    exportName ? mod[exportName] : mod.default
-  ) as SsrApplicationDefinition<any, any, any> | undefined
-  if (!resolved?.id || !resolved.rootComponent) {
+): SsrApplicationLoader => {
+  const resolved = exportName ? mod[exportName] : mod.default
+  if (resolved == null) {
     throw new SsrHostConfigurationError(
-      `Application "${applicationId}" ${kind} module must export a valid SsrApplicationDefinition${
-        exportName ? ` as "${exportName}"` : ' (default)'
+      `Application "${applicationId}" ${kind} module must export${
+        exportName ? ` "${exportName}"` : ' a default value'
       }.`
     )
   }
-  return resolved
+  return resolved as SsrApplicationLoader
 }
 
 const resolveApplicationLoader = async (
-  loader: SsrApplicationLoader | undefined,
+  loader: SsrApplicationLoader,
   applicationId: string,
   kind: SsrEntryKind
-): Promise<SsrApplicationDefinition<any, any, any> | undefined> => {
-  if (!loader) return undefined
+): Promise<SsrApplicationDefinition<any, any, any>> => {
   const resolved = typeof loader === 'function' ? await loader() : loader
-  if (!resolved?.id || !resolved.rootComponent) {
+  if (!isApplicationDefinition(resolved)) {
     throw new SsrHostConfigurationError(
       `Application "${applicationId}" ${kind} loader must return a valid SsrApplicationDefinition.`
     )
   }
-  return resolved
+  return canonicalizeApplicationId(resolved, applicationId)
 }
 
 export interface CompileSsrConfigOptions {
   development?: boolean
-  /** Project root used to resolve `{ module }` paths. */
   root?: string
-  /**
-   * Custom importer for module references (Vite `ssrLoadModule` in development).
-   * Falls back to a Node ESM import of the resolved file URL.
-   */
   importModule?: (specifier: string) => Promise<Record<string, unknown>>
 }
 
 const resolveApplicationSource = async (
-  source: SsrApplicationSource | undefined,
+  source: SsrApplicationSource,
   applicationId: string,
   kind: SsrEntryKind,
   options: CompileSsrConfigOptions
-): Promise<SsrApplicationDefinition<any, any, any> | undefined> => {
-  if (!source) return undefined
+): Promise<SsrApplicationDefinition<any, any, any>> => {
   if (isSsrApplicationModuleRef(source)) {
     const root = options.root || process.cwd()
     const specifier = source.module.startsWith('.')
@@ -234,9 +243,32 @@ const resolveApplicationSource = async (
     const mod = options.importModule
       ? await options.importModule(source.module)
       : ((await import(pathToFileURL(specifier).href)) as Record<string, unknown>)
-    return pickModuleExport(mod, source.exportName, applicationId, kind)
+    const loader = pickModuleExport(mod, source.exportName, applicationId, kind)
+    return resolveApplicationLoader(loader, applicationId, kind)
   }
   return resolveApplicationLoader(source, applicationId, kind)
+}
+
+const validateProductionConfig = (config: SsrConfig) => {
+  if (!String(config.runtime || '').trim()) {
+    throw new Error(
+      'Production SSR config requires `runtime` (e.g. APP_RUNTIME). Refusing to default to "unified".'
+    )
+  }
+  for (const [id, app] of Object.entries(config.applications)) {
+    if (!String(app.domain?.production || '').trim()) {
+      throw new Error(
+        `Application "${id}" requires domain.production in production.`
+      )
+    }
+    const api = (app.publicConfig as { api?: { endpoint?: string } } | undefined)
+      ?.api
+    if (!String(api?.endpoint || '').trim()) {
+      throw new Error(
+        `Application "${id}" requires publicConfig.api.endpoint in production.`
+      )
+    }
+  }
 }
 
 export const resolveSsrConfigPath = async (
@@ -258,46 +290,38 @@ export const resolveSsrConfigPath = async (
   )
 }
 
-/** Derive Vite HTML / hydration entries from a loaded `SsrConfig`. */
+/** Derive Vite HTML / client entries from a loaded `SsrConfig`. */
 export const extractSsrViteEntries = (config: SsrConfig): SsrViteEntries => {
   const applications: SsrViteApplicationEntry[] = []
-  const spaEntries: Record<string, string> = {}
   for (const [id, app] of Object.entries(config.applications || {})) {
-    if (app.ssr !== undefined) {
-      if (!isSsrApplicationModuleRef(app.ssr)) {
-        throw new Error(
-          `Application "${id}" must declare ssr: { module, exportName } so vueSsrLite() can derive the client entry from ssr.config.`
-        )
-      }
-      applications.push({
-        id,
-        definition: app.ssr.module,
-        exportName: app.ssr.exportName,
-        template: app.template,
-        mountSelector: app.mountSelector,
-      })
-      continue
+    if (!app.render || !app.template) {
+      throw new Error(
+        `Application "${id}" requires render and template in ssr.config.`
+      )
     }
-    if (app.spa !== undefined) {
-      spaEntries[id] = app.template
+    if (!isSsrApplicationModuleRef(app.application)) {
+      throw new Error(
+        `Application "${id}" must declare application: { module, exportName } so vueSsrLite() can generate the client entry.`
+      )
     }
+    applications.push({
+      id,
+      kind: app.render,
+      definition: app.application.module,
+      exportName: app.application.exportName,
+      template: app.template,
+      mountSelector: app.mountSelector,
+    })
   }
-  if (!applications.length && !Object.keys(spaEntries).length) {
-    throw new Error(
-      'ssr.config must declare at least one spa or ssr application for Vite.'
-    )
+  if (!applications.length) {
+    throw new Error('ssr.config must declare at least one application for Vite.')
   }
-  return { applications, spaEntries }
+  return { applications }
 }
 
 /**
- * Load `ssr.config` for Vite entry discovery without going through the
- * consumer's Vite plugin graph. Relative local imports are bundled; packages
- * stay external.
- *
- * The bundled file is written under the project `node_modules` tree so Node can
- * resolve bare imports like `vue-ssr-lite` from the consumer's dependencies.
- * Writing under the OS temp directory breaks package resolution.
+ * Load `ssr.config` for Vite entry discovery / runtime module generation.
+ * Written under the project `node_modules` tree so bare imports resolve.
  */
 export const loadSsrConfigFile = async (
   root: string,
@@ -353,27 +377,104 @@ export const resolveSsrViteEntries = async (
 }
 
 /**
- * Rewrite `ssr: { module, exportName }` object literals into Vite-analyzable
- * dynamic import loaders so production SSR bundles include the application.
+ * Generate a Vite-analyzable runtime module that imports each application
+ * module statically and merges it into the user `ssr.config` export.
  */
-export const transformSsrModuleRefs = (code: string, filename: string): string | null => {
-  if (!/ssr\.config\.(m?ts|m?js)$/.test(filename.replaceAll('\\', '/'))) {
-    return null
-  }
-  if (!/\bssr\s*:\s*\{/.test(code) || !/\bmodule\s*:/.test(code)) {
-    return null
-  }
-
-  const rewritten = code.replace(
-    /ssr\s*:\s*\{\s*module\s*:\s*(['"])(.+?)\1\s*(?:,\s*exportName\s*:\s*(['"])(.+?)\3\s*)?,?\s*\}/g,
-    (_match, _q1, modulePath, _q2, exportName) => {
-      const exportExpr = exportName
-        ? `m[${JSON.stringify(exportName)}]`
-        : 'm.default'
-      return `ssr: () => import(${JSON.stringify(modulePath)}).then((m) => ${exportExpr})`
+export const generateSsrRuntimeModule = (
+  root: string,
+  configPath: string,
+  entries: SsrViteApplicationEntry[]
+): string => {
+  const configImportPath = normalizePathForImport(root, configPath)
+  const importLines: string[] = [
+    `import __ssrUserConfig from ${JSON.stringify(configImportPath)}`,
+  ]
+  const bindLines: string[] = []
+  entries.forEach((entry, index) => {
+    const alias = `__ssrApp${index}`
+    const definitionPath = normalizePathForImport(root, resolve(root, entry.definition))
+    if (entry.exportName) {
+      importLines.push(
+        `import { ${entry.exportName} as ${alias} } from ${JSON.stringify(definitionPath)}`
+      )
+    } else {
+      importLines.push(
+        `import ${alias} from ${JSON.stringify(definitionPath)}`
+      )
     }
+    bindLines.push(
+      `  applications[${JSON.stringify(entry.id)}] = { ...applications[${JSON.stringify(entry.id)}], application: ${alias} }`
+    )
+  })
+
+  return [
+    ...importLines,
+    '',
+    'const resolveConfig = async () => {',
+    '  const exported = __ssrUserConfig?.default ?? __ssrUserConfig',
+    '  const config = typeof exported === "function" ? await exported() : exported',
+    '  if (!config?.applications) {',
+    '    throw new Error("ssr.config must export defineSsrConfig({ name, applications }).")',
+    '  }',
+    '  const applications = { ...config.applications }',
+    ...bindLines,
+    '  return { ...config, applications }',
+    '}',
+    '',
+    'export default resolveConfig',
+    '',
+  ].join('\n')
+}
+
+const normalizePathForImport = (root: string, absolutePath: string): string => {
+  const rel = relative(root, absolutePath).replaceAll('\\', '/')
+  return rel.startsWith('.') ? rel : `./${rel}`
+}
+
+export const generateSsrClientModule = (
+  root: string,
+  entry: SsrViteApplicationEntry
+): string => {
+  const definitionPath = normalizePathForImport(
+    root,
+    resolve(root, entry.definition)
   )
-  return rewritten === code ? null : rewritten
+  const importStatement = entry.exportName
+    ? `import { ${entry.exportName} as loadApplication } from ${JSON.stringify(definitionPath)}`
+    : `import loadApplication from ${JSON.stringify(definitionPath)}`
+  const mountSelector = entry.mountSelector || '#app'
+  if (entry.kind === 'spa') {
+    return [
+      importStatement,
+      `import { mountSpaApplication } from 'vue-ssr-lite/client'`,
+      `const definition = typeof loadApplication === 'function'`,
+      `  ? await loadApplication()`,
+      `  : loadApplication`,
+      `void mountSpaApplication(`,
+      `  { ...definition, id: ${JSON.stringify(entry.id)} },`,
+      `  { mountSelector: ${JSON.stringify(mountSelector)} }`,
+      `).catch((error) => {`,
+      `  console.error('[vue-ssr-lite] SPA mount failed', error)`,
+      `  throw error`,
+      `})`,
+      '',
+    ].join('\n')
+  }
+  return [
+    importStatement,
+    `import { hydrateSsrApplication } from 'vue-ssr-lite/client'`,
+    `const definition = typeof loadApplication === 'function'`,
+    `  ? await loadApplication()`,
+    `  : loadApplication`,
+    `hydrateSsrApplication(`,
+    `  { ...definition, id: ${JSON.stringify(entry.id)} },`,
+    `  { mountSelector: ${JSON.stringify(mountSelector)} }`,
+    `).catch((error) => {`,
+    `  console.error('[vue-ssr-lite] hydration failed', error)`,
+    `  throw error`,
+    `})`,
+    '',
+  ].join('\n')
 }
 
 export const compileSsrConfig = async (
@@ -394,6 +495,11 @@ export const compileSsrConfig = async (
     (typeof process !== 'undefined'
       ? process.env.NODE_ENV !== 'production'
       : true)
+
+  if (!development) {
+    validateProductionConfig(config)
+  }
+
   const applicationIds = Object.keys(config.applications)
   if (!applicationIds.length) {
     throw new Error('SSR config requires at least one application.')
@@ -402,45 +508,38 @@ export const compileSsrConfig = async (
   const applications: SsrCompiledApplication[] = []
   for (const id of applicationIds) {
     const appConfig: SsrApplicationConfig = config.applications[id]
-    if (!appConfig?.template || !appConfig.domain) {
+    if (!appConfig?.template || !appConfig.domain || !appConfig.render) {
       throw new SsrHostConfigurationError(
-        `Application "${id}" requires template and domain configuration.`
+        `Application "${id}" requires render, template, and domain configuration.`
       )
     }
-    const hasSpa = appConfig.spa !== undefined
-    const hasSsr = appConfig.ssr !== undefined
-    // `spa: true` means "serve the SPA template shell" without a managed
-    // application definition (consumer mounts via its own client entry).
-    if (!hasSpa && !hasSsr) {
+    if (!appConfig.application) {
       throw new SsrHostConfigurationError(
-        `Application "${id}" requires spa or ssr.`
+        `Application "${id}" requires an application module.`
       )
     }
-    if (hasSpa && hasSsr) {
+    if (appConfig.render !== 'spa' && appConfig.render !== 'ssr') {
       throw new SsrHostConfigurationError(
-        `Application "${id}" cannot declare both spa and ssr.`
+        `Application "${id}" render must be "spa" or "ssr".`
       )
     }
 
-    const kind: SsrEntryKind = hasSsr ? 'ssr' : 'spa'
-    const ssrModule = isSsrApplicationModuleRef(appConfig.ssr)
-      ? appConfig.ssr
+    const kind: SsrEntryKind = appConfig.render
+    const applicationModule = isSsrApplicationModuleRef(appConfig.application)
+      ? appConfig.application
       : undefined
-    // SPA shells are mounted in the browser (`mountSpaApplication` / client
-    // entry). Never resolve SPA loaders on the Node server — they commonly pull
-    // browser-only packages (charts, maps, etc.) that crash without `window`.
-    const application = hasSsr
-      ? await resolveApplicationSource(appConfig.ssr, id, kind, options)
-      : undefined
-    const publicConfig: Record<string, unknown> = {
-      ...(appConfig.publicConfig || {}),
-    }
-    if (appConfig.graphql) {
-      publicConfig.graphql = {
-        endpoint: appConfig.graphql.endpoint,
-        timeout: appConfig.graphql.timeout ?? 8_000,
-      }
-    }
+
+    // SPA application modules often pull browser-only packages. Resolve only
+    // SSR definitions on the Node server; SPA mounts via the generated client.
+    const application =
+      kind === 'ssr'
+        ? await resolveApplicationSource(
+            appConfig.application,
+            id,
+            kind,
+            options
+          )
+        : undefined
 
     applications.push({
       id,
@@ -455,8 +554,8 @@ export const compileSsrConfig = async (
       endpoints: appConfig.endpoints ? [...appConfig.endpoints] : [],
       cookieAllowlist: parseCookieList(appConfig.cookies?.allow),
       cookieDenylist: parseCookieList(appConfig.cookies?.deny),
-      publicConfig,
-      ssrModule,
+      publicConfig: { ...(appConfig.publicConfig || {}) },
+      applicationModule,
       domain: {
         development: normalizeHostname(
           appConfig.domain.development,
@@ -469,7 +568,7 @@ export const compileSsrConfig = async (
         mode: appConfig.domain.mode ?? 'root-and-subdomains',
         localAliases: Boolean(appConfig.domain.localAliases),
         customDomains: Boolean(appConfig.domain.customDomains),
-        expose: appConfig.domain.expose,
+        params: appConfig.domain.params,
       },
     })
   }
@@ -495,7 +594,7 @@ export const compileSsrConfig = async (
       root: config.server?.root ?? options.root,
       host: config.server?.host,
       port: config.server?.port,
-      role: config.runtime,
+      role: config.runtime ?? (development ? 'unified' : undefined),
       trustProxy: config.server?.trustProxy,
       clientOutDir: config.server?.clientOutDir,
       requestTimeoutMs: config.server?.requestTimeoutMs,
