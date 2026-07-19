@@ -53,6 +53,20 @@ export type SsrApplicationLoader =
       | Promise<SsrApplicationDefinition<any, any, any>>)
 
 /**
+ * Path-based SSR application reference shared by the Node runtime and the Vite
+ * plugin. Prefer this over importing the definition in `ssr.config` so the Vite
+ * config can discover client entries without loading browser-only modules.
+ */
+export interface SsrApplicationModuleRef {
+  /** Project-root-relative module path (e.g. `./src/site/App.ts`). */
+  module: string
+  /** Named export. Defaults to the module's `default` export. */
+  exportName?: string
+}
+
+export type SsrApplicationSource = SsrApplicationLoader | SsrApplicationModuleRef
+
+/**
  * One self-contained SPA or SSR application: runtime, domain, security,
  * endpoints, and public configuration live together.
  */
@@ -63,8 +77,11 @@ export interface SsrApplicationConfig {
    * `mountSpaApplication()` from a browser entry instead.
    */
   spa?: true | SsrApplicationLoader
-  /** Server-rendered Vue application. */
-  ssr?: SsrApplicationLoader
+  /**
+   * Server-rendered Vue application. Prefer `{ module, exportName }` so
+   * `vueSsrLite()` can derive the hydration client entry from `ssr.config`.
+   */
+  ssr?: SsrApplicationSource
   template: string
   roles?: readonly string[]
   domain: SsrApplicationDomainConfig
