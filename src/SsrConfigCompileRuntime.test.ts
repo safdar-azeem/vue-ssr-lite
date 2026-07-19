@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { compileSsrConfig } from './SsrConfigCompileRuntime'
+import {
+  compileSsrConfig,
+  extractSsrViteEntries,
+  transformSsrModuleRefs,
+} from './SsrConfigCompileRuntime'
 import { defineSsrConfig } from './SsrConfigRuntime'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
@@ -82,5 +86,63 @@ describe('defineSsrConfig application domains', () => {
         'store1.shop.localhost'
       )?.entry.id
     ).toBe('storefront')
+  })
+
+  it('extracts Vite entries from module-ref SSR apps and SPA shells', () => {
+    const entries = extractSsrViteEntries(
+      defineSsrConfig({
+        name: 'demo',
+        applications: {
+          erp: {
+            spa: true,
+            template: 'index.html',
+            domain: {
+              development: 'localhost',
+              production: 'app.example.com',
+            },
+          },
+          storefront: {
+            ssr: {
+              module: './src/ShopSsrApplication.ts',
+              exportName: 'shopSsrApplication',
+            },
+            template: 'site.html',
+            mountSelector: '#app',
+            domain: {
+              development: 'shop.localhost',
+              production: 'shop.example.com',
+              customDomains: true,
+            },
+          },
+        },
+      })
+    )
+
+    expect(entries.spaEntries).toEqual({ erp: 'index.html' })
+    expect(entries.applications).toEqual([
+      {
+        id: 'storefront',
+        definition: './src/ShopSsrApplication.ts',
+        exportName: 'shopSsrApplication',
+        template: 'site.html',
+        mountSelector: '#app',
+      },
+    ])
+  })
+
+  it('rewrites ssr module refs into analyzable dynamic imports', () => {
+    const source = `
+      storefront: {
+        ssr: {
+          module: './src/ShopSsrApplication.ts',
+          exportName: 'shopSsrApplication',
+        },
+        template: 'site.html',
+      },
+    `
+    const transformed = transformSsrModuleRefs(source, '/app/ssr.config.ts')
+    expect(transformed).toContain(
+      'ssr: () => import("./src/ShopSsrApplication.ts").then((m) => m["shopSsrApplication"])'
+    )
   })
 })
