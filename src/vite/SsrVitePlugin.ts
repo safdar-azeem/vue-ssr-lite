@@ -1,19 +1,26 @@
 import { resolve } from 'node:path'
 import type { Plugin } from 'vite'
 import { normalizePath } from 'vite'
+import {
+  resolveSsrViteEntries,
+  transformSsrModuleRefs,
+  type SsrViteApplicationEntry,
+  type SsrViteEntries,
+} from '../SsrConfigCompileRuntime'
 import { prepareSsrHtmlTemplate } from '../server/SsrHtmlRuntime'
 
-export interface SsrViteApplicationEntry {
-  id: string
-  definition: string
-  exportName?: string
-  template: string
-  mountSelector?: string
-}
+export type { SsrViteApplicationEntry }
 
 export interface SsrVitePluginOptions {
-  applications: SsrViteApplicationEntry[]
+  /**
+   * Explicit SSR hydration entries. When omitted, entries are derived from
+   * `ssr.config.*` (`ssr: { module, exportName }` and `spa: true` templates).
+   */
+  applications?: SsrViteApplicationEntry[]
+  /** Explicit SPA HTML inputs. Derived from `ssr.config` when omitted. */
   spaEntries?: Record<string, string>
+  /** Optional path to `ssr.config.*` when auto-discovering entries. */
+  config?: string
   root?: string
   /**
    * Additional packages to deduplicate. `vue-ssr-lite` always dedupes the Vue
@@ -42,36 +49,62 @@ const FRAMEWORK_DEDUPE = [
 const VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/client/'
 const RESOLVED_VIRTUAL_PREFIX = `\0${VIRTUAL_PREFIX}`
 
-export const vueSsrLite = (options: SsrVitePluginOptions): Plugin => {
-  if (!options.applications?.length) {
-    throw new Error('vueSsrLite requires at least one SSR application entry.')
-  }
-  let root = resolve(options.root || process.cwd())
-  const virtualEntries = new Map(
-    options.applications.map((application) => [
-      `${VIRTUAL_PREFIX}${application.id}`,
-      application,
+const buildRollupInput = (
+  root: string,
+  entries: SsrViteEntries
+): Record<string, string> => ({
+  ...Object.fromEntries(
+    entries.applications.map((entry) => [
+      entry.id,
+      resolve(root, entry.template),
     ])
-  )
+  ),
+  ...Object.fromEntries(
+    Object.entries(entries.spaEntries).map(([id, template]) => [
+      id,
+      resolve(root, template),
+    ])
+  ),
+})
+
+export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
+  let root = resolve(options.root || process.cwd())
+  let entries: SsrViteEntries | null =
+    options.applications?.length || options.spaEntries
+      ? {
+          applications: options.applications ?? [],
+          spaEntries: options.spaEntries ?? {},
+        }
+      : null
+  const virtualEntries = new Map<string, SsrViteApplicationEntry>()
+
+  const syncVirtualEntries = () => {
+    virtualEntries.clear()
+    for (const application of entries?.applications ?? []) {
+      virtualEntries.set(`${VIRTUAL_PREFIX}${application.id}`, application)
+    }
+  }
+  syncVirtualEntries()
+
+  const ensureEntries = async (): Promise<SsrViteEntries> => {
+    if (entries) return entries
+    entries = await resolveSsrViteEntries(root, options.config)
+    if (!entries.applications.length && !Object.keys(entries.spaEntries).length) {
+      throw new Error(
+        'vueSsrLite() could not derive applications from ssr.config. Declare spa/ssr apps or pass applications explicitly.'
+      )
+    }
+    syncVirtualEntries()
+    return entries
+  }
 
   return {
     name: 'vue-ssr-lite',
     enforce: 'pre',
-    config(_currentConfig, environment) {
-      const input = {
-        ...Object.fromEntries(
-          options.applications.map((entry) => [
-            entry.id,
-            resolve(root, entry.template),
-          ])
-        ),
-        ...Object.fromEntries(
-          Object.entries(options.spaEntries ?? {}).map(([id, template]) => [
-            id,
-            resolve(root, template),
-          ])
-        ),
-      }
+    async config(userConfig, environment) {
+      root = resolve(options.root || userConfig.root || process.cwd())
+      const resolved = await ensureEntries()
+      const input = buildRollupInput(root, resolved)
       return {
         resolve: {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
@@ -94,13 +127,20 @@ export const vueSsrLite = (options: SsrVitePluginOptions): Plugin => {
     configResolved(config) {
       root = config.root
     },
+    transform(code, id) {
+      return transformSsrModuleRefs(code, id)
+    },
     resolveId(id) {
-      return virtualEntries.has(id) ? `${RESOLVED_VIRTUAL_PREFIX}${id.slice(VIRTUAL_PREFIX.length)}` : undefined
+      return virtualEntries.has(id)
+        ? `${RESOLVED_VIRTUAL_PREFIX}${id.slice(VIRTUAL_PREFIX.length)}`
+        : undefined
     },
     load(id) {
       if (!id.startsWith(RESOLVED_VIRTUAL_PREFIX)) return
       const applicationId = id.slice(RESOLVED_VIRTUAL_PREFIX.length)
-      const entry = options.applications.find(({ id: candidate }) => candidate === applicationId)
+      const entry = entries?.applications.find(
+        ({ id: candidate }) => candidate === applicationId
+      )
       if (!entry) return
       const definitionPath = normalizePath(resolve(root, entry.definition))
       const importStatement = entry.exportName
@@ -121,7 +161,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions): Plugin => {
       order: 'pre',
       handler(html, context) {
         const filename = normalizePath(context.filename)
-        const entry = options.applications.find(
+        const entry = entries?.applications.find(
           (candidate) =>
             filename === normalizePath(resolve(root, candidate.template))
         )
@@ -131,7 +171,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions): Plugin => {
           html,
           entry.mountSelector || '#app'
         )
-        if (prepared.includes(`import ${JSON.stringify(virtualId)}`)) return prepared
+        if (prepared.includes(`import ${JSON.stringify(virtualId)}`)) {
+          return prepared
+        }
         return {
           html: prepared,
           tags: [
