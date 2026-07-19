@@ -85,4 +85,11 @@ describe('SSR Vite package identity', () => {
     expect(config.ssr?.noExternal).toContain('vue-apollo-client')
     expect(config.ssr?.noExternal).toContain('@vue/apollo-composable')
   })
+
+  it('accepts spa-only explicit entries without an SSR application list', async () => {
+    const config = await runConfig({
+      spaEntries: { erp: 'index.html' },
+    })
+    expect(config.ssr?.external).toContain('vue-ssr-lite')
+  })
 })
