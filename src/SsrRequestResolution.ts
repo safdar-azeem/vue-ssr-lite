@@ -46,7 +46,9 @@ export interface SsrRequestResolution {
   /**
    * Request one additional render pass even when no tracked promise is pending.
    * Use when work mutated shared state synchronously in a way the current tree
-   * did not observe. Honoured up to the configured pass bound.
+   * did not observe. Honoured up to the configured pass bound. The {@link
+   * ssrWatch} primitive calls this automatically, so applications rarely call it
+   * directly.
    */
   requestAdditionalPass(): void
 }
