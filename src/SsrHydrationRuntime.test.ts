@@ -13,6 +13,7 @@ import { SSR_HYDRATION_CONTEXT, type SsrHydrationContext } from './SsrHydrationR
 import { renderSsrApplication } from './SsrRenderRuntime'
 import { hydrateSsrApplication } from './SsrBrowserRuntime'
 import { getSsrStateElementId } from './SsrSerialization'
+import { createTestDomain, createTestRenderRequest } from './SsrTestFixtures'
 
 /**
  * A fake, framework-neutral "data client" plugin. It demonstrates that the
@@ -57,16 +58,8 @@ const useDemoData = (fetcher: () => Promise<string>) => {
   return store.value
 }
 
-const request = () => ({
-  requestId: 'demo',
-  url: 'https://demo.test/',
-  host: 'demo.test',
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
-  publicConfig: {},
-  signal: new AbortController().signal,
-})
+const request = () =>
+  createTestRenderRequest('demo.test', { requestId: 'demo' })
 
 describe('generic hydration lifecycle', () => {
   it('waits for a plugin server-prefetch, renders real data, and serializes contributed state', async () => {
@@ -117,6 +110,7 @@ describe('generic hydration lifecycle', () => {
         version: 1,
         applicationId: 'demo-app',
         publicConfig: {},
+        domain: createTestDomain('demo.test'),
         application: {},
         plugins: { demo: { value: 'prefetched-value' } },
       })
