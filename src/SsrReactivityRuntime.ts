@@ -1,4 +1,6 @@
 import {
+  hasInjectionContext,
+  inject,
   watch,
   watchEffect,
   type WatchCallback,
@@ -6,6 +8,28 @@ import {
   type WatchSource,
   type WatchStopHandle,
 } from 'vue'
+import {
+  SSR_REQUEST_RESOLUTION,
+  type SsrRequestResolution,
+} from './SsrRequestResolution'
+
+/**
+ * On the server, a run that happens AFTER the synchronous creation of the
+ * watcher reflects state that settled late — for example a store populated from
+ * an awaited `onServerPrefetch`, after a sibling component already rendered.
+ * Asking the resolution contract for another render pass lets consumers reflect
+ * it; the resumed pass settles synchronously (the API client's request cache is
+ * warm), so this never recurs. Inert in the browser and when no host is present.
+ *
+ * This is what makes the "parent query → child components → child queries
+ * consumed indirectly through a shared store read by a sibling" pattern work on
+ * the server with NO orchestration code in the application: components just use
+ * `ssrWatch` to reconcile resolved data, as they already do.
+ */
+const resolveSsrResolution = (): SsrRequestResolution | null =>
+  hasInjectionContext()
+    ? inject<SsrRequestResolution | null>(SSR_REQUEST_RESOLUTION, null)
+    : null
 
 /**
  * SSR-safe reactivity.
@@ -52,6 +76,12 @@ export type SsrWatchOptions<Immediate extends boolean = boolean> = Omit<
  * Identical semantics to Vue's `watch` otherwise: pass `{ immediate: true }` to
  * run once on setup, and use the returned handle to stop it. Because the flush
  * is synchronous, avoid mutating the watched source from inside the callback.
+ *
+ * When the callback runs on the server AFTER creation (a dependency settled
+ * during the render, e.g. an awaited query result), it automatically requests
+ * one more render pass through the resolution contract so consumers that read
+ * the mutated state elsewhere reflect it. Applications write no SSR
+ * orchestration for this — it is a property of the primitive.
  */
 export function ssrWatch<T, Immediate extends boolean = false>(
   source: WatchSource<T>,
@@ -68,16 +98,39 @@ export function ssrWatch(
   callback: any,
   options?: SsrWatchOptions
 ): WatchStopHandle {
-  return watch(source, callback, { ...options, flush: 'sync' })
+  const resolution = resolveSsrResolution()
+  let created = false
+  const wrapped = (...args: any[]) => {
+    const result = callback(...args)
+    if (created && resolution?.server) resolution.requestAdditionalPass()
+    return result
+  }
+  const stop = watch(source, wrapped, { ...options, flush: 'sync' })
+  created = true
+  return stop
 }
 
 /**
  * `watchEffect`, pinned to `flush: 'sync'` so the effect is active during SSR.
  * The effect runs immediately and re-runs synchronously whenever a tracked
  * dependency changes — including changes that happen while the server render is
- * still in progress.
+ * still in progress. Post-creation server runs request one more render pass
+ * (see {@link ssrWatch}).
  */
 export const ssrWatchEffect = (
   effect: Parameters<typeof watchEffect>[0],
   options?: Omit<NonNullable<Parameters<typeof watchEffect>[1]>, 'flush'>
-): WatchStopHandle => watchEffect(effect, { ...options, flush: 'sync' })
+): WatchStopHandle => {
+  const resolution = resolveSsrResolution()
+  let created = false
+  const stop = watchEffect(
+    ((onCleanup: any) => {
+      const result = (effect as any)(onCleanup)
+      if (created && resolution?.server) resolution.requestAdditionalPass()
+      return result
+    }) as Parameters<typeof watchEffect>[0],
+    { ...options, flush: 'sync' }
+  )
+  created = true
+  return stop
+}
