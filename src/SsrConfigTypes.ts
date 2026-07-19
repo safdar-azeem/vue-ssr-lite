@@ -9,20 +9,21 @@ import type {
 /** How an application owns its apex hostname and subdomains. */
 export type SsrDomainMode = 'root' | 'subdomains' | 'root-and-subdomains'
 
-export interface SsrApplicationDomainExpose {
-  /** Expose the last subdomain label under the app base (e.g. workspace). */
-  subdomainAs?: string
-  /**
-   * Expose the remaining labels under the app base, or the full hostname for
-   * custom domains (e.g. storeDomain).
-   */
-  subdomainOrHostnameAs?: string
+export type SsrRenderMode = 'spa' | 'ssr'
+
+/** How a declared domain param is derived from the request host. */
+export type SsrDomainParamSource =
+  | 'last-subdomain-label'
+  | 'subdomain-or-hostname'
+
+export interface SsrDomainParamDefinition {
+  source: SsrDomainParamSource
 }
 
 export interface SsrApplicationDomainConfig {
   /** Apex used while `NODE_ENV !== 'production'`. */
   development: string
-  /** Apex used in production. */
+  /** Apex used in production. Required in production (no silent fallback). */
   production: string
   /** Defaults to `root-and-subdomains`. */
   mode?: SsrDomainMode
@@ -32,13 +33,11 @@ export interface SsrApplicationDomainConfig {
   customDomains?: boolean
   /** Extra exact hostnames owned by this application. */
   additionalHosts?: readonly string[]
-  /** Map resolved subdomain/hostname values onto `useSsrDomain().params`. */
-  expose?: SsrApplicationDomainExpose
-}
-
-export interface SsrApplicationGraphqlConfig {
-  endpoint: string
-  timeout?: number
+  /**
+   * Named values exposed on `useSsrDomain().params`.
+   * Example: `{ workspace: { source: 'last-subdomain-label' } }`.
+   */
+  params?: Record<string, SsrDomainParamDefinition>
 }
 
 export interface SsrApplicationCookiesConfig {
@@ -53,12 +52,11 @@ export type SsrApplicationLoader =
       | Promise<SsrApplicationDefinition<any, any, any>>)
 
 /**
- * Path-based SSR application reference shared by the Node runtime and the Vite
- * plugin. Prefer this over importing the definition in `ssr.config` so the Vite
- * config can discover client entries without loading browser-only modules.
+ * Path-based application reference. Prefer this in `ssr.config` so Vite can
+ * generate client entries without importing browser-only modules into Node.
  */
 export interface SsrApplicationModuleRef {
-  /** Project-root-relative module path (e.g. `./src/site/App.ts`). */
+  /** Project-root-relative module path (e.g. `./src/runtime/ErpBootstrap.ts`). */
   module: string
   /** Named export. Defaults to the module's `default` export. */
   exportName?: string
@@ -67,31 +65,29 @@ export interface SsrApplicationModuleRef {
 export type SsrApplicationSource = SsrApplicationLoader | SsrApplicationModuleRef
 
 /**
- * One self-contained SPA or SSR application: runtime, domain, security,
- * endpoints, and public configuration live together.
+ * One self-contained SPA or SSR application. The object key under
+ * `applications` is the canonical application ID everywhere.
  */
 export interface SsrApplicationConfig {
+  /** Browser SPA shell or server-rendered application. */
+  render: SsrRenderMode
   /**
-   * SPA HTML shell. Use `true` (recommended) or a client-only loader reference.
-   * The Node server never executes SPA loaders — mount with
-   * `mountSpaApplication()` from a browser entry instead.
+   * Application module. Required for both SPA and SSR so the library can
+   * generate client entries from `ssr.config` alone.
    */
-  spa?: true | SsrApplicationLoader
-  /**
-   * Server-rendered Vue application. Prefer `{ module, exportName }` so
-   * `vueSsrLite()` can derive the hydration client entry from `ssr.config`.
-   */
-  ssr?: SsrApplicationSource
+  application: SsrApplicationSource
   template: string
   roles?: readonly string[]
   domain: SsrApplicationDomainConfig
-  graphql?: SsrApplicationGraphqlConfig
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
   mountSelector?: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
-  /** Merged into the request `publicConfig` for this application. */
+  /**
+   * Opaque public configuration delivered to the selected application.
+   * Transport-only — the library does not interpret GraphQL, REST, etc.
+   */
   publicConfig?: Record<string, unknown>
 }
 
@@ -118,7 +114,7 @@ export interface SsrConfigServerOptions {
 export interface SsrConfig {
   name: string
   server?: SsrConfigServerOptions
-  /** Active process role (`unified`, `erp`, `storefront`, …). */
+  /** Active process role (`unified`, `erp`, `storefront`, …). Required in production. */
   runtime?: string
   applications: Record<string, SsrApplicationConfig>
   /** Used only when no application host pattern matches. */
@@ -132,7 +128,7 @@ export type SsrConfigExport =
 
 /** Serializable domain snapshot attached to every request and hydration state. */
 export interface SsrDomainContext {
-  /** Selected application id. */
+  /** Selected application id (the `applications` object key). */
   entry: string
   hostname: string
   /** Active environment apex for the selected application. */
@@ -141,6 +137,6 @@ export interface SsrDomainContext {
   subdomain: string | null
   isCustomDomain: boolean
   development: boolean
-  /** Values declared via `domain.expose`. */
+  /** Values declared via `domain.params`. */
   params: Record<string, string>
 }
