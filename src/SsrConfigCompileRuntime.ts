@@ -385,8 +385,12 @@ const absoluteImportPath = (root: string, filePath: string): string =>
   resolve(root, filePath).replaceAll('\\', '/')
 
 /**
- * Generate a Vite-analyzable runtime module that imports each application
+ * Generate a Vite-analyzable runtime module that imports each SSR application
  * module statically and merges it into the user `ssr.config` export.
+ *
+ * SPA modules are intentionally omitted: the Node server only needs host /
+ * template metadata for them. Eagerly importing SPA apps would execute their
+ * client-side module side effects (shared registries, etc.) in the SSR process.
  */
 export const generateSsrRuntimeModule = (
   root: string,
@@ -398,22 +402,24 @@ export const generateSsrRuntimeModule = (
     `import __ssrUserConfig from ${JSON.stringify(configImportPath)}`,
   ]
   const bindLines: string[] = []
-  entries.forEach((entry, index) => {
-    const alias = `__ssrApp${index}`
-    const definitionPath = absoluteImportPath(root, entry.definition)
-    if (entry.exportName) {
-      importLines.push(
-        `import { ${entry.exportName} as ${alias} } from ${JSON.stringify(definitionPath)}`
+  entries
+    .filter((entry) => entry.kind === 'ssr')
+    .forEach((entry, index) => {
+      const alias = `__ssrApp${index}`
+      const definitionPath = absoluteImportPath(root, entry.definition)
+      if (entry.exportName) {
+        importLines.push(
+          `import { ${entry.exportName} as ${alias} } from ${JSON.stringify(definitionPath)}`
+        )
+      } else {
+        importLines.push(
+          `import ${alias} from ${JSON.stringify(definitionPath)}`
+        )
+      }
+      bindLines.push(
+        `  applications[${JSON.stringify(entry.id)}] = { ...applications[${JSON.stringify(entry.id)}], application: ${alias} }`
       )
-    } else {
-      importLines.push(
-        `import ${alias} from ${JSON.stringify(definitionPath)}`
-      )
-    }
-    bindLines.push(
-      `  applications[${JSON.stringify(entry.id)}] = { ...applications[${JSON.stringify(entry.id)}], application: ${alias} }`
-    )
-  })
+    })
 
   return [
     ...importLines,
