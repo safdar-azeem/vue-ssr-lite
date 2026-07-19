@@ -2,17 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
+import { createTestRenderRequest } from './SsrTestFixtures'
 
-const request = () => ({
-  requestId: 'cleanup',
-  url: 'https://cleanup.test/',
-  host: 'cleanup.test',
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
-  publicConfig: {},
-  signal: new AbortController().signal,
-})
+const request = () =>
+  createTestRenderRequest('cleanup.test', { requestId: 'cleanup' })
 
 // The runtime owns no API client. Installed plugins register their own teardown
 // through the generic hydration contract, and the runtime guarantees every
