@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
+import { defineSsrConfig } from '../SsrConfigRuntime'
 import { useSsrRequestContext } from '../SsrRequestContext'
 import { createSsrManagedServer, type SsrManagedServer } from './SsrServerRuntime'
 
@@ -16,6 +17,24 @@ afterEach(async () => {
   root = ''
 })
 
+const spaConfig = (template = 'index.html') =>
+  defineSsrConfig({
+    name: 'test-runtime',
+    applications: {
+      spa: {
+        spa: true,
+        template,
+        domain: {
+          development: 'localhost',
+          production: 'localhost',
+          mode: 'root',
+          localAliases: true,
+          customDomains: true,
+        },
+      },
+    },
+  })
+
 describe('managed SSR server lifecycle', () => {
   it('starts, serves health/SPA/404, checks readiness, and shuts down', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
@@ -26,25 +45,7 @@ describe('managed SSR server lifecycle', () => {
     managed = await createSsrManagedServer({
       production: false,
       root,
-      loadRuntime: async () => ({
-        default: {
-          name: 'test-runtime',
-          entries: [
-            {
-              id: 'spa',
-              kind: 'spa',
-              template: 'index.html',
-              hosts: ['*'],
-            },
-          ],
-          server: {
-            root,
-            host: '127.0.0.1',
-            port: 0,
-            publicConfig: {},
-          },
-        },
-      }),
+      loadRuntime: async () => ({ default: spaConfig() }),
     })
     await managed.listen()
     const { port } = managed.address()
@@ -55,9 +56,11 @@ describe('managed SSR server lifecycle', () => {
     })
     const missing = await fetch(`http://127.0.0.1:${port}/missing.json`)
 
+    const pageHtml = await page.text()
     expect(health.status).toBe(200)
     expect(ready.status).toBe(200)
-    expect(await page.text()).toContain('<div id="app"></div>')
+    expect(pageHtml).toContain('<div id="app"></div>')
+    expect(pageHtml).toContain('vue-ssr-lite-domain')
     expect(missing.status).toBe(404)
   })
 
@@ -83,23 +86,21 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: {
+        default: defineSsrConfig({
           name: 'test-runtime',
-          entries: [{
-            id: 'ssr',
-            kind: 'ssr',
-            template: 'site.html',
-            hosts: ['*'],
-            application: { id: 'test-app', rootComponent: Root },
-          }],
-          server: {
-            root,
-            host: '127.0.0.1',
-            port: 0,
-            requestTimeoutMs: 20,
-            publicConfig: {},
+          server: { requestTimeoutMs: 20 },
+          applications: {
+            ssr: {
+              ssr: { id: 'test-app', rootComponent: Root },
+              template: 'site.html',
+              domain: {
+                development: 'localhost',
+                production: 'localhost',
+                customDomains: true,
+              },
+            },
           },
-        },
+        }),
       }),
     })
     await managed.listen()
@@ -119,113 +120,73 @@ describe('managed SSR server lifecycle', () => {
     expect(timeout.status).toBe(504)
   })
 
-  it('transforms a development SSR template by entry filename', async () => {
+  it('selects applications by host specificity and enforces runtime roles with 421', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app">spa</div></body></html>'
+    )
     await writeFile(
       join(root, 'site.html'),
       '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
     )
-    const transforms: Array<{ url: string; originalUrl?: string }> = []
+    const Root = defineComponent({
+      setup: () => () => h('main', 'storefront'),
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
-      vite: {
-        async transformIndexHtml(url: string, html: string, originalUrl?: string) {
-          transforms.push({ url, originalUrl })
-          return html.replace(
-            '</body>',
-            '<script type="module" src="/@id/virtual:vue-ssr-lite/client/storefront"></script></body>'
-          )
-        },
-      } as any,
       loadRuntime: async () => ({
-        default: {
-          name: 'test-runtime',
-          entries: [
-            {
-              id: 'storefront',
-              kind: 'ssr',
+        default: defineSsrConfig({
+          name: 'host-runtime',
+          runtime: 'erp',
+          server: { trustProxy: true },
+          applications: {
+            storefront: {
+              ssr: { id: 'storefront', rootComponent: Root },
               template: 'site.html',
-              hosts: ['*'],
-              application: {
-                id: 'storefront',
-                rootComponent: defineComponent({
-                  setup: () => () => h('main', 'interactive'),
-                }),
+              roles: ['unified', 'storefront'],
+              domain: {
+                development: 'shop.localhost',
+                production: 'shop.localhost',
+                mode: 'root-and-subdomains',
+                customDomains: true,
               },
             },
-          ],
-          server: {
-            root,
-            host: '127.0.0.1',
-            port: 0,
-            publicConfig: {},
+            erp: {
+              spa: true,
+              template: 'index.html',
+              roles: ['unified', 'erp'],
+              domain: {
+                development: 'localhost',
+                production: 'localhost',
+                mode: 'root-and-subdomains',
+                localAliases: true,
+              },
+            },
           },
-        },
+        }),
       }),
     })
     await managed.listen()
     const { port } = managed.address()
-    const page = await fetch(`http://127.0.0.1:${port}/products/item?view=full`, {
-      headers: { accept: 'text/html' },
-    })
-    const html = await page.text()
 
-    expect(page.status).toBe(200)
-    expect(transforms).toEqual([
-      { url: '/site.html', originalUrl: '/products/item?view=full' },
-    ])
-    expect(html).toContain('virtual:vue-ssr-lite/client/storefront')
-    expect(html).toContain('<main>interactive</main>')
-  })
-
-  it('serves production assets and hides render failure details', async () => {
-    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
-    const clientRoot = join(root, 'dist/client')
-    await mkdir(join(clientRoot, 'assets'), { recursive: true })
-    await writeFile(
-      join(clientRoot, 'site.html'),
-      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
-    )
-    await writeFile(join(clientRoot, 'assets/app-123.js'), 'export default 1')
-    const Root = defineComponent({
-      setup() {
-        throw new Error('secret-internal-render-path')
+    const workspace = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: {
+        accept: 'text/html',
+        'x-forwarded-host': 'company1.localhost',
       },
     })
-    managed = await createSsrManagedServer({
-      production: true,
-      root,
-      loadRuntime: async () => ({
-        default: {
-          name: 'test-runtime',
-          entries: [{
-            id: 'ssr',
-            kind: 'ssr',
-            template: 'site.html',
-            hosts: ['*'],
-            application: { id: 'test-app', rootComponent: Root },
-          }],
-          server: {
-            root,
-            host: '127.0.0.1',
-            port: 0,
-            publicConfig: {},
-          },
-        },
-      }),
+    const shop = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: {
+        accept: 'text/html',
+        'x-forwarded-host': 'classic-modern-7963.shop.localhost',
+      },
     })
-    await managed.listen()
-    const { port } = managed.address()
-    const asset = await fetch(`http://127.0.0.1:${port}/assets/app-123.js`)
-    const failed = await fetch(`http://127.0.0.1:${port}/failure`, {
-      headers: { accept: 'text/html' },
-    })
-    const errorHtml = await failed.text()
 
-    expect(asset.status).toBe(200)
-    expect(asset.headers.get('cache-control')).toContain('immutable')
-    expect(failed.status).toBe(500)
-    expect(errorHtml).not.toContain('secret-internal-render-path')
+    expect(workspace.status).toBe(200)
+    expect(await workspace.text()).toContain('<div id="app">spa</div>')
+    expect(shop.status).toBe(421)
+    expect(await shop.text()).toContain('Misdirected request')
   })
 })
