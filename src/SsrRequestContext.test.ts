@@ -8,6 +8,7 @@ import {
 } from './index'
 import { SSR_REQUEST_CONTEXT as MODULE_REQUEST_CONTEXT } from './SsrRequestContext'
 import type { SsrRequestContext } from './SsrRuntimeTypes'
+import { createTestRenderRequest } from './SsrTestFixtures'
 
 const REQUEST_CONTEXT_SYMBOL_KEY = 'vue-ssr:request-context'
 
@@ -17,16 +18,11 @@ const COMPATIBLE_REQUEST_CONTEXT = Symbol.for(
   REQUEST_CONTEXT_SYMBOL_KEY
 ) as InjectionKey<SsrRequestContext<any, any, any>>
 
-const request = {
+const request = createTestRenderRequest('identity.test', {
   requestId: 'request-context-regression',
   url: 'https://identity.test/catalog',
-  host: 'identity.test',
-  protocol: 'https' as const,
-  method: 'GET',
-  headers: {},
   publicConfig: { label: 'identity' },
-  signal: new AbortController().signal,
-}
+})
 
 describe('SSR request context identity', () => {
   it('uses one globally registered identity across public and compatible module entries', () => {
