@@ -1,5 +1,6 @@
 import type { App } from 'vue'
 import { createSsrApplication } from './SsrApplicationRuntime'
+import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
 import type {
   SsrApplicationDefinition,
@@ -15,10 +16,12 @@ export interface SsrHydrateOptions {
 
 export interface SsrSpaMountOptions<TPublicConfig = unknown> {
   mountSelector?: string
-  /** Client-side public config. Defaults to `{}` for a self-contained SPA. */
+  /** Client-side public config. Defaults to injected SPA domain state. */
   publicConfig?: TPublicConfig
   /** Initial URL to route to. Defaults to `window.location`. */
   url?: string
+  /** Domain context. Defaults to `#vue-ssr-lite-domain` injection. */
+  domain?: SsrDomainContext
 }
 
 export interface SsrMountedApplication {
@@ -29,6 +32,7 @@ export interface SsrMountedApplication {
 
 const browserRequest = <TPublicConfig>(
   publicConfig: TPublicConfig,
+  domain: SsrDomainContext,
   url: string,
   prefix: string,
   signal: AbortSignal
@@ -40,8 +44,27 @@ const browserRequest = <TPublicConfig>(
   method: 'GET',
   headers: {},
   publicConfig,
+  domain,
   signal,
 })
+
+const readSpaDomainState = <TPublicConfig>(): {
+  publicConfig: TPublicConfig
+  domain: SsrDomainContext
+  applicationId?: string
+} | null => {
+  const element = document.getElementById('vue-ssr-lite-domain')
+  if (!element?.textContent) return null
+  try {
+    return JSON.parse(element.textContent) as {
+      publicConfig: TPublicConfig
+      domain: SsrDomainContext
+      applicationId?: string
+    }
+  } catch {
+    return null
+  }
+}
 
 export const hydrateSsrApplication = async (
   definition: SsrApplicationDefinition<any, any, any>,
@@ -59,9 +82,13 @@ export const hydrateSsrApplication = async (
   if (hydrationState.version !== 1) {
     throw new Error(`Unsupported SSR hydration state version.`)
   }
+  if (!hydrationState.domain) {
+    throw new Error('SSR hydration state is missing domain context.')
+  }
   const controller = new AbortController()
   const request = browserRequest(
     hydrationState.publicConfig,
+    hydrationState.domain,
     window.location.href,
     'browser',
     controller.signal
@@ -99,11 +126,9 @@ export const hydrateSsrApplication = async (
 }
 
 /**
- * Mounts an {@link SsrApplicationDefinition} as a pure client-side SPA — the
- * third mode alongside server render and browser hydration. The SAME definition
- * (root component, routes, plugins, install hook, public config delivery) drives
- * all three, so a consumer's SPA entry and SSR entry cannot drift. No server
- * markup is required: Vue performs a full client render.
+ * Mounts an {@link SsrApplicationDefinition} as a pure client-side SPA.
+ * Domain context is restored from the server-injected `#vue-ssr-lite-domain`
+ * payload so SPA and SSR share the same library-owned resolution.
  */
 export const mountSpaApplication = async <
   TApplicationState extends Record<string, any> = Record<string, unknown>,
@@ -117,9 +142,19 @@ export const mountSpaApplication = async <
   >,
   options: SsrSpaMountOptions<TPublicConfig> = {}
 ): Promise<SsrMountedApplication> => {
+  const injected = readSpaDomainState<TPublicConfig>()
+  const domain = options.domain ?? injected?.domain
+  if (!domain) {
+    throw new Error(
+      'vue-ssr-lite SPA mount requires domain context. Ensure the managed server injected #vue-ssr-lite-domain.'
+    )
+  }
+  const publicConfig =
+    options.publicConfig ?? injected?.publicConfig ?? ({} as TPublicConfig)
   const controller = new AbortController()
   const request = browserRequest(
-    (options.publicConfig ?? {}) as TPublicConfig,
+    publicConfig,
+    domain,
     options.url ?? window.location.href,
     'spa',
     controller.signal
@@ -141,6 +176,7 @@ export const mountSpaApplication = async <
     const app = created.app
     const activeCreated = created
     app.mount(options.mountSelector ?? definition.mountSelector ?? '#app')
+    document.getElementById('vue-ssr-lite-domain')?.remove()
     return {
       app,
       unmount: () => {
