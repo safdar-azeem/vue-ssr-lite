@@ -2,21 +2,25 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, stat } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
 import type { ViteDevServer } from 'vite'
+import {
+  compileSsrConfig,
+  type SsrCompiledConfig,
+} from '../SsrConfigCompileRuntime'
+import { resolveSsrDomainContext } from '../SsrDomainRuntime'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import type {
   SsrHeaders,
   SsrEndpointTools,
   SsrHttpRequest,
   SsrHttpResponse,
-  SsrRuntimeDefinition,
-  SsrRuntimeDefinitionExport,
 } from '../SsrRuntimeTypes'
+import { serializeSsrState } from '../SsrSerialization'
 import { resolveSsrProductionAsset } from './SsrAssetRuntime'
 import {
   filterSsrCookieHeader,
-  resolveSsrEntry,
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
+  resolveSsrHostEntry,
 } from './SsrHostRuntime'
 import {
   injectSsrHtml,
@@ -76,36 +80,41 @@ const logServerReady = (host: string, port: number, role: string) => {
   )
 }
 
-const resolveRuntime = async (
-  loaded: unknown
-): Promise<SsrRuntimeDefinition<any>> => {
-  const moduleValue = loaded as {
-    default?: SsrRuntimeDefinitionExport<any>
-  }
-  const exported = moduleValue?.default ?? (loaded as SsrRuntimeDefinitionExport<any>)
-  const definition =
-    typeof exported === 'function' ? await exported() : exported
-  if (!definition?.name || !Array.isArray(definition.entries) || !definition.server) {
-    throw new Error('The SSR runtime module does not export a valid runtime definition.')
-  }
-  const entryIds = new Set<string>()
-  for (const entry of definition.entries) {
-    if (!entry.id || entryIds.has(entry.id)) {
-      throw new Error('SSR runtime entry ids must be present and unique.')
-    }
-    entryIds.add(entry.id)
-    if (!entry.template || !entry.hosts?.length) {
-      throw new Error(`SSR runtime entry "${entry.id}" requires a template and hosts.`)
-    }
+const resolveRuntime = async (loaded: unknown): Promise<SsrCompiledConfig> => {
+  const definition = await compileSsrConfig(loaded, {
+    development: process.env.NODE_ENV !== 'production',
+  })
+  for (const application of definition.applications) {
     const enabledForRole =
-      !entry.roles?.length ||
+      !application.roles?.length ||
       !definition.server.role ||
-      entry.roles.includes(definition.server.role)
-    if (entry.kind === 'ssr' && enabledForRole && !entry.application) {
-      throw new Error(`SSR entry "${entry.id}" requires an application definition.`)
+      application.roles.includes(definition.server.role)
+    if (application.kind === 'ssr' && enabledForRole && !application.application) {
+      throw new Error(
+        `SSR application "${application.id}" requires an ssr application definition.`
+      )
     }
   }
   return definition
+}
+
+const injectSpaDomainState = (
+  template: string,
+  applicationId: string,
+  domain: ReturnType<typeof resolveSsrDomainContext>,
+  publicConfig: Record<string, unknown>
+): string => {
+  const payload = serializeSsrState({
+    version: 1,
+    applicationId,
+    domain,
+    publicConfig,
+  })
+  const tag = `<script type="application/json" id="vue-ssr-lite-domain">${payload}</script>`
+  if (template.includes('</body>')) {
+    return template.replace(/<\/body>/i, `\t${tag}\n</body>`)
+  }
+  return `${template}\n${tag}`
 }
 
 const htmlSecurityHeaders = {
@@ -181,7 +190,7 @@ const runViteMiddleware = (
   response: ServerResponse
 ) =>
   new Promise<void>((resolveMiddleware, reject) => {
-    vite.middlewares(request, response, (error) => {
+    vite.middlewares(request, response, (error?: Error) => {
       if (error) reject(error)
       else resolveMiddleware()
     })
@@ -206,7 +215,7 @@ export const createSsrManagedServer = async (
       : resolveRuntime(await options.loadRuntime())
 
   const loadTemplate = async (
-    definition: SsrRuntimeDefinition<any>,
+    definition: SsrCompiledConfig,
     templateName: string,
     requestUrl: string
   ) => {
@@ -222,42 +231,50 @@ export const createSsrManagedServer = async (
     return options.vite.transformIndexHtml(templateUrl, template, requestUrl)
   }
 
-  const assertReady = async (definition: SsrRuntimeDefinition<any>) => {
+  const assertReady = async (definition: SsrCompiledConfig) => {
     const runtimeRoot = definition.server.root || options.root
-    const enabledEntries = definition.entries.filter(
-      (entry) =>
-        !entry.roles?.length ||
+    const enabledApplications = definition.applications.filter(
+      (application) =>
+        !application.roles?.length ||
         !definition.server.role ||
-        entry.roles.includes(definition.server.role)
+        application.roles.includes(definition.server.role)
     )
     await Promise.all(
-      enabledEntries.map(async (entry) => {
+      enabledApplications.map(async (application) => {
         const information = await stat(
-          resolve(options.production ? clientRoot : runtimeRoot, entry.template)
+          resolve(
+            options.production ? clientRoot : runtimeRoot,
+            application.template
+          )
         )
         if (!information.isFile()) {
-          throw new Error(`SSR client entry is missing: ${entry.template}`)
+          throw new Error(`SSR client entry is missing: ${application.template}`)
         }
       })
     )
     await Promise.all((definition.readiness ?? []).map((probe) => probe.run()))
   }
 
-  // Startup preflight validates entries and module shape without running
+  // Startup preflight validates applications and module shape without running
   // network readiness probes. `/readyz` owns external dependency checks.
-  const initialEnabledEntries = initialRuntime.entries.filter(
-    (entry) =>
-      !entry.roles?.length ||
+  const initialEnabledApplications = initialRuntime.applications.filter(
+    (application) =>
+      !application.roles?.length ||
       !initialRuntime.server.role ||
-      entry.roles.includes(initialRuntime.server.role)
+      application.roles.includes(initialRuntime.server.role)
   )
   await Promise.all(
-    initialEnabledEntries.map(async (entry) => {
+    initialEnabledApplications.map(async (application) => {
       const runtimeRoot = initialRuntime.server.root || options.root
       const information = await stat(
-        resolve(options.production ? clientRoot : runtimeRoot, entry.template)
+        resolve(
+          options.production ? clientRoot : runtimeRoot,
+          application.template
+        )
       )
-      if (!information.isFile()) throw new Error(`Missing client entry: ${entry.template}`)
+      if (!information.isFile()) {
+        throw new Error(`Missing client entry: ${application.template}`)
+      }
     })
   )
 
@@ -332,25 +349,34 @@ export const createSsrManagedServer = async (
           },
         })
       }
-      const entry = resolveSsrEntry(
-        definition.entries,
+      const hostResolution = resolveSsrHostEntry(
+        definition.applications,
         incomingHost,
-        definition.defaultEntryId
+        definition.defaultApplicationId
       )
-      if (!entry) {
+      if (!hostResolution) {
         return sendJson(request, response, 421, {
           status: 'error',
           service: definition.name,
-          message: 'No application entry serves this host.',
+          message: 'No application serves this host.',
         })
       }
+      const entry = hostResolution.entry
       selectedEntryId = entry.id
+      serverOptions.logger?.debug?.('ssr.host_resolved', {
+        entryId: entry.id,
+        category: hostResolution.category,
+        specificity: hostResolution.specificity,
+        matchedPattern: hostResolution.matchedPattern,
+        hostname: hostResolution.normalizedHostname,
+        role: serverOptions.role || 'default',
+      })
       if (
         entry.roles?.length &&
         serverOptions.role &&
         !entry.roles.includes(serverOptions.role)
       ) {
-        const message = `Runtime role does not serve entry "${entry.id}".`
+        const message = `Runtime role does not serve application "${entry.id}".`
         return sendResponse(request, response, {
           statusCode: 421,
           body: isHtmlNavigation(request, pathname)
@@ -371,10 +397,15 @@ export const createSsrManagedServer = async (
         (request.socket as any).encrypted ? 'https' : 'http',
         serverOptions.trustProxy
       )
+      const domain = resolveSsrDomainContext(
+        incomingHost,
+        entry,
+        definition.development
+      )
       const cookie = filterSsrCookieHeader(
         request.headers.cookie,
-        serverOptions.cookieAllowlist,
-        serverOptions.cookieDenylist
+        entry.cookieAllowlist,
+        entry.cookieDenylist
       )
       const renderRequest: SsrHttpRequest<any> = {
         requestId:
@@ -389,7 +420,8 @@ export const createSsrManagedServer = async (
         method: request.method || 'GET',
         headers: requestHeaders(request),
         cookie,
-        publicConfig: serverOptions.publicConfig,
+        publicConfig: entry.publicConfig,
+        domain,
         signal: controller.signal,
         pathname,
         search: requestUrl.search,
@@ -401,7 +433,7 @@ export const createSsrManagedServer = async (
         logger: serverOptions.logger,
       }
 
-      for (const endpoint of definition.endpoints ?? []) {
+      for (const endpoint of entry.endpoints) {
         if (!endpoint.match(renderRequest)) continue
         const result = await withTimeout(
           Promise.resolve(endpoint.handle(renderRequest, endpointTools)),
@@ -415,7 +447,7 @@ export const createSsrManagedServer = async (
         const asset = await resolveSsrProductionAsset(
           clientRoot,
           pathname,
-          definition.entries.map(({ template }) => template)
+          definition.applications.map(({ template }) => template)
         )
         if (asset) return sendResponse(request, response, asset)
       } else if (
@@ -477,7 +509,12 @@ export const createSsrManagedServer = async (
       if (entry.kind === 'spa') {
         return sendResponse(request, response, {
           statusCode: 200,
-          body: template,
+          body: injectSpaDomainState(
+            template,
+            entry.id,
+            domain,
+            entry.publicConfig
+          ),
           headers: {
             'content-type': 'text/html; charset=utf-8',
             'cache-control': entry.cacheControl || 'private, no-store',
