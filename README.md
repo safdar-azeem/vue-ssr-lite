@@ -276,9 +276,8 @@ cookies, endpoints, and roles. The library expands domains, matches hosts by
 specificity, and exposes context through `useSsrDomain()`.
 
 ```ts
-// ssr.config.ts
+// ssr.config.ts — single source of truth for apps, domains, and Vite entries
 import { defineSsrConfig } from 'vue-ssr-lite'
-import { websiteApplication } from './src/website/SsrApplication'
 
 export default defineSsrConfig({
 	name: 'my-platform',
@@ -302,7 +301,12 @@ export default defineSsrConfig({
 			},
 		},
 		website: {
-			ssr: websiteApplication,
+			// Path form so Vite can derive the hydration client without importing
+			// the application module into Node during config load.
+			ssr: {
+				module: './src/website/SsrApplication.ts',
+				exportName: 'websiteApplication',
+			},
 			template: 'site.html',
 			roles: ['unified', 'website'],
 			domain: {
@@ -338,46 +342,25 @@ When the server starts, the console prints a ready message with a clickable loca
 
 ## 4. Configure Vite
 
-Register the SSR application and the normal SPA HTML entry:
+Keep Vite-only concerns here (Vue, CSS, GraphQL codegen, aliases). Application
+wiring stays in `ssr.config.ts` — `vueSsrLite()` auto-discovers it:
 
 ```ts
 // vite.config.ts
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 
 export default defineConfig({
 	plugins: [
+		vueSsrLite(),
 		vue(),
-
-		vueSsrLite({
-			applications: [
-				{
-					id: 'website',
-					definition: 'src/website/SsrApplication.ts',
-					exportName: 'websiteApplication',
-					template: 'site.html',
-				},
-			],
-
-			spaEntries: {
-				dashboard: 'index.html',
-			},
-		}),
 	],
 })
 ```
 
-### `applications`
-
-Contains applications that use server-side rendering and browser hydration.
-
-### `spaEntries`
-
-Contains normal Vite SPA HTML entries.
-
-Do not add SPA applications to the `applications` array.
+`vueSsrLite()` reads each application's `template`, SPA shells (`spa: true`),
+and SSR module refs (`ssr: { module, exportName }`) from `ssr.config.*`.
 
 ## 5. Add Commands
 
@@ -413,7 +396,10 @@ export default defineSsrConfig({
 	name: 'my-website',
 	applications: {
 		website: {
-			ssr: websiteApplication,
+			ssr: {
+				module: './src/website/SsrApplication.ts',
+				exportName: 'websiteApplication',
+			},
 			template: 'site.html',
 			domain: {
 				development: 'localhost',
@@ -425,19 +411,9 @@ export default defineSsrConfig({
 })
 ```
 
-Vite configuration:
-
 ```ts
-vueSsrLite({
-	applications: [
-		{
-			id: 'website',
-			definition: 'src/website/SsrApplication.ts',
-			exportName: 'websiteApplication',
-			template: 'site.html',
-		},
-	],
-})
+// vite.config.ts
+vueSsrLite()
 ```
 
 ## SPA-Only Application
@@ -461,7 +437,9 @@ export default defineSsrConfig({
 })
 ```
 
-Vite configuration still requires at least one SSR application in the current `vueSsrLite()` API. For a completely SPA-only project, use normal Vite without the `vueSsrLite()` plugin.
+Mount the SPA from a browser entry with `mountSpaApplication()` (see the HTML
+`script` pointing at your client file). `vueSsrLite()` still registers the SPA
+HTML input from `ssr.config`.
 
 ## Using the Same Vue Plugins
 
@@ -718,7 +696,10 @@ export default defineSsrConfig({
 			},
 		},
 		website: {
-			ssr: websiteApplication,
+			ssr: {
+				module: './src/website/SsrApplication.ts',
+				exportName: 'websiteApplication',
+			},
 			template: 'site.html',
 			domain: {
 				development: 'shop.localhost',
@@ -800,7 +781,10 @@ export default defineSsrConfig({
 			},
 		},
 		website: {
-			ssr: websiteApplication,
+			ssr: {
+				module: './src/website/SsrApplication.ts',
+				exportName: 'websiteApplication',
+			},
 			template: 'site.html',
 			roles: ['unified', 'website'],
 			domain: {
