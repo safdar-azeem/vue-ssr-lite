@@ -959,6 +959,42 @@ A fully resolvable page completes in **one pass** — extra passes occur only wh
 a plugin left work pending or requested one. `vue-ssr-lite` never inspects the
 work; it only awaits it.
 
+### Deferred parent → child dependencies
+
+A common pattern is: a parent query resolves, its result determines which child
+components mount, and each child runs its own async work. When a child's data is
+consumed DIRECTLY inside that child, a single pass suffices — Vue awaits the
+child's `onServerPrefetch` before rendering it.
+
+It does NOT suffice when the child's data is consumed INDIRECTLY — the child
+writes into a shared store that a **sibling** component reads — because Vue does
+not block a sibling's render on an earlier sibling's `onServerPrefetch`. The
+sibling renders before the store is populated.
+
+The resolution contract handles this generically. In component setup:
+
+```ts
+import { useSsrResolution } from 'vue-ssr-lite'
+
+const resolution = useSsrResolution()
+let synchronous = true
+onServerPrefetch(async () => {
+  const data = await load()
+  store.set(key, data)
+  // Populated asynchronously, after the sibling already rendered: ask for one
+  // more pass. Inert in the browser.
+  if (resolution?.server && !synchronous) resolution.requestAdditionalPass()
+})
+synchronous = false
+```
+
+On the next pass the plugin's cache is carried forward, the child's data
+hydrates the store synchronously at setup, the sibling sees it, and no further
+pass is requested — bounded, with no duplicate work. (This is exactly how
+`vue-apollo-client`'s section-query composables and their consumers behave; a
+warm request cache makes each query settle synchronously on the resumed pass, so
+no operation runs twice.)
+
 ## SSR-safe reactivity
 
 During SSR, Vue does not flush the scheduler, so `watch(src, cb)` and
