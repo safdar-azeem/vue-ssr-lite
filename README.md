@@ -22,7 +22,7 @@ It includes routing, browser hydration, production builds, a managed Node server
 - Multiple applications and HTML entries
 - Domain and subdomain routing
 - Runtime roles for one image / many process modes
-- Apollo, GraphQL, REST, Pinia, and i18n support
+- Generic `publicConfig` transport (Apollo, REST, Pinia, i18n stay in the app)
 - SEO metadata and status codes
 - Custom server endpoints
 - Health and readiness checks
@@ -70,33 +70,18 @@ yarn add --dev vite @vitejs/plugin-vue
 
 ## Choose Your Application Type
 
-`vue-ssr-lite` supports two application types.
+`vue-ssr-lite` supports two render modes, both declared only in `ssr.config.ts`:
 
-### SPA
+| `render` | Behavior |
+| --- | --- |
+| `spa` | Serves the HTML shell; the library generates the browser mount entry |
+| `ssr` | Server-renders Vue and generates the hydration client entry |
 
-Use `kind: 'spa'` for a Vue application that runs in the browser.
+Define each application once with `defineSsrApplication()` and point
+`application: { module, exportName }` at that module. Do not maintain a separate
+`main.ts` / `ErpClient.ts` bootstrap — `vueSsrLite()` injects the client entry
+from `ssr.config`.
 
-Examples:
-
-- Admin dashboard
-- Internal application
-- Editor
-- Authenticated application
-- Client-side portal
-
-A single application definition is mountable in three modes — server render,
-browser hydration of a server render, and pure client-side SPA. Define the app
-once with `defineSsrApplication()` and mount it in the SPA entry with
-`mountSpaApplication()`, so the SPA and SSR paths of the same application share
-one plugin set, router and public-config delivery and cannot drift:
-
-```ts
-// src/main.ts — thin SPA entry over the shared definition
-import { mountSpaApplication } from 'vue-ssr-lite/client'
-import { app } from './app' // defineSsrApplication({ ... })
-
-void mountSpaApplication(app)
-```
 
 A plain Vite `main.ts` (`createApp(App).use(router).mount('#app')`) still works
 for an application that never needs SSR, but prefer the unified definition when
@@ -276,12 +261,12 @@ cookies, endpoints, and roles. The library expands domains, matches hosts by
 specificity, and exposes context through `useSsrDomain()`.
 
 ```ts
-// ssr.config.ts — single source of truth for apps, domains, and Vite entries
+// ssr.config.ts — the only application / domain registration source
 import { defineSsrConfig } from 'vue-ssr-lite'
 
 export default defineSsrConfig({
 	name: 'my-platform',
-	runtime: process.env.APP_RUNTIME || 'unified',
+	runtime: process.env.APP_RUNTIME, // required in production
 	server: {
 		host: '0.0.0.0',
 		port: Number(process.env.PORT || 4173),
@@ -289,21 +274,32 @@ export default defineSsrConfig({
 	},
 	applications: {
 		dashboard: {
-			spa: true,
+			render: 'spa',
+			application: {
+				module: './src/dashboard/DashboardBootstrap.ts',
+				exportName: 'createDashboardApplication',
+			},
 			template: 'index.html',
 			roles: ['unified', 'dashboard'],
 			domain: {
 				development: 'localhost',
-				production: 'app.example.com',
+				production: process.env.VITE_ROOT_DOMAIN!,
 				mode: 'root-and-subdomains',
 				localAliases: true,
-				expose: { subdomainAs: 'workspace' },
+				params: {
+					workspace: { source: 'last-subdomain-label' },
+				},
+			},
+			publicConfig: {
+				api: {
+					endpoint: process.env.VITE_GRAPHQL_ENDPOINT!,
+					timeout: 8_000,
+				},
 			},
 		},
 		website: {
-			// Path form so Vite can derive the hydration client without importing
-			// the application module into Node during config load.
-			ssr: {
+			render: 'ssr',
+			application: {
 				module: './src/website/SsrApplication.ts',
 				exportName: 'websiteApplication',
 			},
@@ -311,15 +307,26 @@ export default defineSsrConfig({
 			roles: ['unified', 'website'],
 			domain: {
 				development: 'shop.localhost',
-				production: 'shop.example.com',
+				production: process.env.VITE_SHOP_BASE_DOMAIN!,
 				mode: 'root-and-subdomains',
 				customDomains: true,
-				expose: { subdomainOrHostnameAs: 'storeDomain' },
+				params: {
+					storeDomain: { source: 'subdomain-or-hostname' },
+				},
+			},
+			publicConfig: {
+				api: {
+					endpoint: process.env.VITE_GRAPHQL_ENDPOINT!,
+					timeout: 8_000,
+				},
 			},
 		},
 	},
 })
 ```
+
+The object key under `applications` is the canonical application ID everywhere
+(routing, Apollo `applicationId`, hydration state).
 
 Host ownership is resolved by **specificity**, not application declaration order:
 
@@ -342,8 +349,8 @@ When the server starts, the console prints a ready message with a clickable loca
 
 ## 4. Configure Vite
 
-Keep Vite-only concerns here (Vue, CSS, GraphQL codegen, aliases). Application
-wiring stays in `ssr.config.ts` — `vueSsrLite()` auto-discovers it:
+Keep Vite-only concerns here (Vue, CSS, codegen, aliases). Application wiring
+stays in `ssr.config.ts`:
 
 ```ts
 // vite.config.ts
@@ -359,8 +366,14 @@ export default defineConfig({
 })
 ```
 
-`vueSsrLite()` reads each application's `template`, SPA shells (`spa: true`),
-and SSR module refs (`ssr: { module, exportName }`) from `ssr.config.*`.
+`vueSsrLite()` generates:
+
+- HTML Rollup inputs from each `template`
+- `virtual:vue-ssr-lite/client/<id>` SPA mount / SSR hydrate entries
+- `virtual:vue-ssr-lite/runtime` for the Node server (static application imports)
+
+HTML templates should not include a manual `<script type="module" src="...">`
+bootstrap — the plugin injects the generated client entry.
 
 ## 5. Add Commands
 
@@ -389,63 +402,64 @@ npm run start
 
 ## SSR-Only Application
 
-For a project that only needs SSR:
-
 ```ts
 export default defineSsrConfig({
 	name: 'my-website',
+	runtime: process.env.APP_RUNTIME,
 	applications: {
 		website: {
-			ssr: {
+			render: 'ssr',
+			application: {
 				module: './src/website/SsrApplication.ts',
 				exportName: 'websiteApplication',
 			},
 			template: 'site.html',
 			domain: {
 				development: 'localhost',
-				production: 'example.com',
+				production: process.env.VITE_ROOT_DOMAIN!,
 				customDomains: true,
+			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
 			},
 		},
 	},
 })
-```
-
-```ts
-// vite.config.ts
-vueSsrLite()
 ```
 
 ## SPA-Only Application
 
-A config can also serve a normal SPA without an SSR application:
-
 ```ts
 export default defineSsrConfig({
 	name: 'my-dashboard',
+	runtime: process.env.APP_RUNTIME,
 	applications: {
 		dashboard: {
-			spa: true,
+			render: 'spa',
+			application: {
+				module: './src/dashboard/DashboardBootstrap.ts',
+				exportName: 'createDashboardApplication',
+			},
 			template: 'index.html',
 			domain: {
 				development: 'localhost',
-				production: 'app.example.com',
+				production: process.env.VITE_ROOT_DOMAIN!,
 				localAliases: true,
+			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
 			},
 		},
 	},
 })
 ```
 
-Mount the SPA from a browser entry with `mountSpaApplication()` (see the HTML
-`script` pointing at your client file). `vueSsrLite()` still registers the SPA
-HTML input from `ssr.config`.
+The library generates the SPA client entry from `application.module`. Keep
+`index.html` free of manual bootstrap scripts.
 
 ## Using the Same Vue Plugins
 
-You may use the same plugin configuration in your SPA and SSR applications.
-
-For example:
+Plugins read opaque `publicConfig` — the library does not know about GraphQL:
 
 ```ts
 // src/config/apollo.ts
@@ -453,28 +467,10 @@ import { defineApollo } from 'vue-apollo-client'
 
 export default defineApollo(({ publicConfig }) => ({
 	endPoints: {
-		default:
-			publicConfig?.graphqlEndpoint ||
-			import.meta.env.VITE_GRAPHQL_ENDPOINT,
+		default: publicConfig?.api?.endpoint,
 	},
+	requestTimeoutMs: publicConfig?.api?.timeout,
 }))
-```
-
-Use it in the SPA:
-
-```ts
-// src/spa/main.ts
-import { createApp } from 'vue'
-
-import apollo from '../config/apollo'
-import App from './App.vue'
-import router from './router'
-
-const app = createApp(App)
-
-app.use(apollo)
-app.use(router)
-app.mount('#app')
 ```
 
 Use the same configuration in SSR:
@@ -681,32 +677,47 @@ import { defineSsrConfig, useSsrDomain } from 'vue-ssr-lite'
 
 export default defineSsrConfig({
 	name: 'my-platform',
-	runtime: process.env.APP_RUNTIME || 'unified',
+	runtime: process.env.APP_RUNTIME,
 	server: { trustProxy: true },
 	applications: {
 		admin: {
-			spa: true,
+			render: 'spa',
+			application: {
+				module: './src/admin/AdminBootstrap.ts',
+				exportName: 'createAdminApplication',
+			},
 			template: 'index.html',
 			domain: {
 				development: 'localhost',
-				production: process.env.VITE_ROOT_DOMAIN || 'app.example.com',
+				production: process.env.VITE_ROOT_DOMAIN!,
 				mode: 'root-and-subdomains',
 				localAliases: true,
-				expose: { subdomainAs: 'workspace' },
+				params: {
+					workspace: { source: 'last-subdomain-label' },
+				},
+			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
 			},
 		},
 		website: {
-			ssr: {
+			render: 'ssr',
+			application: {
 				module: './src/website/SsrApplication.ts',
 				exportName: 'websiteApplication',
 			},
 			template: 'site.html',
 			domain: {
 				development: 'shop.localhost',
-				production: process.env.VITE_SHOP_BASE_DOMAIN || 'shop.example.com',
+				production: process.env.VITE_SHOP_BASE_DOMAIN!,
 				mode: 'root-and-subdomains',
 				customDomains: true,
-				expose: { subdomainOrHostnameAs: 'storeDomain' },
+				params: {
+					storeDomain: { source: 'subdomain-or-hostname' },
+				},
+			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
 			},
 		},
 	},
@@ -725,7 +736,7 @@ domain.subdomain
 domain.isCustomDomain
 domain.params.workspace
 domain.params.storeDomain
-domain.buildSubdomainUrl('acme', '/dashboard')
+domain.createUrl({ subdomain: 'department.acme', path: '/projects', query: { page: 2 } })
 ```
 
 ### Precedence
@@ -767,21 +778,29 @@ Example:
 ```ts
 export default defineSsrConfig({
 	name: 'my-platform',
-	runtime: process.env.APP_RUNTIME || 'unified',
+	runtime: process.env.APP_RUNTIME, // required in production
 	applications: {
 		admin: {
-			spa: true,
+			render: 'spa',
+			application: {
+				module: './src/admin/AdminBootstrap.ts',
+				exportName: 'createAdminApplication',
+			},
 			template: 'index.html',
 			roles: ['unified', 'admin'],
 			domain: {
 				development: 'localhost',
-				production: 'app.example.com',
+				production: process.env.VITE_ROOT_DOMAIN!,
 				mode: 'root-and-subdomains',
 				localAliases: true,
 			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
+			},
 		},
 		website: {
-			ssr: {
+			render: 'ssr',
+			application: {
 				module: './src/website/SsrApplication.ts',
 				exportName: 'websiteApplication',
 			},
@@ -789,9 +808,12 @@ export default defineSsrConfig({
 			roles: ['unified', 'website'],
 			domain: {
 				development: 'shop.localhost',
-				production: 'shop.example.com',
+				production: process.env.VITE_SHOP_BASE_DOMAIN!,
 				mode: 'root-and-subdomains',
 				customDomains: true,
+			},
+			publicConfig: {
+				api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
 			},
 		},
 	},
@@ -805,6 +827,9 @@ With that setup:
 - `APP_RUNTIME=website` serves only the SSR application.
 
 If a host matches an application that the current role does not allow, the server responds with `421`.
+
+Development may default `runtime` in your `ssr.config`. Production compilation
+rejects a missing `runtime`, `domain.production`, or `publicConfig.api.endpoint`.
 
 `defineSsrConfig` accepts either a plain object or an async factory function.
 
@@ -876,37 +901,45 @@ const responseCache = createSsrMemoryResponseCache({
 })
 ```
 
-Add it to an SSR entry:
+Add it on the application object:
 
 ```ts
-{
-  id: 'website',
-  kind: 'ssr',
+website: {
+  render: 'ssr',
+  application: {
+    module: './src/website/SsrApplication.ts',
+    exportName: 'websiteApplication',
+  },
   template: 'site.html',
-  hosts: ['*'],
-  application: websiteApplication,
-
+  domain: {
+    development: 'localhost',
+    production: process.env.VITE_ROOT_DOMAIN!,
+    customDomains: true,
+  },
   responseCache: {
     store: responseCache,
     ttlMs: 60_000,
+  },
+  publicConfig: {
+    api: { endpoint: process.env.VITE_API_ENDPOINT!, timeout: 8_000 },
   },
 }
 ```
 
 ## Cookie Filtering
 
-SSR requests can forward a filtered `Cookie` header to upstream APIs.
+SSR requests can forward a filtered `Cookie` header to upstream APIs. Configure
+cookies per application:
 
 ```ts
-server: {
-  cookieAllowlist: ['session'],
-  cookieDenylist: ['admin_token', 'refresh_token'],
-  publicConfig: {},
+cookies: {
+  allow: ['session'],
+  deny: ['admin_token', 'refresh_token'],
 }
 ```
 
-- If `cookieAllowlist` is non-empty, only listed cookies are forwarded.
-- `cookieDenylist` always removes matching cookies.
+- If `allow` is non-empty, only listed cookies are forwarded.
+- `deny` always removes matching cookies.
 - Leave both empty when the browser talks to the API directly and SSR needs no cookies.
 
 ## Server Configuration
@@ -915,21 +948,11 @@ server: {
 server: {
   host: '0.0.0.0',
   port: 4173,
-  role: 'unified',
-
-  publicConfig: {},
-
+  trustProxy: false,
   requestTimeoutMs: 15_000,
   shutdownTimeoutMs: 10_000,
-
   healthPath: '/healthz',
   readinessPath: '/readyz',
-
-  trustProxy: false,
-
-  cookieAllowlist: [],
-  cookieDenylist: [],
-
   logger: {
     info: (event, details) => console.info(event, details ?? ''),
     warn: (event, details) => console.warn(event, details ?? ''),
@@ -938,7 +961,8 @@ server: {
 }
 ```
 
-`/healthz` and `/readyz` include the active `role` in their JSON responses.
+The active process role comes from top-level `runtime`, not `server.role`.
+`/healthz` and `/readyz` include that role in their JSON responses.
 
 ## Server-side data resolution
 
