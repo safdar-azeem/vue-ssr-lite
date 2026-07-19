@@ -4,6 +4,10 @@ import {
   createRouter,
   createWebHistory,
 } from 'vue-router'
+import {
+  installSsrDomainContext,
+  SSR_DOMAIN_CONTEXT,
+} from './SsrDomainRuntime'
 import { SSR_REQUEST_CONTEXT } from './SsrRequestContext'
 import {
   createSsrHydrationController,
@@ -109,12 +113,24 @@ export const createSsrApplication = async <
   // registered work and pass requests accumulate coherently.
   const resolution =
     options.resolution ?? createSsrResolutionController(options.server)
+  // Browser SPA/hydration only: keep a process-local domain for route guards
+  // and other non-setup callers. Server requests stay concurrent-safe via
+  // Vue provide/inject on each app instance.
+  const uninstallDomain = options.server
+    ? () => undefined
+    : installSsrDomainContext(options.request.domain)
+  const disposeHydration = hydration.dispose.bind(hydration)
+  hydration.dispose = () => {
+    uninstallDomain()
+    disposeHydration()
+  }
 
   const baseContext = {
     applicationId: definition.id,
     request: options.request,
     url: new URL(options.request.url),
     host: options.request.host,
+    domain: options.request.domain,
     publicConfig: options.request.publicConfig,
     state,
     head: ref(null),
@@ -136,6 +152,7 @@ export const createSsrApplication = async <
       ? createApp(definition.rootComponent)
       : createSSRApp(definition.rootComponent)
     if (router) app.use(router)
+    app.provide(SSR_DOMAIN_CONTEXT, options.request.domain)
     // Provide the generic hydration and resolution contracts BEFORE the
     // application installs its own plugins, so a plugin's `install()` can
     // inject them (via `app.runWithContext`) to restore state ahead of the
