@@ -5,21 +5,26 @@ import {
   onServerPrefetch,
   reactive,
   computed,
+  ref,
 } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
 import { defineSsrApplication } from './index'
 import { useSsrRequestContext } from './SsrRequestContext'
-import { useSsrResolution } from './SsrRequestResolution'
+import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
 
 /**
  * The generic "parent query → parent result determines children → children
- * create their own async work, consumed indirectly through a shared store read
+ * create their own async work, consumed INDIRECTLY through a shared store read
  * by a sibling" pattern. A single render pass cannot capture it — Vue does not
- * block a sibling's render on an earlier sibling's `onServerPrefetch`. This
- * exercises the render loop's bounded multi-pass: children ask for another pass
- * when they hydrate asynchronously, and on the next pass their data is carried
- * forward and hydrates synchronously so the sibling sees it.
+ * block a sibling's render on an earlier sibling's `onServerPrefetch`.
+ *
+ * The application writes NO SSR orchestration: children resolve data (an
+ * `onServerPrefetch` here; a generated query composable in a real app) and
+ * reconcile it into the store with `ssrWatch`. `ssrWatch` itself asks the
+ * renderer for one more pass when it fires asynchronously, and the resumed pass
+ * reads the data synchronously (warm request cache — here the generic hydration
+ * carry) so the sibling sees it. Bounded, with each source resolved once.
  */
 
 interface ChildRecord {
@@ -31,7 +36,6 @@ interface AppState {
   store: Map<string, ChildRecord>
 }
 
-/** A request-scoped async source that records every id it fetched. */
 const createSource = (options: { failFor?: string } = {}) => {
   const fetched: string[] = []
   return {
@@ -50,36 +54,27 @@ const Child = defineComponent({
   props: { id: { type: String, required: true } },
   setup(props) {
     const context = useSsrRequestContext<AppState>()
-    const resolution = useSsrResolution()
     const source = (context.extension as any).source as ReturnType<typeof createSource>
-    let synchronousPhase = true
 
-    // A previous pass already resolved this child: hydrate the shared store
-    // synchronously so the sibling renderer sees it this pass.
+    // A previous pass's resolved value is carried forward and read synchronously
+    // here (stands in for an API client's warm request cache).
     const carried = context.hydration.read<ChildRecord>(`child:${props.id}`)
-    if (carried) context.state.store.set(props.id, carried)
-    else {
+    const record = ref<ChildRecord | undefined>(carried)
+    if (record.value === undefined) {
       onServerPrefetch(async () => {
         try {
-          const record = await source.fetchChild(props.id)
-          context.state.store.set(props.id, record)
-          // Hydrated asynchronously, after the sibling already rendered — ask
-          // for one more pass. Isolated: one child's failure never rejects the
-          // shared prefetch or removes a sibling's data.
-          if (resolution?.server && !synchronousPhase) {
-            resolution.requestAdditionalPass()
-          }
+          record.value = await source.fetchChild(props.id)
         } catch {
-          /* section-level failure is swallowed; siblings are unaffected */
+          /* one child failing must not remove its siblings */
         }
       })
     }
-    // Carry this child's resolved record to the next pass.
-    context.hydration.contribute(
-      `child:${props.id}`,
-      () => context.state.store.get(props.id)
-    )
-    synchronousPhase = false
+    // Reconcile into the shared store. No explicit pass request: ssrWatch drives
+    // the extra pass automatically when this fires from the awaited prefetch.
+    ssrWatch(() => record.value, (value) => {
+      if (value) context.state.store.set(props.id, value)
+    }, { immediate: true })
+    context.hydration.contribute(`child:${props.id}`, () => record.value)
     return () => h('span', { class: 'child-loader', 'data-id': props.id })
   },
 })
@@ -100,8 +95,6 @@ const RouteView = defineComponent({
 const Page = defineComponent({
   setup() {
     const context = useSsrRequestContext<AppState>()
-    // Controllers first (they own the child queries), route view as a later
-    // sibling that reads the store.
     return () =>
       h('main', [
         ...context.state.ids.map((id) => h(Child, { id, key: id })),
@@ -115,7 +108,6 @@ const Shell = defineComponent({
     const context = useSsrRequestContext<AppState>()
     const source = (context.extension as any).source as ReturnType<typeof createSource>
     const ready = computed(() => context.state.ids.length > 0)
-    // The parent (root) query gates the child tree behind its loading state.
     onServerPrefetch(async () => {
       context.state.ids = await source.fetchRoot()
     })
@@ -145,8 +137,8 @@ const request = (host: string) => ({
   signal: new AbortController().signal,
 })
 
-describe('deferred parent → child SSR resolution', () => {
-  it('discovers and resolves child queries after the parent, in a bounded second pass', async () => {
+describe('deferred parent → child SSR resolution (no application orchestration)', () => {
+  it('discovers and resolves child data after the parent, in a bounded second pass', async () => {
     const source = createSource()
     const rendered = await renderSsrApplication(
       buildApplication(source),
@@ -154,17 +146,13 @@ describe('deferred parent → child SSR resolution', () => {
       { resolutionDeadlineMs: 1_000, diagnostics: false }
     )
 
-    // Every child ran on the server, exactly once — no duplicate across passes.
-    expect(source.fetched.sort()).toEqual(['a', 'b', 'c'])
-    // The final HTML contains the child content read through the sibling store.
+    expect(source.fetched.sort()).toEqual(['a', 'b', 'c']) // each once, no duplicate
     expect(rendered.html).toContain('Child-a')
     expect(rendered.html).toContain('Child-b')
     expect(rendered.html).toContain('Child-c')
     expect(rendered.html).not.toContain('MISSING-')
     expect(rendered.html).not.toContain('LOADING SHELL')
-    // It took a second pass to reflect the store into the sibling — not one.
     expect(rendered.metrics.renderPasses).toBe(2)
-    // The resolved child state is serialized for hydration.
     expect(JSON.stringify(rendered.hydrationState.plugins)).toContain('Child-a')
   })
 
@@ -178,7 +166,7 @@ describe('deferred parent → child SSR resolution', () => {
 
     expect(rendered.html).toContain('Child-a')
     expect(rendered.html).toContain('Child-c')
-    expect(rendered.html).toContain('MISSING-b') // the failed one, not the others
+    expect(rendered.html).toContain('MISSING-b')
     expect(rendered.html).not.toContain('LOADING SHELL')
   })
 
@@ -200,7 +188,6 @@ describe('deferred parent → child SSR resolution', () => {
     expect(rightResult.html).toContain('Child-a')
     expect(left.fetched.sort()).toEqual(['a', 'b', 'c'])
     expect(right.fetched.sort()).toEqual(['a', 'b', 'c'])
-    // Each request has its own serialized state document.
     expect(leftResult.hydrationState).not.toBe(rightResult.hydrationState)
   })
 
