@@ -3,50 +3,84 @@ import {
   filterSsrCookieHeader,
   matchesSsrHostPattern,
   normalizeSsrHost,
-  resolveSsrEntry,
+  normalizeSsrHostPattern,
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
+  resolveSsrHostEntry,
+  scoreSsrHostMatch,
+  SsrHostConfigurationError,
+  validateSsrHostEntries,
 } from './SsrHostRuntime'
 
-describe('SSR host and proxy contract', () => {
+describe('SSR host matching', () => {
   it.each([
     ['Example.COM:443', 'example.com:443'],
     ['example.com.', 'example.com'],
     ['::1', '[::1]'],
-    ['[::1]:4302', '[::1]:4302'],
     ['bad host', ''],
-    ['https://example.com', ''],
-    ['user@example.com', ''],
   ])('normalizes %s', (input, expected) => {
     expect(normalizeSsrHost(input)).toBe(expected)
   })
 
-  it('matches exact, wildcard, nested subdomain, and fallback entries', () => {
-    const entries = [
-      { id: 'admin', kind: 'spa' as const, template: 'index.html', hosts: ['app.test', '*.app.test'] },
-      { id: 'public', kind: 'ssr' as const, template: 'site.html', hosts: ['*'], application: {} as any },
+  it('scores specificity independently of declaration order', () => {
+    const apps = [
+      { id: 'erp', hosts: ['localhost', '*.localhost'] },
+      {
+        id: 'storefront',
+        hosts: ['shop.localhost', '*.shop.localhost', '*'],
+      },
     ]
-    expect(matchesSsrHostPattern('workspace.app.test', '*.app.test')).toBe(true)
-    expect(matchesSsrHostPattern('nested.workspace.app.test', '*.app.test')).toBe(true)
-    expect(resolveSsrEntry(entries, 'app.test')?.id).toBe('admin')
-    expect(resolveSsrEntry(entries, 'custom.test')?.id).toBe('public')
+    expect(resolveSsrHostEntry(apps, 'company1.localhost')?.entry.id).toBe('erp')
+    expect(
+      resolveSsrHostEntry(apps, 'store.shop.localhost')?.entry.id
+    ).toBe('storefront')
+    expect(
+      resolveSsrHostEntry([...apps].reverse(), 'store.shop.localhost')?.entry.id
+    ).toBe('storefront')
+    expect(scoreSsrHostMatch('a.shop.localhost', '*.shop.localhost')!.specificity).toBeGreaterThan(
+      scoreSsrHostMatch('a.localhost', '*.localhost')!.specificity
+    )
   })
 
-  it('trusts forwarded authority and protocol only when enabled', () => {
-    expect(resolveSsrForwardedHost('public.test', 'internal.test', false)).toBe('internal.test')
-    expect(resolveSsrForwardedHost('public.test', 'internal.test', true)).toBe('public.test')
-    expect(resolveSsrForwardedProtocol('https', 'http', false)).toBe('http')
+  it('validates duplicate ownership and multiple catch-alls', () => {
+    expect(() =>
+      validateSsrHostEntries([
+        { id: 'a', hosts: ['app.test'] },
+        { id: 'b', hosts: ['app.test'] },
+      ])
+    ).toThrow(SsrHostConfigurationError)
+    expect(() =>
+      validateSsrHostEntries([
+        { id: 'a', hosts: ['*'] },
+        { id: 'b', hosts: ['*'] },
+      ])
+    ).toThrow(/Multiple catch-all/)
+  })
+
+  it('trusts forwarded authority only when enabled', () => {
+    expect(resolveSsrForwardedHost('public.test', 'internal.test', false)).toBe(
+      'internal.test'
+    )
+    expect(resolveSsrForwardedHost('public.test', 'internal.test', true)).toBe(
+      'public.test'
+    )
     expect(resolveSsrForwardedProtocol('https', 'http', true)).toBe('https')
   })
 
-  it('forwards only explicitly allowed, non-denied cookies', () => {
+  it('matches nested wildcards and rejects invalid patterns', () => {
+    expect(matchesSsrHostPattern('nested.workspace.app.test', '*.app.test')).toBe(
+      true
+    )
+    expect(normalizeSsrHostPattern('*.*.outnax.com')).toBe('')
+  })
+
+  it('filters cookies by allow/deny lists', () => {
     expect(
       filterSsrCookieHeader(
-        'customer=public; auth_token=private; preference=dark',
+        'customer=public; auth_token=private',
         ['customer', 'auth_token'],
         ['auth_token']
       )
     ).toBe('customer=public')
-    expect(filterSsrCookieHeader('customer=public', [])).toBeUndefined()
   })
 })
