@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   compileSsrConfig,
   extractSsrViteEntries,
-  transformSsrModuleRefs,
+  generateSsrClientModule,
+  generateSsrRuntimeModule,
 } from './SsrConfigCompileRuntime'
 import { defineSsrConfig } from './SsrConfigRuntime'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
@@ -17,9 +18,10 @@ describe('defineSsrConfig application domains', () => {
           runtime: 'unified',
           applications: {
             erp: {
-              spa: {
-                id: 'erp',
-                rootComponent: {} as any,
+              render: 'spa',
+              application: {
+                module: './src/ErpBootstrap.ts',
+                exportName: 'createErpApplication',
               },
               template: 'index.html',
               roles: ['unified', 'erp'],
@@ -28,12 +30,18 @@ describe('defineSsrConfig application domains', () => {
                 production: 'app.example.com',
                 mode: 'root-and-subdomains',
                 localAliases: true,
-                expose: { subdomainAs: 'workspace' },
+                params: {
+                  workspace: { source: 'last-subdomain-label' },
+                },
+              },
+              publicConfig: {
+                api: { endpoint: 'http://localhost:4300/graphql', timeout: 8000 },
               },
             },
             storefront: {
-              ssr: {
-                id: 'shop',
+              render: 'ssr',
+              application: {
+                id: 'ignored-legacy-id',
                 rootComponent: {} as any,
               },
               template: 'site.html',
@@ -43,13 +51,22 @@ describe('defineSsrConfig application domains', () => {
                 production: 'shop.example.com',
                 mode: 'root-and-subdomains',
                 customDomains: true,
-                expose: { subdomainOrHostnameAs: 'storeDomain' },
+                params: {
+                  storeDomain: { source: 'subdomain-or-hostname' },
+                },
+              },
+              publicConfig: {
+                api: { endpoint: 'http://localhost:4300/graphql', timeout: 8000 },
               },
             },
           },
         }),
       },
       { development: true }
+    )
+
+    expect(compiled.applications.find((app) => app.id === 'storefront')?.application?.id).toBe(
+      'storefront'
     )
 
     const matrix = [
@@ -67,11 +84,7 @@ describe('defineSsrConfig application domains', () => {
         compiled.defaultApplicationId
       )
       expect(matched?.entry.id).toBe(entryId)
-      const domain = resolveSsrDomainContext(
-        host,
-        matched!.entry,
-        true
-      )
+      const domain = resolveSsrDomainContext(host, matched!.entry, true)
       if (entryId === 'erp') {
         expect(domain.params.workspace || '').toBe(expectedParam)
       } else {
@@ -79,7 +92,6 @@ describe('defineSsrConfig application domains', () => {
       }
     }
 
-    // Specificity: shop subdomain beats portal wildcard regardless of order.
     expect(
       resolveSsrHostEntry(
         [...compiled.applications].reverse(),
@@ -88,61 +100,92 @@ describe('defineSsrConfig application domains', () => {
     ).toBe('storefront')
   })
 
-  it('extracts Vite entries from module-ref SSR apps and SPA shells', () => {
-    const entries = extractSsrViteEntries(
-      defineSsrConfig({
-        name: 'demo',
-        applications: {
-          erp: {
-            spa: true,
-            template: 'index.html',
-            domain: {
-              development: 'localhost',
-              production: 'app.example.com',
+  it('rejects missing production runtime and API configuration', async () => {
+    await expect(
+      compileSsrConfig(
+        {
+          default: defineSsrConfig({
+            name: 'demo',
+            applications: {
+              erp: {
+                render: 'spa',
+                application: {
+                  module: './src/Erp.ts',
+                  exportName: 'createErpApplication',
+                },
+                template: 'index.html',
+                domain: {
+                  development: 'localhost',
+                  production: 'app.example.com',
+                },
+                publicConfig: { api: { endpoint: 'http://localhost/graphql' } },
+              },
             },
-          },
-          storefront: {
-            ssr: {
-              module: './src/ShopSsrApplication.ts',
-              exportName: 'shopSsrApplication',
-            },
-            template: 'site.html',
-            mountSelector: '#app',
-            domain: {
-              development: 'shop.localhost',
-              production: 'shop.example.com',
-              customDomains: true,
-            },
-          },
+          }),
         },
-      })
-    )
-
-    expect(entries.spaEntries).toEqual({ erp: 'index.html' })
-    expect(entries.applications).toEqual([
-      {
-        id: 'storefront',
-        definition: './src/ShopSsrApplication.ts',
-        exportName: 'shopSsrApplication',
-        template: 'site.html',
-        mountSelector: '#app',
-      },
-    ])
+        { development: false }
+      )
+    ).rejects.toThrow(/requires `runtime`/)
   })
 
-  it('rewrites ssr module refs into analyzable dynamic imports', () => {
-    const source = `
-      storefront: {
-        ssr: {
-          module: './src/ShopSsrApplication.ts',
-          exportName: 'shopSsrApplication',
+  it('extracts Vite entries and generates virtual modules without regex rewrites', () => {
+    const config = defineSsrConfig({
+      name: 'demo',
+      applications: {
+        erp: {
+          render: 'spa',
+          application: {
+            module: './src/ErpBootstrap.ts',
+            exportName: 'createErpApplication',
+          },
+          template: 'index.html',
+          domain: {
+            development: 'localhost',
+            production: 'app.example.com',
+          },
         },
-        template: 'site.html',
+        storefront: {
+          render: 'ssr',
+          application: {
+            module: './src/ShopSsrApplication.ts',
+            exportName: 'shopSsrApplication',
+          },
+          template: 'site.html',
+          mountSelector: '#app',
+          domain: {
+            development: 'shop.localhost',
+            production: 'shop.example.com',
+            customDomains: true,
+          },
+        },
       },
-    `
-    const transformed = transformSsrModuleRefs(source, '/app/ssr.config.ts')
-    expect(transformed).toContain(
-      'ssr: () => import("./src/ShopSsrApplication.ts").then((m) => m["shopSsrApplication"])'
+    })
+    const entries = extractSsrViteEntries(config)
+    expect(entries.applications.map((app) => app.id)).toEqual([
+      'erp',
+      'storefront',
+    ])
+
+    const runtime = generateSsrRuntimeModule(
+      '/app',
+      '/app/ssr.config.ts',
+      entries.applications
     )
+    expect(runtime).toContain('import __ssrUserConfig from "./ssr.config.ts"')
+    expect(runtime).toContain(
+      'import { createErpApplication as __ssrApp0 } from "./src/ErpBootstrap.ts"'
+    )
+    expect(runtime).toContain(
+      'import { shopSsrApplication as __ssrApp1 } from "./src/ShopSsrApplication.ts"'
+    )
+    expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
+
+    const spaClient = generateSsrClientModule('/app', entries.applications[0])
+    expect(spaClient).toContain('mountSpaApplication')
+    expect(spaClient).toContain('id: "erp"')
+
+    const ssrClient = generateSsrClientModule('/app', entries.applications[1])
+    expect(ssrClient).toContain('hydrateSsrApplication')
+    expect(ssrClient).toContain('id: "storefront"')
   })
 })
