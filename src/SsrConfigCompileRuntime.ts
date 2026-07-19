@@ -1,7 +1,7 @@
-import { access, writeFile, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { access, mkdir, writeFile, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import type {
   SsrApplicationConfig,
   SsrApplicationDomainConfig,
@@ -294,6 +294,10 @@ export const extractSsrViteEntries = (config: SsrConfig): SsrViteEntries => {
  * Load `ssr.config` for Vite entry discovery without going through the
  * consumer's Vite plugin graph. Relative local imports are bundled; packages
  * stay external.
+ *
+ * The bundled file is written under the project `node_modules` tree so Node can
+ * resolve bare imports like `vue-ssr-lite` from the consumer's dependencies.
+ * Writing under the OS temp directory breaks package resolution.
  */
 export const loadSsrConfigFile = async (
   root: string,
@@ -316,8 +320,12 @@ export const loadSsrConfigFile = async (
   if (!code) {
     throw new Error(`Failed to bundle SSR config: ${absoluteConfig}`)
   }
-  const directory = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-config-'))
-  const outfile = join(directory, 'ssr.config.mjs')
+  const directory = join(root, 'node_modules', '.cache', 'vue-ssr-lite')
+  await mkdir(directory, { recursive: true })
+  const outfile = join(
+    directory,
+    `ssr.config.${randomBytes(6).toString('hex')}.mjs`
+  )
   try {
     await writeFile(outfile, code, 'utf8')
     const loaded = (await import(pathToFileURL(outfile).href)) as {
@@ -332,7 +340,7 @@ export const loadSsrConfigFile = async (
     }
     return config
   } finally {
-    await rm(directory, { recursive: true, force: true })
+    await rm(outfile, { force: true })
   }
 }
 
