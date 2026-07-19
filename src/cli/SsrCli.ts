@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { resolve, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { resolveSsrConfigPath } from '../SsrConfigCompileRuntime'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 
 interface SsrCliOptions {
   command: 'dev' | 'build' | 'start'
   root: string
-  runtime: string
+  config: string
   serverOutput: string
   hmrPort?: string
 }
@@ -17,18 +18,19 @@ const readFlag = (args: string[], name: string): string | undefined => {
   return index >= 0 ? args[index + 1] : undefined
 }
 
-const parseArguments = (args: string[]): SsrCliOptions => {
+const parseArguments = async (args: string[]): Promise<SsrCliOptions> => {
   const command = args[0]
   if (!['dev', 'build', 'start'].includes(command)) {
     throw new Error(
-      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--hmr-port 31001]'
+      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--hmr-port 31001]'
     )
   }
   const root = resolve(readFlag(args, '--root') || process.cwd())
+  const config = await resolveSsrConfigPath(root, readFlag(args, '--config'))
   return {
     command: command as SsrCliOptions['command'],
     root,
-    runtime: resolve(root, readFlag(args, '--runtime') || 'src/SsrRuntime.ts'),
+    config,
     serverOutput: resolve(
       root,
       readFlag(args, '--server-output') || 'dist/server/SsrRuntime.js'
@@ -54,14 +56,14 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
         },
         appType: 'custom',
       })
-  const runtimeId = `/${relative(options.root, options.runtime).replaceAll('\\', '/')}`
+  const configId = `/${relative(options.root, options.config).replaceAll('\\', '/')}`
   const managed = await createSsrManagedServer({
     production,
     root: options.root,
     vite,
     loadRuntime: production
       ? () => import(pathToFileURL(options.serverOutput).href)
-      : () => vite!.ssrLoadModule(runtimeId),
+      : () => vite!.ssrLoadModule(configId),
   })
   await managed.listen()
 
@@ -88,7 +90,7 @@ const runBuild = async (options: SsrCliOptions) => {
   await viteBuild({
     root: options.root,
     build: {
-      ssr: options.runtime,
+      ssr: options.config,
       outDir: resolve(options.root, 'dist/server'),
       emptyOutDir: true,
       rollupOptions: {
@@ -99,7 +101,7 @@ const runBuild = async (options: SsrCliOptions) => {
 }
 
 const main = async () => {
-  const options = parseArguments(process.argv.slice(2))
+  const options = await parseArguments(process.argv.slice(2))
   if (options.command === 'build') return runBuild(options)
   return runServer(options, options.command === 'start')
 }
