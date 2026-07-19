@@ -20,6 +20,7 @@ export default defineConfig({
     rollupOptions: {
       external: [
         /^node:/,
+        'esbuild',
         '@vue/server-renderer',
         'vite',
         'vue',
