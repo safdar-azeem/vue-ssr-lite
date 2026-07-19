@@ -58,8 +58,9 @@ export type SsrApplicationLoader =
  */
 export interface SsrApplicationConfig {
   /**
-   * SPA application. Use `true` to serve only the HTML shell (consumer mounts
-   * via its own client entry). Pass a definition/loader for managed SPA mount.
+   * SPA HTML shell. Use `true` (recommended) or a client-only loader reference.
+   * The Node server never executes SPA loaders — mount with
+   * `mountSpaApplication()` from a browser entry instead.
    */
   spa?: true | SsrApplicationLoader
   /** Server-rendered Vue application. */
