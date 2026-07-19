@@ -21,6 +21,15 @@ describe('SSR HTML runtime', () => {
         version: 1,
         applicationId: 'public',
         publicConfig: {},
+        domain: {
+          entry: 'public',
+          hostname: 'public.test',
+          baseDomain: 'public.test',
+          subdomain: null,
+          isCustomDomain: false,
+          development: true,
+          params: {},
+        },
         application: { value: '</script><script>alert(1)</script>' },
       },
     })
@@ -51,6 +60,15 @@ describe('SSR HTML runtime', () => {
         version: 1,
         applicationId: 'public',
         publicConfig: {},
+        domain: {
+          entry: 'public',
+          hostname: 'public.test',
+          baseDomain: 'public.test',
+          subdomain: null,
+          isCustomDomain: false,
+          development: true,
+          params: {},
+        },
         application: {},
       },
     })
