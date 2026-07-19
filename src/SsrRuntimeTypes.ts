@@ -71,12 +71,15 @@ export interface SsrRenderRequest<TPublicConfig = unknown> {
   cookie?: string
   publicConfig: TPublicConfig
   signal: AbortSignal
+  /** Library-resolved domain context for the selected application. */
+  domain: import('./SsrConfigTypes').SsrDomainContext
 }
 
 export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = unknown> {
   version: 1
   applicationId: string
   publicConfig: TPublicConfig
+  domain: import('./SsrConfigTypes').SsrDomainContext
   application: TApplicationState
   /**
    * Serializable state contributed by installed application plugins, keyed by
@@ -95,6 +98,8 @@ export interface SsrRequestContext<
   request: SsrRenderRequest<TPublicConfig>
   url: URL
   host: string
+  /** Library-resolved domain context (also available via `useSsrDomain()`). */
+  domain: import('./SsrConfigTypes').SsrDomainContext
   publicConfig: TPublicConfig
   state: TApplicationState
   head: { value: SsrHeadPayload | null }
@@ -187,18 +192,6 @@ export interface SsrRenderResult<
 }
 
 export type SsrEntryKind = 'ssr' | 'spa'
-
-export interface SsrRuntimeEntry {
-  id: string
-  kind: SsrEntryKind
-  template: string
-  hosts: string[]
-  roles?: string[]
-  application?: SsrApplicationDefinition<any, any, any>
-  mountSelector?: string
-  cacheControl?: string
-  responseCache?: SsrResponseCacheStrategy<any>
-}
 
 export interface SsrHttpRequest<TPublicConfig = unknown>
   extends SsrRenderRequest<TPublicConfig> {
@@ -304,7 +297,7 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
   shutdownTimeoutMs?: number
   cookieAllowlist?: string[]
   cookieDenylist?: string[]
-  publicConfig: TPublicConfig
+  publicConfig?: TPublicConfig
   healthPath?: string
   readinessPath?: string
   /**
@@ -333,16 +326,3 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
     context: SsrErrorRenderContext<TPublicConfig>
   ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
 }
-
-export interface SsrRuntimeDefinition<TPublicConfig = unknown> {
-  name: string
-  entries: SsrRuntimeEntry[]
-  defaultEntryId?: string
-  server: SsrServerOptions<TPublicConfig>
-  endpoints?: SsrEndpointDefinition<TPublicConfig>[]
-  readiness?: SsrReadinessProbe[]
-}
-
-export type SsrRuntimeDefinitionExport<TPublicConfig = unknown> =
-  | SsrRuntimeDefinition<TPublicConfig>
-  | (() => SsrRuntimeDefinition<TPublicConfig> | Promise<SsrRuntimeDefinition<TPublicConfig>>)
