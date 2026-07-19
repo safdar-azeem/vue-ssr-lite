@@ -5,6 +5,7 @@ import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
 import { serializeSsrState } from './SsrSerialization'
 import type {
   SsrApplicationDefinition,
+  SsrCreatedApplication,
   SsrHydrationState,
   SsrLogger,
   SsrRenderRequest,
@@ -69,7 +70,9 @@ export const renderSsrApplication = async <
   let routeReadyAt = startedAt
   let renderedAt = startedAt
   let carried: Record<string, unknown> | undefined
-  let created: Awaited<ReturnType<typeof createSsrApplication>> | undefined
+  let created:
+    | SsrCreatedApplication<TApplicationState, TPublicConfig, TExtension>
+    | undefined
   let html = ''
   let teleports = ''
   let passes = 0
@@ -170,6 +173,7 @@ export const renderSsrApplication = async <
       version: 1,
       applicationId: definition.id,
       publicConfig: request.publicConfig,
+      domain: request.domain,
       application: created.context.state,
       plugins: created.hydration.collect(),
     }
