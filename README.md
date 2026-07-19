@@ -37,15 +37,15 @@ It includes routing, browser hydration, production builds, a managed Node server
 
 | Import | Purpose |
 | --- | --- |
-| `vue-ssr-lite` | `defineSsrApplication`, `defineSsrRuntime`, request context, hydration helpers |
-| `vue-ssr-lite/client` | Browser hydration only |
-| `vue-ssr-lite/server` | Managed Node server, host matching, cookies, response cache |
+| `vue-ssr-lite` | `defineSsrConfig`, `defineSsrApplication`, `useSsrDomain`, request context |
+| `vue-ssr-lite/client` | Browser hydration and SPA mount |
+| `vue-ssr-lite/server` | Managed Node server, config compile, host matching, cookies |
 | `vue-ssr-lite/vite` | Vite plugin that wires HTML templates and virtual client entries |
 
-CLI binary:
+CLI binary (auto-discovers `ssr.config.ts|.mts|.js|.mjs` in the project root):
 
 ```bash
-vue-ssr-lite <dev|build|start> [--root .] [--runtime src/SsrRuntime.ts] [--server-output dist/server/SsrRuntime.js] [--hmr-port 31001]
+vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--server-output dist/server/SsrRuntime.js] [--hmr-port 31001]
 ```
 
 Requires Node.js 20 or newer.
@@ -269,51 +269,63 @@ Create its HTML template:
 
 The SSR browser entry and hydration setup are added automatically.
 
-## 3. Create the Runtime
+## 3. Create `ssr.config.ts`
 
-The runtime tells the package which application should handle each host.
+Every application is one self-contained object: runtime, domain, GraphQL,
+cookies, endpoints, and roles. The library expands domains, matches hosts by
+specificity, and exposes context through `useSsrDomain()`.
 
 ```ts
-// src/SsrRuntime.ts
-import { defineSsrRuntime } from 'vue-ssr-lite'
+// ssr.config.ts
+import { defineSsrConfig } from 'vue-ssr-lite'
+import { websiteApplication } from './src/website/SsrApplication'
 
-import { websiteApplication } from './website/SsrApplication'
-
-export default defineSsrRuntime({
+export default defineSsrConfig({
 	name: 'my-platform',
-
-	entries: [
-		{
-			id: 'dashboard',
-			kind: 'spa',
-			template: 'index.html',
-			hosts: ['app.example.com', 'localhost'],
-		},
-		{
-			id: 'website',
-			kind: 'ssr',
-			template: 'site.html',
-			hosts: ['*'],
-			application: websiteApplication,
-		},
-	],
-
-	defaultEntryId: 'website',
-
+	runtime: process.env.APP_RUNTIME || 'unified',
 	server: {
 		host: '0.0.0.0',
 		port: Number(process.env.PORT || 4173),
-		role: process.env.APP_RUNTIME || 'unified',
-
-		publicConfig: {
-			apiUrl: process.env.PUBLIC_API_URL || 'http://localhost:4000',
+		trustProxy: true,
+	},
+	applications: {
+		dashboard: {
+			spa: true,
+			template: 'index.html',
+			roles: ['unified', 'dashboard'],
+			domain: {
+				development: 'localhost',
+				production: 'app.example.com',
+				mode: 'root-and-subdomains',
+				localAliases: true,
+				expose: { subdomainAs: 'workspace' },
+			},
+		},
+		website: {
+			ssr: websiteApplication,
+			template: 'site.html',
+			roles: ['unified', 'website'],
+			domain: {
+				development: 'shop.localhost',
+				production: 'shop.example.com',
+				mode: 'root-and-subdomains',
+				customDomains: true,
+				expose: { subdomainOrHostnameAs: 'storeDomain' },
+			},
 		},
 	},
 })
 ```
 
-The specific SPA hostname is checked first. The `*` SSR entry handles all remaining hosts.
-`defaultEntryId` is used when no host pattern matches.
+Host ownership is resolved by **specificity**, not application declaration order:
+
+1. Exact hostname
+2. Longest matching wildcard suffix (for example `*.shop.example.com` beats `*.example.com`)
+3. Shorter matching wildcard suffix
+4. Catch-all `*` (from `customDomains: true`)
+5. `defaultApplicationId` when no host pattern matches
+
+Overlapping wildcards are valid. Duplicate exact or identical wildcard patterns across applications are rejected at startup.
 
 When the server starts, the console prints a ready message with a clickable local URL and the active role:
 
@@ -372,8 +384,8 @@ Do not add SPA applications to the `applications` array.
 ```json
 {
 	"scripts": {
-		"dev": "vue-ssr-lite dev --runtime src/SsrRuntime.ts",
-		"build": "vue-ssr-lite build --runtime src/SsrRuntime.ts",
+		"dev": "vue-ssr-lite dev",
+		"build": "vue-ssr-lite build",
 		"start": "vue-ssr-lite start"
 	}
 }
@@ -397,21 +409,18 @@ npm run start
 For a project that only needs SSR:
 
 ```ts
-export default defineSsrRuntime({
+export default defineSsrConfig({
 	name: 'my-website',
-
-	entries: [
-		{
-			id: 'website',
-			kind: 'ssr',
+	applications: {
+		website: {
+			ssr: websiteApplication,
 			template: 'site.html',
-			hosts: ['*'],
-			application: websiteApplication,
+			domain: {
+				development: 'localhost',
+				production: 'example.com',
+				customDomains: true,
+			},
 		},
-	],
-
-	server: {
-		publicConfig: {},
 	},
 })
 ```
@@ -433,23 +442,21 @@ vueSsrLite({
 
 ## SPA-Only Application
 
-A runtime can also serve a normal SPA without an SSR application:
+A config can also serve a normal SPA without an SSR application:
 
 ```ts
-export default defineSsrRuntime({
+export default defineSsrConfig({
 	name: 'my-dashboard',
-
-	entries: [
-		{
-			id: 'dashboard',
-			kind: 'spa',
+	applications: {
+		dashboard: {
+			spa: true,
 			template: 'index.html',
-			hosts: ['*'],
+			domain: {
+				development: 'localhost',
+				production: 'app.example.com',
+				localAliases: true,
+			},
 		},
-	],
-
-	server: {
-		publicConfig: {},
 	},
 })
 ```
@@ -686,31 +693,75 @@ context.response.redirect = {
 
 ## Domain Routing
 
-Exact hostname:
+Domain configuration lives on each application. The library owns normalization
+(ports, trailing dots, IPv4/IPv6 aliases), proxy header handling, environment
+selection (`development` vs `production`), host specificity matching, custom
+domains, context serialization, and hydration.
 
 ```ts
-hosts: ['example.com']
+import { defineSsrConfig, useSsrDomain } from 'vue-ssr-lite'
+
+export default defineSsrConfig({
+	name: 'my-platform',
+	runtime: process.env.APP_RUNTIME || 'unified',
+	server: { trustProxy: true },
+	applications: {
+		admin: {
+			spa: true,
+			template: 'index.html',
+			domain: {
+				development: 'localhost',
+				production: process.env.VITE_ROOT_DOMAIN || 'app.example.com',
+				mode: 'root-and-subdomains',
+				localAliases: true,
+				expose: { subdomainAs: 'workspace' },
+			},
+		},
+		website: {
+			ssr: websiteApplication,
+			template: 'site.html',
+			domain: {
+				development: 'shop.localhost',
+				production: process.env.VITE_SHOP_BASE_DOMAIN || 'shop.example.com',
+				mode: 'root-and-subdomains',
+				customDomains: true,
+				expose: { subdomainOrHostnameAs: 'storeDomain' },
+			},
+		},
+	},
+})
 ```
 
-Subdomains:
+Consume the resolved context anywhere (SSR, SPA, endpoints, hydration):
 
 ```ts
-hosts: ['*.example.com']
+const domain = useSsrDomain()
+
+domain.entry
+domain.hostname
+domain.baseDomain
+domain.subdomain
+domain.isCustomDomain
+domain.params.workspace
+domain.params.storeDomain
+domain.buildSubdomainUrl('acme', '/dashboard')
 ```
 
-Exact hostname and subdomains:
+### Precedence
 
-```ts
-hosts: ['example.com', '*.example.com']
-```
+| Priority | Pattern | Example winner |
+| --- | --- | --- |
+| 1 | Exact hostname | `shop.localhost` over `*.localhost` |
+| 2 | Longer wildcard suffix | `*.shop.localhost` over `*.localhost` |
+| 3 | Shorter wildcard suffix | `*.localhost` over `*` |
+| 4 | Catch-all `*` | custom domains with no specific rule |
+| 5 | `defaultApplicationId` | only when no pattern matches |
 
-Catch-all:
+Overlapping roots such as `*.localhost` and `*.shop.localhost` are supported
+because the longer suffix wins. Duplicate exact/wildcard ownership and multiple
+catch-all (`*`) applications are rejected at startup.
 
-```ts
-hosts: ['*']
-```
-
-Do not include protocols or paths in host values.
+Do not include protocols, paths, query strings, or ports in domain values.
 
 Set `server.trustProxy` to `true` only when the Node process sits behind a trusted reverse proxy. Then `X-Forwarded-Host` and `X-Forwarded-Proto` are used for host matching and absolute URLs. Leave it `false` for direct local traffic.
 
@@ -718,95 +769,60 @@ Set `server.trustProxy` to `true` only when the Node process sits behind a trust
 
 Roles let one codebase and one Docker image run as different process modes.
 
-- Set `server.role` to the active mode for this process.
-- Set `roles` on each entry to list which modes may serve that entry.
-- Omit `roles` (or omit `server.role`) to keep an entry available in every mode.
+- Set top-level `runtime` to the active mode for this process.
+- Set `roles` on each application to list which modes may serve it.
+- Omit `roles` (or omit `runtime`) to keep an application available in every mode.
 
 Role names are application-defined strings. Common patterns:
 
 | Mode | Typical use |
 | --- | --- |
-| `unified` | Local development or a single process that serves every entry |
+| `unified` | Local development or a single process that serves every application |
 | A private role | SPA / admin / back-office only |
 | A public role | SSR website / marketing / storefront only |
 
 Example:
 
 ```ts
-export default defineSsrRuntime({
+export default defineSsrConfig({
 	name: 'my-platform',
-
-	entries: [
-		{
-			id: 'admin',
-			kind: 'spa',
+	runtime: process.env.APP_RUNTIME || 'unified',
+	applications: {
+		admin: {
+			spa: true,
 			template: 'index.html',
-			hosts: ['app.example.com', 'localhost'],
 			roles: ['unified', 'admin'],
+			domain: {
+				development: 'localhost',
+				production: 'app.example.com',
+				mode: 'root-and-subdomains',
+				localAliases: true,
+			},
 		},
-		{
-			id: 'website',
-			kind: 'ssr',
+		website: {
+			ssr: websiteApplication,
 			template: 'site.html',
-			hosts: ['*'],
 			roles: ['unified', 'website'],
-			application: websiteApplication,
+			domain: {
+				development: 'shop.localhost',
+				production: 'shop.example.com',
+				mode: 'root-and-subdomains',
+				customDomains: true,
+			},
 		},
-	],
-
-	server: {
-		role: process.env.APP_RUNTIME || 'unified',
-		publicConfig: {},
 	},
 })
 ```
 
 With that setup:
 
-- `APP_RUNTIME=unified` serves both entries (host routing still applies).
-- `APP_RUNTIME=admin` serves only the SPA entry.
-- `APP_RUNTIME=website` serves only the SSR entry.
+- `APP_RUNTIME=unified` serves both applications (host routing still applies).
+- `APP_RUNTIME=admin` serves only the SPA application.
+- `APP_RUNTIME=website` serves only the SSR application.
 
-If a host matches an entry that the current role does not allow, the server responds with `421`.
+If a host matches an application that the current role does not allow, the server responds with `421`.
 
-You can also load role-specific code only when needed:
-
-```ts
-export default async () => {
-	const role = process.env.APP_RUNTIME || 'unified'
-	const websiteApplication =
-		role === 'admin'
-			? undefined
-			: (await import('./website/SsrApplication')).websiteApplication
-
-	return defineSsrRuntime({
-		name: 'my-platform',
-		entries: [
-			{
-				id: 'admin',
-				kind: 'spa',
-				template: 'index.html',
-				hosts: ['app.example.com'],
-				roles: ['unified', 'admin'],
-			},
-			{
-				id: 'website',
-				kind: 'ssr',
-				template: 'site.html',
-				hosts: ['*'],
-				roles: ['unified', 'website'],
-				application: websiteApplication,
-			},
-		],
-		server: {
-			role,
-			publicConfig: {},
-		},
-	})
-}
-```
-
-`defineSsrRuntime` accepts either a plain object or an async factory function.
+`defineSsrConfig` accepts either a plain object or an async factory function.
 
 ## Custom Endpoints
 
