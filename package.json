@@ -1,6 +1,6 @@
 {
   "name": "vue-ssr-lite",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Vue 3 SSR runtime with routing, generic plugin hydration, Vite, and Node server lifecycle.",
   "license": "MIT",
   "type": "module",
