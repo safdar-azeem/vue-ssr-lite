@@ -100,7 +100,7 @@ describe('defineSsrConfig application domains', () => {
     ).toBe('storefront')
   })
 
-  it('rejects missing production runtime and API configuration', async () => {
+  it('rejects missing production runtime', async () => {
     await expect(
       compileSsrConfig(
         {
@@ -118,7 +118,6 @@ describe('defineSsrConfig application domains', () => {
                   development: 'localhost',
                   production: 'app.example.com',
                 },
-                publicConfig: { api: { endpoint: 'http://localhost/graphql' } },
               },
             },
           }),
@@ -126,6 +125,147 @@ describe('defineSsrConfig application domains', () => {
         { development: false }
       )
     ).rejects.toThrow(/requires `runtime`/)
+  })
+
+  it('rejects missing domain.production in production', async () => {
+    await expect(
+      compileSsrConfig(
+        {
+          default: defineSsrConfig({
+            name: 'demo',
+            runtime: 'unified',
+            applications: {
+              erp: {
+                render: 'spa',
+                application: {
+                  module: './src/Erp.ts',
+                  exportName: 'createErpApplication',
+                },
+                template: 'index.html',
+                domain: {
+                  development: 'localhost',
+                  production: '',
+                },
+              },
+            },
+          }),
+        },
+        { development: false }
+      )
+    ).rejects.toThrow(/requires domain.production/)
+  })
+
+  it('does not require publicConfig.api.endpoint in production', async () => {
+    const compiled = await compileSsrConfig(
+      {
+        default: defineSsrConfig({
+          name: 'demo',
+          runtime: 'unified',
+          applications: {
+            erp: {
+              render: 'spa',
+              application: {
+                module: './src/Erp.ts',
+                exportName: 'createErpApplication',
+              },
+              template: 'index.html',
+              domain: {
+                development: 'localhost',
+                production: 'app.example.com',
+              },
+              publicConfig: { featureFlags: { darkMode: true } },
+            },
+          },
+        }),
+      },
+      { development: false }
+    )
+    expect(compiled.applications[0]?.publicConfig).toEqual({
+      featureFlags: { darkMode: true },
+    })
+  })
+
+  it('allows localAliases on root and subdomain apps without host collision', async () => {
+    const compiled = await compileSsrConfig(
+      {
+        default: defineSsrConfig({
+          name: 'demo',
+          runtime: 'unified',
+          applications: {
+            erp: {
+              render: 'spa',
+              application: {
+                module: './src/ErpBootstrap.ts',
+                exportName: 'createErpApplication',
+              },
+              template: 'index.html',
+              domain: {
+                development: 'localhost',
+                production: 'app.example.com',
+                mode: 'root-and-subdomains',
+                localAliases: true,
+              },
+            },
+            storefront: {
+              render: 'ssr',
+              application: {
+                id: 'storefront',
+                rootComponent: {} as any,
+              },
+              template: 'site.html',
+              domain: {
+                development: 'shop.localhost',
+                production: 'shop.example.com',
+                mode: 'root-and-subdomains',
+                localAliases: true,
+              },
+            },
+          },
+        }),
+      },
+      { development: true }
+    )
+
+    const erp = compiled.applications.find((app) => app.id === 'erp')!
+    const storefront = compiled.applications.find((app) => app.id === 'storefront')!
+    expect(erp.hosts).toEqual(
+      expect.arrayContaining(['localhost', '127.0.0.1', '*.localhost'])
+    )
+    expect(storefront.hosts).toContain('shop.localhost')
+    expect(storefront.hosts).toContain('*.shop.localhost')
+    expect(storefront.hosts).not.toContain('localhost')
+    expect(storefront.hosts).not.toContain('127.0.0.1')
+  })
+
+  it('passes renderError and onMetrics through compile', async () => {
+    const onMetrics = () => undefined
+    const renderError = () => null
+    const compiled = await compileSsrConfig(
+      {
+        default: defineSsrConfig({
+          name: 'demo',
+          runtime: 'unified',
+          server: { onMetrics, renderError },
+          applications: {
+            erp: {
+              render: 'spa',
+              application: {
+                module: './src/Erp.ts',
+                exportName: 'createErpApplication',
+              },
+              template: 'index.html',
+              domain: {
+                development: 'localhost',
+                production: 'app.example.com',
+              },
+            },
+          },
+        }),
+      },
+      { development: true }
+    )
+    expect(compiled.server.onMetrics).toBe(onMetrics)
+    expect(compiled.server.renderError).toBe(renderError)
   })
 
   it('extracts Vite entries and generates virtual modules without regex rewrites', () => {
