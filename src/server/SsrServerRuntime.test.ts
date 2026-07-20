@@ -219,4 +219,51 @@ describe('managed SSR server lifecycle', () => {
     expect(shop.status).toBe(421)
     expect(await shop.text()).toContain('Misdirected request')
   })
+
+  it('coalesces concurrent runtime reloads and keeps the last good config on failure', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let loads = 0
+    let failNext = false
+    let releaseReload!: () => void
+    const reloadGate = new Promise<void>((resolveGate) => {
+      releaseReload = resolveGate
+    })
+    let reloadStarted!: () => void
+    const sawReload = new Promise<void>((resolveStarted) => {
+      reloadStarted = resolveStarted
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => {
+        loads += 1
+        if (loads === 1) return { default: spaConfig() }
+        reloadStarted()
+        await reloadGate
+        if (failNext) throw new Error('hmr reload boom')
+        return { default: spaConfig() }
+      },
+    })
+    await managed.listen()
+    const { port } = managed.address()
+
+    const pendingA = fetch(`http://127.0.0.1:${port}/healthz`)
+    await sawReload
+    const pendingB = fetch(`http://127.0.0.1:${port}/healthz`)
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+    expect(loads).toBe(2)
+    releaseReload()
+    expect((await pendingA).status).toBe(200)
+    expect((await pendingB).status).toBe(200)
+    expect(loads).toBe(2)
+
+    failNext = true
+    const afterFailure = await fetch(`http://127.0.0.1:${port}/healthz`)
+    expect(afterFailure.status).toBe(200)
+    expect(loads).toBe(3)
+  })
 })
