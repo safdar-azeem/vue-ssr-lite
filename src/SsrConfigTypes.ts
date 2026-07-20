@@ -1,8 +1,11 @@
 import type { SsrApplicationDefinition } from './SsrRuntimeTypes'
 import type {
   SsrEndpointDefinition,
+  SsrErrorRenderContext,
+  SsrHttpResponse,
   SsrLogger,
   SsrReadinessProbe,
+  SsrRenderMetrics,
   SsrResponseCacheStrategy,
 } from './SsrRuntimeTypes'
 
@@ -105,6 +108,10 @@ export interface SsrConfigServerOptions {
   resolutionDeadlineMs?: number
   diagnostics?: boolean
   logger?: SsrLogger
+  onMetrics?: (metrics: SsrRenderMetrics) => void
+  renderError?: (
+    context: SsrErrorRenderContext
+  ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
 }
 
 /**
