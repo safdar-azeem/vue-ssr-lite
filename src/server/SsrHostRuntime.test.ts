@@ -83,4 +83,20 @@ describe('SSR host matching', () => {
       )
     ).toBe('customer=public')
   })
+
+  it('forwards nothing when both allow and deny are empty', () => {
+    expect(
+      filterSsrCookieHeader('session=a; theme=dark', [], [])
+    ).toBeUndefined()
+  })
+
+  it('supports deny-only filtering when allow is empty', () => {
+    expect(
+      filterSsrCookieHeader(
+        'session=a; auth_token=private; theme=dark',
+        [],
+        ['auth_token']
+      )
+    ).toBe('session=a; theme=dark')
+  })
 })
