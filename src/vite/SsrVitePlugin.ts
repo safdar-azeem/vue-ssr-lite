@@ -42,6 +42,15 @@ const RESOLVED_RUNTIME = `\0${SSR_RUNTIME_VIRTUAL_ID}`
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
 
+/**
+ * Vite path-resolves string `build.ssr` entries. Accept both the bare virtual id
+ * and a root-prefixed filesystem form of the same id.
+ */
+const isSsrRuntimeVirtualId = (id: string): boolean =>
+  id === SSR_RUNTIME_VIRTUAL_ID ||
+  id.endsWith(`/${SSR_RUNTIME_VIRTUAL_ID}`) ||
+  id.endsWith(`\\${SSR_RUNTIME_VIRTUAL_ID}`)
+
 /** Module scripts with `src` (any attribute order). */
 const MODULE_SRC_SCRIPT_RE =
   /<script\b(?=[^>]*\btype\s*=\s*["']module["'])(?=[^>]*\bsrc\s*=\s*["'][^"']+["'])[^>]*>\s*<\/script>/gi
@@ -98,6 +107,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   return {
     name: 'vue-ssr-lite',
     enforce: 'pre',
+    // Keep one plugin instance across client/SSR environment config clones so
+    // virtual-module state stays consistent during production builds.
+    sharedDuringBuild: true,
     async config(userConfig, environment) {
       root = resolve(options.root || userConfig.root || process.cwd())
       const resolved = await ensureEntries()
@@ -145,7 +157,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       return []
     },
     resolveId(id) {
-      if (id === SSR_RUNTIME_VIRTUAL_ID) return RESOLVED_RUNTIME
+      if (isSsrRuntimeVirtualId(id)) return RESOLVED_RUNTIME
       if (virtualClients.has(id)) {
         return `${RESOLVED_CLIENT_PREFIX}${id.slice(SSR_CLIENT_VIRTUAL_PREFIX.length)}`
       }
