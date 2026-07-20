@@ -220,10 +220,31 @@ export const createSsrManagedServer = async (
     initialServerOptions.clientOutDir || 'dist/client'
   )
 
-  const loadDefinition = async () =>
-    options.production
-      ? initialRuntime
-      : resolveRuntime(await options.loadRuntime(), options)
+  // Dev reloads the Vite SSR runtime on every request so HMR is picked up.
+  // Coalesce concurrent loads (HMR storms) and keep the last good compile if a
+  // reload throws mid-invalidation — otherwise one failed eval takes the site down.
+  let lastDefinition = initialRuntime
+  let loadingDefinition: Promise<SsrCompiledConfig> | null = null
+
+  const loadDefinition = (): Promise<SsrCompiledConfig> => {
+    if (options.production) return Promise.resolve(initialRuntime)
+    if (loadingDefinition) return loadingDefinition
+    loadingDefinition = (async () => {
+      try {
+        const next = await resolveRuntime(await options.loadRuntime(), options)
+        lastDefinition = next
+        return next
+      } catch (error) {
+        initialServerOptions.logger?.error?.('ssr.runtime.reload.failed', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+        return lastDefinition
+      } finally {
+        loadingDefinition = null
+      }
+    })()
+    return loadingDefinition
+  }
 
   const loadTemplate = async (
     definition: SsrCompiledConfig,
