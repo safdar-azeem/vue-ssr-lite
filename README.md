@@ -28,7 +28,7 @@ It includes routing, browser hydration, production builds, a managed Node server
 - Health and readiness checks
 - Request timeouts
 - Optional response caching
-- Cookie allowlists and denylists
+- Cookie allow / deny filtering (including deny-only)
 - Proxy-aware host and protocol resolution
 - Graceful shutdown
 - TypeScript support
@@ -68,39 +68,50 @@ yarn add vue-ssr-lite vue vue-router @vue/server-renderer
 yarn add --dev vite @vitejs/plugin-vue
 ```
 
-## Choose Your Application Type
+## Clean consumer (canonical path)
 
-`vue-ssr-lite` supports two render modes, both declared only in `ssr.config.ts`:
+Every project follows the same five pieces. `ssr.config` is the single source of
+truth — there is no `spaEntries`, no `kind`, no manual `main.ts` mount, and no
+`server.role`.
+
+| Piece | Role |
+| --- | --- |
+| `ssr.config.ts` | Apps, domains, `runtime`, cookies, endpoints |
+| `defineSsrApplication()` modules | One module per app (`application.module`) |
+| HTML shells | Mount node only — **no** bootstrap `<script type="module" src>` |
+| `vite.config.ts` | `vue()` + `vueSsrLite()` |
+| CLI scripts | `vue-ssr-lite dev \| build \| start` |
+
+Render modes (declared as `render` on each application):
 
 | `render` | Behavior |
 | --- | --- |
-| `spa` | Serves the HTML shell; the library generates the browser mount entry |
+| `spa` | Serves the HTML shell; the plugin generates the browser mount entry |
 | `ssr` | Server-renders Vue and generates the hydration client entry |
 
-Define each application once with `defineSsrApplication()` and point
-`application: { module, exportName }` at that module. Do not maintain a separate
-`main.ts` / `ErpClient.ts` bootstrap — `vueSsrLite()` injects the client entry
-from `ssr.config`.
+`vueSsrLite()` defaults the client Vite `build.outDir` to `dist/client` so
+`vue-ssr-lite start` finds assets without a consumer override. Set
+`build.outDir` or `server.clientOutDir` only when you need a different path.
 
+Production compile requires top-level `runtime` (typically `APP_RUNTIME`) and
+each app’s `domain.production`. `publicConfig` is opaque — validating API URLs
+is the consumer’s job.
 
-A plain Vite `main.ts` (`createApp(App).use(router).mount('#app')`) still works
-for an application that never needs SSR, but prefer the unified definition when
-the same app also has an SSR entry.
+For async config, export a factory that *returns* `defineSsrConfig(...)`:
 
-### SSR
+```ts
+export default async () =>
+  defineSsrConfig({
+    name: 'my-platform',
+    runtime: process.env.APP_RUNTIME,
+    applications: { /* ... */ },
+  })
+```
 
-Use `kind: 'ssr'` for a Vue application that should render on the server and hydrate in the browser.
+`defineSsrConfig` itself is synchronous and accepts a plain object.
 
-Examples:
-
-- Public website
-- Storefront
-- Blog
-- Marketing website
-- Documentation website
-- SEO-focused application
-
-An SSR application is defined with `defineSsrApplication()`.
+See `fixtures/clean-consumer` in this repo for a minimal SPA project that
+matches this contract.
 
 ## Quick Start: SPA and SSR Together
 
@@ -111,17 +122,17 @@ The following example creates:
 
 ## 1. Create the SPA Application
 
-Define the application once and mount it through the package. Router creation,
-plugin installation, public-config delivery and mounting are owned by
-`vue-ssr-lite`, identically to the SSR and hydration paths:
+Define the application once. The library owns router creation, plugin
+installation, public-config delivery, and mounting via the generated virtual
+client — do **not** add a `main.ts` bootstrap.
 
 ```ts
-// src/spa/app.ts
+// src/dashboard/DashboardBootstrap.ts
 import { defineSsrApplication } from 'vue-ssr-lite'
 import App from './App.vue'
 import routes from './routes'
 
-export const app = defineSsrApplication({
+export const createDashboardApplication = defineSsrApplication({
   id: 'dashboard',
   rootComponent: App,
   routes,
@@ -129,18 +140,10 @@ export const app = defineSsrApplication({
 })
 ```
 
-```ts
-// src/spa/main.ts — thin entry
-import { mountSpaApplication } from 'vue-ssr-lite/client'
-import { app } from './app'
-
-void mountSpaApplication(app)
-```
-
 Create the SPA root component:
 
 ```vue
-<!-- src/spa/App.vue -->
+<!-- src/dashboard/App.vue -->
 <script setup lang="ts">
 import { RouterView } from 'vue-router'
 </script>
@@ -150,7 +153,7 @@ import { RouterView } from 'vue-router'
 </template>
 ```
 
-Create the SPA HTML entry:
+Create the SPA HTML shell (no bootstrap script):
 
 ```html
 <!-- index.html -->
@@ -166,15 +169,9 @@ Create the SPA HTML entry:
 
 	<body>
 		<div id="app"></div>
-
-		<script
-			type="module"
-			src="/src/spa/main.ts"></script>
 	</body>
 </html>
 ```
-
-The same definition backs the SSR entry, so the SPA and SSR paths cannot drift.
 
 ## 2. Create the SSR Application
 
@@ -369,11 +366,14 @@ export default defineConfig({
 `vueSsrLite()` generates:
 
 - HTML Rollup inputs from each `template`
+- Client `build.outDir` defaulting to `dist/client` (aligned with the Node server)
 - `virtual:vue-ssr-lite/client/<id>` SPA mount / SSR hydrate entries
-- `virtual:vue-ssr-lite/runtime` for the Node server (static application imports)
+- `virtual:vue-ssr-lite/runtime` for the Node server (SSR apps only; SPA modules are omitted)
 
 HTML templates should not include a manual `<script type="module" src="...">`
-bootstrap — the plugin injects the generated client entry.
+bootstrap — the plugin strips those tags from matched templates and injects the
+generated client entry. Editing `ssr.config.*` invalidates the cached config and
+triggers a full reload in dev.
 
 ## 5. Add Commands
 
@@ -600,30 +600,31 @@ For reusable REST caching and hydration, register an SSR-compatible Vue plugin i
 
 ## Public Configuration
 
-Pass public values from the runtime:
+Pass opaque, browser-safe values per application in `ssr.config`:
 
 ```ts
-server: {
-  publicConfig: {
-    apiUrl:
-      'https://api.example.com',
-    graphqlEndpoint:
-      'https://api.example.com/graphql',
+applications: {
+  website: {
+    // ...
+    publicConfig: {
+      apiUrl: 'https://api.example.com',
+      graphqlEndpoint: 'https://api.example.com/graphql',
+    },
   },
 }
 ```
 
-Access them in an SSR component:
+Access them in a component:
 
 ```ts
 import { useSsrRequestContext } from 'vue-ssr-lite'
 
 const context = useSsrRequestContext()
-
 const apiUrl = context.publicConfig.apiUrl
 ```
 
-Only include values that are safe to expose to the browser.
+The library does not interpret `publicConfig` (no GraphQL/REST assumptions).
+Validate transport URLs in your own plugins or env checks.
 
 ## SEO
 
@@ -755,6 +756,11 @@ catch-all (`*`) applications are rejected at startup.
 
 Do not include protocols, paths, query strings, or ports in domain values.
 
+`localAliases: true` adds bare loopback hosts (`localhost`, `127.0.0.1`, …) only
+when the app’s development base is itself a loopback hostname. Subdomain bases
+such as `shop.localhost` already expand to `*.shop.localhost` and do not claim
+bare `localhost`, so multiple apps can enable `localAliases` safely.
+
 Set `server.trustProxy` to `true` only when the Node process sits behind a trusted reverse proxy. Then `X-Forwarded-Host` and `X-Forwarded-Proto` are used for host matching and absolute URLs. Leave it `false` for direct local traffic.
 
 ## Runtime Roles
@@ -828,10 +834,12 @@ With that setup:
 
 If a host matches an application that the current role does not allow, the server responds with `421`.
 
-Development may default `runtime` in your `ssr.config`. Production compilation
-rejects a missing `runtime`, `domain.production`, or `publicConfig.api.endpoint`.
+Development may omit `runtime` (the compiler defaults the process role to
+`unified`). Production compilation rejects a missing `runtime` or
+`domain.production`. It does **not** validate `publicConfig` shape — pass
+whatever your plugins need and validate API URLs in the consumer.
 
-`defineSsrConfig` accepts either a plain object or an async factory function.
+For async loading, export `async () => defineSsrConfig({ ... })`.
 
 ## Custom Endpoints
 
@@ -938,9 +946,9 @@ cookies: {
 }
 ```
 
-- If `allow` is non-empty, only listed cookies are forwarded.
-- `deny` always removes matching cookies.
-- Leave both empty when the browser talks to the API directly and SSR needs no cookies.
+- Both empty → forward nothing (secure default when SSR needs no cookies).
+- `allow` empty and `deny` non-empty → forward all cookies except `deny`.
+- `allow` non-empty → forward `allow ∩ ¬deny`.
 
 ## Server Configuration
 
@@ -1050,28 +1058,17 @@ warnings; production render paths are untouched.
 
 ## Summary
 
-For a SPA:
+1. Add `ssr.config.ts` with `defineSsrConfig({ name, runtime, applications })`.
+2. For each app: `defineSsrApplication()` module, HTML shell (no bootstrap script),
+   `render: 'spa' | 'ssr'`, and `application: { module, exportName }`.
+3. Wire Vite with `vue()` + `vueSsrLite()` (client assets land in `dist/client`).
+4. Run `vue-ssr-lite dev|build|start`.
+5. In production set `APP_RUNTIME` / `runtime` and every `domain.production`.
 
-1. Define the app once with `defineSsrApplication()`.
-2. Mount it in a thin `main.ts` with `mountSpaApplication()`.
-3. Register the HTML file in `spaEntries`.
-4. Add a runtime entry with `kind: 'spa'`.
+Optional: restrict apps with `roles`, filter cookies, add endpoints, or pass
+`server.onMetrics` / `server.renderError` through `ssr.config`.
 
-For SSR:
-
-1. Create the Vue root component and routes.
-2. Define it with `defineSsrApplication()`.
-3. Create an SSR HTML template.
-4. Register it in `applications`.
-5. Add a runtime entry with `kind: 'ssr'`.
-
-Optional for multi-mode deployments:
-
-1. Choose role names for your project.
-2. Set `server.role` from an environment variable.
-3. Restrict each entry with `roles`.
-
-Both application types can run from the same project, build process, and production server.
+SPA and SSR apps share one project, one build, and one production server.
 
 ## License
 
