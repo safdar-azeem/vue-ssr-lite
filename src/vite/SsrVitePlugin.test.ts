@@ -80,6 +80,35 @@ const runConfig = async (
 }
 
 describe('SSR Vite package identity', () => {
+  it('resolves the runtime virtual id even when Vite path-resolves build.ssr', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const plugin = vueSsrLite({ root: pluginRoot })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    await configHook.call(
+      {} as never,
+      { root: pluginRoot },
+      {
+        command: 'build',
+        mode: 'test',
+        isSsrBuild: true,
+        isPreview: false,
+      }
+    )
+
+    expect(plugin.resolveId?.call({} as never, 'virtual:vue-ssr-lite/runtime')).toBe(
+      '\0virtual:vue-ssr-lite/runtime'
+    )
+    expect(
+      plugin.resolveId?.call(
+        {} as never,
+        `${pluginRoot}/virtual:vue-ssr-lite/runtime`
+      )
+    ).toBe('\0virtual:vue-ssr-lite/runtime')
+  })
+
   it('deduplicates Vue and externalizes vue-ssr-lite by default', async () => {
     const pluginRoot = await writeMinimalConfig()
     const config = await runConfig(pluginRoot)
