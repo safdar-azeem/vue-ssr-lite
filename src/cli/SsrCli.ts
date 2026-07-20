@@ -6,6 +6,7 @@ import {
   SSR_RUNTIME_VIRTUAL_ID,
 } from '../SsrConfigCompileRuntime'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
+import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 
 interface SsrCliOptions {
@@ -89,17 +90,7 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
 const runBuild = async (options: SsrCliOptions) => {
   const { build: viteBuild } = await import('vite')
   await viteBuild({ root: options.root })
-  await viteBuild({
-    root: options.root,
-    build: {
-      ssr: SSR_RUNTIME_VIRTUAL_ID,
-      outDir: resolve(options.root, 'dist/server'),
-      emptyOutDir: true,
-      rollupOptions: {
-        output: { entryFileNames: 'SsrRuntime.js' },
-      },
-    },
-  })
+  await viteBuild(createSsrProductionViteBuildOptions(options.root))
 }
 
 const main = async () => {
