@@ -256,6 +256,12 @@ export const resolveSsrForwardedProtocol = (
 
 const COOKIE_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
+/**
+ * Cookie passthrough for SSR upstream/client fetches:
+ * - both empty → forward nothing (secure default)
+ * - allow empty + deny non-empty → forward all except deny
+ * - allow non-empty → allow ∩ ¬deny
+ */
 export const filterSsrCookieHeader = (
   cookieHeader: SsrHeaderValue,
   allowlist: readonly string[] = [],
@@ -263,7 +269,8 @@ export const filterSsrCookieHeader = (
 ): string | undefined => {
   const allowed = new Set(allowlist.filter((name) => COOKIE_NAME.test(name)))
   const denied = new Set(denylist.filter((name) => COOKIE_NAME.test(name)))
-  if (!cookieHeader || allowed.size === 0) return
+  if (!cookieHeader) return
+  if (allowed.size === 0 && denied.size === 0) return
   const cookies = String(cookieHeader)
     .split(';')
     .map((part) => part.trim())
@@ -272,7 +279,9 @@ export const filterSsrCookieHeader = (
       const separator = part.indexOf('=')
       if (separator <= 0) return false
       const name = part.slice(0, separator).trim()
-      return allowed.has(name) && !denied.has(name)
+      if (denied.has(name)) return false
+      if (allowed.size === 0) return true
+      return allowed.has(name)
     })
   return cookies.length ? cookies.join('; ') : undefined
 }
