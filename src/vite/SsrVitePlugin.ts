@@ -1,11 +1,12 @@
 import { resolve } from 'node:path'
-import type { Plugin } from 'vite'
+import type { Plugin, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
 import {
+  extractSsrViteEntries,
   generateSsrClientModule,
   generateSsrRuntimeModule,
+  loadSsrConfigFile,
   resolveSsrConfigPath,
-  resolveSsrViteEntries,
   SSR_CLIENT_VIRTUAL_PREFIX,
   SSR_RUNTIME_VIRTUAL_ID,
   type SsrViteApplicationEntry,
@@ -39,11 +40,23 @@ const FRAMEWORK_DEDUPE = [
 
 const RESOLVED_RUNTIME = `\0${SSR_RUNTIME_VIRTUAL_ID}`
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
+const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
+
+/** Module scripts with `src` (any attribute order). */
+const MODULE_SRC_SCRIPT_RE =
+  /<script\b(?=[^>]*\btype\s*=\s*["']module["'])(?=[^>]*\bsrc\s*=\s*["'][^"']+["'])[^>]*>\s*<\/script>/gi
+
+const isSsrConfigFile = (filePath: string, configPath: string): boolean => {
+  const normalized = normalizePath(filePath)
+  if (configPath && normalized === normalizePath(configPath)) return true
+  return /\/ssr\.config\.(ts|mts|js|mjs)$/.test(normalized)
+}
 
 export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let root = resolve(options.root || process.cwd())
   let configPath = ''
   let entries: SsrViteEntries | null = null
+  let clientOutDir = DEFAULT_CLIENT_OUT_DIR
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
 
   const syncVirtualClients = () => {
@@ -56,12 +69,30 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     }
   }
 
+  const invalidateConfigCache = () => {
+    entries = null
+    virtualClients.clear()
+    clientOutDir = DEFAULT_CLIENT_OUT_DIR
+  }
+
   const ensureEntries = async (): Promise<SsrViteEntries> => {
     if (entries) return entries
     configPath = await resolveSsrConfigPath(root, options.config)
-    entries = await resolveSsrViteEntries(root, configPath)
+    const config = await loadSsrConfigFile(root, configPath)
+    entries = extractSsrViteEntries(config)
+    clientOutDir = config.server?.clientOutDir || DEFAULT_CLIENT_OUT_DIR
     syncVirtualClients()
     return entries
+  }
+
+  const invalidateVirtualModules = (server: ViteDevServer) => {
+    const runtimeModule = server.moduleGraph.getModuleById(RESOLVED_RUNTIME)
+    if (runtimeModule) server.moduleGraph.invalidateModule(runtimeModule)
+    for (const application of entries?.applications ?? []) {
+      const clientId = `${RESOLVED_CLIENT_PREFIX}${application.id}`
+      const clientModule = server.moduleGraph.getModuleById(clientId)
+      if (clientModule) server.moduleGraph.invalidateModule(clientModule)
+    }
   }
 
   return {
@@ -76,6 +107,8 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           resolve(root, entry.template),
         ])
       )
+      const resolvedOutDir =
+        userConfig.build?.outDir || clientOutDir || DEFAULT_CLIENT_OUT_DIR
       return {
         resolve: {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
@@ -86,11 +119,30 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         },
         build: environment.isSsrBuild
           ? undefined
-          : { manifest: true, rollupOptions: { input } },
+          : {
+              manifest: true,
+              outDir: resolvedOutDir,
+              rollupOptions: { input },
+            },
       }
     },
     configResolved(config) {
       root = config.root
+    },
+    configureServer(server) {
+      void ensureEntries().then(() => {
+        if (configPath) server.watcher.add(configPath)
+      })
+    },
+    async handleHotUpdate({ file, server }) {
+      if (!isSsrConfigFile(file, configPath)) return
+      invalidateVirtualModules(server)
+      invalidateConfigCache()
+      await ensureEntries()
+      if (configPath) server.watcher.add(configPath)
+      invalidateVirtualModules(server)
+      server.ws.send({ type: 'full-reload' })
+      return []
     },
     resolveId(id) {
       if (id === SSR_RUNTIME_VIRTUAL_ID) return RESOLVED_RUNTIME
@@ -128,15 +180,8 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           html,
           entry.mountSelector || '#app'
         )
-        // Strip any manual bootstrap script so ssr.config remains the only wiring.
-        const withoutManualEntry = prepared.replace(
-          /<script\b[^>]*\btype=["']module["'][^>]*\bsrc=["'][^"']+["'][^>]*>\s*<\/script>/gi,
-          (tag) =>
-            /src=["'][^"']*ErpClient[^"']*["']/i.test(tag) ||
-            /src=["'][^"']*main\.ts["']/i.test(tag)
-              ? ''
-              : tag
-        )
+        // Strip every module-src script so ssr.config remains the only wiring.
+        const withoutManualEntry = prepared.replace(MODULE_SRC_SCRIPT_RE, '')
         if (withoutManualEntry.includes(`import ${JSON.stringify(virtualId)}`)) {
           return withoutManualEntry
         }
