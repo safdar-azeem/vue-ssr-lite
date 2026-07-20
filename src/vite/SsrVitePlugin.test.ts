@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -72,7 +72,10 @@ const runConfig = async (
       external?: string[]
       noExternal?: Array<string | RegExp>
     }
-    build?: { rollupOptions?: { input?: Record<string, string> } }
+    build?: {
+      outDir?: string
+      rollupOptions?: { input?: Record<string, string> }
+    }
   }
 }
 
@@ -138,5 +141,85 @@ describe('SSR Vite package identity', () => {
     expect(config.resolve?.dedupe).toContain('@apollo/client')
     expect(config.ssr?.noExternal).toContain('vue-apollo-client')
     expect(config.ssr?.noExternal).toContain('@vue/apollo-composable')
+  })
+
+  it('defaults client build.outDir to dist/client', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const config = await runConfig(pluginRoot, 'serve')
+    expect(config.build?.outDir).toBe('dist/client')
+  })
+
+  it('respects an explicit consumer build.outDir', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const plugin = vueSsrLite({ root: pluginRoot })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    const config = (await configHook.call(
+      {} as never,
+      { root: pluginRoot, build: { outDir: 'build/browser' } },
+      {
+        command: 'serve',
+        mode: 'test',
+        isSsrBuild: false,
+        isPreview: false,
+      }
+    )) as { build?: { outDir?: string } }
+
+    expect(config.build?.outDir).toBe('build/browser')
+  })
+
+  it('strips all module-src scripts from matched templates', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    await writeFile(
+      join(pluginRoot, 'site.html'),
+      `<html><body>
+        <div id="app"></div>
+        <script type="module" src="/src/legacy-boot.ts"></script>
+        <script src="/src/other.ts" type="module"></script>
+      </body></html>`
+    )
+    const plugin = vueSsrLite({ root: pluginRoot })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    await configHook.call(
+      {} as never,
+      { root: pluginRoot },
+      {
+        command: 'serve',
+        mode: 'test',
+        isSsrBuild: false,
+        isPreview: false,
+      }
+    )
+    const transform = plugin.transformIndexHtml
+    if (!transform || typeof transform === 'function' || !transform.handler) {
+      throw new Error('vueSsrLite must expose transformIndexHtml.')
+    }
+    const source = await readFile(join(pluginRoot, 'site.html'), 'utf8')
+    const result = transform.handler.call(
+      {} as never,
+      source,
+      {
+        path: '/site.html',
+        filename: join(pluginRoot, 'site.html'),
+      } as never
+    )
+    const htmlOut =
+      typeof result === 'string'
+        ? result
+        : result && typeof result === 'object' && 'html' in result
+          ? String(result.html)
+          : ''
+    expect(htmlOut).not.toContain('legacy-boot')
+    expect(htmlOut).not.toContain('other.ts')
+    const tags =
+      result && typeof result === 'object' && 'tags' in result
+        ? result.tags
+        : []
+    expect(JSON.stringify(tags)).toContain('virtual:vue-ssr-lite/client/storefront')
   })
 })
