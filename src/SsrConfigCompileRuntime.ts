@@ -31,12 +31,16 @@ import {
 export { defineSsrConfig }
 
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '::1'] as const
+const LOOPBACK_HOST_SET = new Set<string>(LOOPBACK_HOSTS)
 const CONFIG_CANDIDATES = [
   'ssr.config.ts',
   'ssr.config.mts',
   'ssr.config.js',
   'ssr.config.mjs',
 ] as const
+
+const isLoopbackHostname = (hostname: string): boolean =>
+  LOOPBACK_HOST_SET.has(hostname)
 
 export const SSR_RUNTIME_VIRTUAL_ID = 'virtual:vue-ssr-lite/runtime'
 export const SSR_CLIENT_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/client/'
@@ -143,7 +147,10 @@ const expandApplicationHosts = (
         pushUnique(hosts, `*.${productionBase}`)
       }
     }
-    if (domain.localAliases) {
+    // Bare loopbacks collide when multiple apps set localAliases. Only attach
+    // them when this app's active development base is itself a loopback;
+    // subdomain bases (e.g. shop.localhost) already expand via *.base.
+    if (domain.localAliases && isLoopbackHostname(activeBase)) {
       for (const alias of LOOPBACK_HOSTS) pushUnique(hosts, alias)
     }
   }
@@ -259,13 +266,6 @@ const validateProductionConfig = (config: SsrConfig) => {
     if (!String(app.domain?.production || '').trim()) {
       throw new Error(
         `Application "${id}" requires domain.production in production.`
-      )
-    }
-    const api = (app.publicConfig as { api?: { endpoint?: string } } | undefined)
-      ?.api
-    if (!String(api?.endpoint || '').trim()) {
-      throw new Error(
-        `Application "${id}" requires publicConfig.api.endpoint in production.`
       )
     }
   }
@@ -611,6 +611,8 @@ export const compileSsrConfig = async (
       resolutionDeadlineMs: config.server?.resolutionDeadlineMs,
       diagnostics: config.server?.diagnostics,
       logger: config.server?.logger,
+      onMetrics: config.server?.onMetrics,
+      renderError: config.server?.renderError,
       publicConfig: {},
     },
   }
