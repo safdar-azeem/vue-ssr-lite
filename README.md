@@ -42,11 +42,18 @@ It includes routing, browser hydration, production builds, a managed Node server
 | `vue-ssr-lite/server` | Managed Node server, config compile, host matching, cookies |
 | `vue-ssr-lite/vite` | Vite plugin that wires HTML templates and virtual client entries |
 
-CLI binary (auto-discovers `ssr.config.ts|.mts|.js|.mjs` in the project root):
+CLI binary:
 
 ```bash
 vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--server-output dist/server/SsrRuntime.js] [--hmr-port 31001]
 ```
+
+- `dev` / `build` auto-discover `ssr.config.ts|.mts|.js|.mjs` in the project root
+  (or take `--config`).
+- `start` loads the baked production runtime
+  (`dist/server/SsrRuntime.js` or `--server-output`) and does **not** require
+  source `ssr.config.*` in the working directory — slim Docker images only need
+  `package.json`, production `node_modules`, and `dist/`.
 
 Requires Node.js 20 or newer.
 
