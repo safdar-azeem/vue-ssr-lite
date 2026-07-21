@@ -1,47 +1,10 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import {
-  resolveSsrConfigPath,
-  SSR_RUNTIME_VIRTUAL_ID,
-} from '../SsrConfigCompileRuntime'
+import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
-
-interface SsrCliOptions {
-  command: 'dev' | 'build' | 'start'
-  root: string
-  config: string
-  serverOutput: string
-  hmrPort?: string
-}
-
-const readFlag = (args: string[], name: string): string | undefined => {
-  const index = args.indexOf(name)
-  return index >= 0 ? args[index + 1] : undefined
-}
-
-const parseArguments = async (args: string[]): Promise<SsrCliOptions> => {
-  const command = args[0]
-  if (!['dev', 'build', 'start'].includes(command)) {
-    throw new Error(
-      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--hmr-port 31001]'
-    )
-  }
-  const root = resolve(readFlag(args, '--root') || process.cwd())
-  const config = await resolveSsrConfigPath(root, readFlag(args, '--config'))
-  return {
-    command: command as SsrCliOptions['command'],
-    root,
-    config,
-    serverOutput: resolve(
-      root,
-      readFlag(args, '--server-output') || 'dist/server/SsrRuntime.js'
-    ),
-    hmrPort: readFlag(args, '--hmr-port') || process.env.VUE_SSR_LITE_HMR_PORT,
-  }
-}
+import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
 
 const runServer = async (options: SsrCliOptions, production: boolean) => {
   const hmrPort = production
@@ -94,7 +57,7 @@ const runBuild = async (options: SsrCliOptions) => {
 }
 
 const main = async () => {
-  const options = await parseArguments(process.argv.slice(2))
+  const options = await parseSsrCliArguments(process.argv.slice(2))
   if (options.command === 'build') return runBuild(options)
   return runServer(options, options.command === 'start')
 }
