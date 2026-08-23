@@ -1,4 +1,4 @@
-import { renderToString } from '@vue/server-renderer'
+import { renderToString } from 'vue/server-renderer'
 import { defineComponent, h, inject, type InjectionKey, type Plugin } from 'vue'
 import { describe, expect, it } from 'vitest'
 import {
@@ -42,7 +42,7 @@ describe('SSR request context identity', () => {
       },
     })
     const created = await createSsrApplication(
-      { id: 'request-context-hook', rootComponent: Root },
+      { id: 'request-context-hook', root: Root },
       { server: true, request }
     )
 
@@ -72,7 +72,7 @@ describe('SSR request context identity', () => {
     const created = await createSsrApplication(
       {
         id: 'plugin-managed-application',
-        rootComponent: Root,
+        root: Root,
         plugins: [contextPlugin],
       },
       { server: true, request }
@@ -97,7 +97,7 @@ describe('SSR request context identity', () => {
       },
     })
     const created = await createSsrApplication(
-      { id: 'request-context-compatible-copy', rootComponent: Root },
+      { id: 'request-context-compatible-copy', root: Root },
       { server: true, request }
     )
 
