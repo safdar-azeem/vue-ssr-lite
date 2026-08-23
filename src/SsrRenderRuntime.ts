@@ -1,10 +1,10 @@
-import { renderToString } from '@vue/server-renderer'
+import { renderToString } from 'vue/server-renderer'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import { createSsrResolutionController } from './SsrRequestResolution'
 import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
 import { serializeSsrState } from './SsrSerialization'
 import type {
-  SsrApplicationDefinition,
+  SsrResolvedApplicationDefinition,
   SsrCreatedApplication,
   SsrHydrationState,
   SsrLogger,
@@ -48,7 +48,7 @@ export const renderSsrApplication = async <
   TPublicConfig = unknown,
   TExtension = unknown,
 >(
-  definition: SsrApplicationDefinition<
+  definition: SsrResolvedApplicationDefinition<
     TApplicationState,
     TPublicConfig,
     TExtension
