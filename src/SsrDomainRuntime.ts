@@ -60,7 +60,7 @@ export const resolveSsrDomainContext = (
   const hostname = normalizeSsrHostname(host)
   const productionBase = normalizeSsrHostname(application.domain.production)
   const developmentBase = normalizeSsrHostname(application.domain.development)
-  const baseDomain = development ? developmentBase : productionBase
+  const configuredBase = development ? developmentBase : productionBase
   const bases = development
     ? [...new Set([developmentBase, productionBase])]
     : [productionBase]
@@ -82,7 +82,9 @@ export const resolveSsrDomainContext = (
   }
 
   const isCustomDomain = !matchedBase && application.domain.customDomains
-  const activeBase = matchedBase || baseDomain
+  // A convention-based single application owns the incoming host, so there is
+  // intentionally no configured apex to resolve here.
+  const activeBase = matchedBase || configuredBase || hostname
 
   return {
     entry: application.id,
