@@ -4,12 +4,71 @@ import {
   extractSsrViteEntries,
   generateSsrClientModule,
   generateSsrRuntimeModule,
+  normalizeSsrConfig,
 } from './SsrConfigCompileRuntime'
 import { defineSsrConfig } from './SsrConfigRuntime'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
 
 describe('defineSsrConfig application domains', () => {
+  it('normalizes conventions without a config file', () => {
+    const normalized = normalizeSsrConfig({}, { root: '/workspace/my-app' })
+    expect(normalized.name).toBe('my-app')
+    expect(normalized.applications.app).toMatchObject({
+      id: 'app',
+      render: 'ssr',
+      application: { module: './src/main.ts' },
+      template: './index.html',
+      mountSelector: '#app',
+      hosts: ['*'],
+    })
+  })
+
+  it('applies flat single-app overrides without repeating defaults', () => {
+    const normalized = normalizeSsrConfig({
+      app: './src/platform/main.ts',
+      mount: '#website',
+      server: { trustProxy: true },
+    })
+    expect(normalized.applications.app).toMatchObject({
+      application: { module: './src/platform/main.ts' },
+      template: './index.html',
+      mountSelector: '#website',
+      render: 'ssr',
+    })
+    expect(normalized.server?.trustProxy).toBe(true)
+  })
+
+  it('uses application keys as ids and requires routing for multiple apps', () => {
+    const normalized = normalizeSsrConfig({
+      applications: {
+        website: { app: './src/website/main.ts', host: 'example.com' },
+        store: { app: './src/store/main.ts', host: '*.shop.example.com' },
+      },
+    })
+    expect(normalized.applications.website.id).toBe('website')
+    expect(normalized.applications.store.hosts).toEqual(['*.shop.example.com'])
+    expect(() =>
+      normalizeSsrConfig({
+        applications: {
+          website: { app: './src/website/main.ts' },
+          store: { app: './src/store/main.ts' },
+        },
+      })
+    ).toThrow(/needs host routing/)
+  })
+
+  it('rejects ambiguous single and multi-app declarations', () => {
+    expect(() =>
+      normalizeSsrConfig({
+        app: './src/main.ts',
+        applications: {
+          website: { app: './src/website/main.ts', host: 'example.com' },
+        },
+      })
+    ).toThrow(/single-application field `app` with applications/)
+  })
+
   it('compiles app-centric domains and resolves context params', async () => {
     const compiled = await compileSsrConfig(
       {
@@ -42,7 +101,7 @@ describe('defineSsrConfig application domains', () => {
               render: 'ssr',
               application: {
                 id: 'ignored-legacy-id',
-                rootComponent: {} as any,
+                root: {} as any,
               },
               template: 'site.html',
               roles: ['unified', 'storefront'],
@@ -100,9 +159,8 @@ describe('defineSsrConfig application domains', () => {
     ).toBe('storefront')
   })
 
-  it('rejects missing production runtime', async () => {
-    await expect(
-      compileSsrConfig(
+  it('defaults the production runtime to unified', async () => {
+    const compiled = await compileSsrConfig(
         {
           default: defineSsrConfig({
             name: 'demo',
@@ -124,12 +182,11 @@ describe('defineSsrConfig application domains', () => {
         },
         { development: false }
       )
-    ).rejects.toThrow(/requires `runtime`/)
+    expect(compiled.server.role).toBe('unified')
   })
 
-  it('rejects missing domain.production in production', async () => {
-    await expect(
-      compileSsrConfig(
+  it('lets a single production application serve the incoming host', async () => {
+    const compiled = await compileSsrConfig(
         {
           default: defineSsrConfig({
             name: 'demo',
@@ -152,7 +209,7 @@ describe('defineSsrConfig application domains', () => {
         },
         { development: false }
       )
-    ).rejects.toThrow(/requires domain.production/)
+    expect(compiled.applications[0]?.hosts).toEqual(['*'])
   })
 
   it('does not require publicConfig.api.endpoint in production', async () => {
@@ -210,7 +267,7 @@ describe('defineSsrConfig application domains', () => {
               render: 'ssr',
               application: {
                 id: 'storefront',
-                rootComponent: {} as any,
+                root: {} as any,
               },
               template: 'site.html',
               domain: {
@@ -316,6 +373,7 @@ describe('defineSsrConfig application domains', () => {
     expect(runtime).toContain(
       'import { shopSsrApplication as __ssrApp0 } from "/app/src/ShopSsrApplication.ts"'
     )
+    expect(runtime).toContain('app: __ssrApp0')
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
 
     const spaClient = generateSsrClientModule('/app', entries.applications[0])
