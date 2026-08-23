@@ -15,7 +15,7 @@ describe('SSR generic hydration cleanup', () => {
     const dispose = vi.fn()
     await expect(createSsrApplication({
       id: 'install-failure',
-      rootComponent: defineComponent(() => () => h('main')),
+      root: defineComponent(() => () => h('main')),
       install: ({ hydration }) => {
         hydration.onDispose(dispose)
         throw new Error('install failed')
@@ -29,7 +29,7 @@ describe('SSR generic hydration cleanup', () => {
     const cleanup = vi.fn(() => { throw new Error('cleanup failed') })
     await expect(renderSsrApplication({
       id: 'render-failure',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup() { throw new Error('render failed') },
       }),
       install: ({ hydration }) => hydration.onDispose(dispose),
@@ -43,7 +43,7 @@ describe('SSR generic hydration cleanup', () => {
     const dispose = vi.fn()
     await expect(renderSsrApplication({
       id: 'cleanup-failure',
-      rootComponent: defineComponent(() => () => h('main', 'rendered')),
+      root: defineComponent(() => () => h('main', 'rendered')),
       install: ({ hydration }) => hydration.onDispose(dispose),
       cleanup: () => { throw new Error('cleanup failed') },
     }, request())).rejects.toThrow('cleanup failed')
