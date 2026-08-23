@@ -21,10 +21,9 @@ export default defineConfig({
       external: [
         /^node:/,
         'esbuild',
-        '@vue/server-renderer',
         'vite',
-        'vue',
-        'vue-router',
+        /^vue(?:\/|$)/,
+        /^vue-router(?:\/|$)/,
       ],
       output: {
         entryFileNames: '[name].mjs',
