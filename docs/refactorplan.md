@@ -16,7 +16,7 @@
                      │                       │
            Universal main.ts               Pages / Components
                      │                       │
-           defineApplication()          useSeo(...) [Reactive & Scoped]
+           defineApplication()          useSeo(...) [Synchronous & Scoped]
                      │                       │
                      └───────────┬───────────┘
                                  │
@@ -55,13 +55,14 @@
 1. **Standalone Core**: `vue-ssr-lite` owns the full SSR, hydration, and SEO lifecycle. It has **no dependency** on `vlite3` or any external UI library.
 2. **No Third SEO Package**: SEO primitives live directly in `vue-ssr-lite`. `@vue-ssr-lite/seo-core` is rejected for architectural minimalism.
 3. **No `<SeoProvider>` Required**: Developers call `useSeo()` directly in components, pages, or layouts. Scoped SEO state is managed automatically per component and request.
-4. **Universal API with Reactive Scoping**: `useSeo()` works identically during SSR (waiting for async page settling) and browser navigation (with automatic component-unmount and `<KeepAlive>` lifecycle cleanup).
-5. **Safe Canonical & Origin Resolution**: Production canonical URLs resolve authoritatively from `process.env.PUBLIC_URL`, `defineApplication({ seo: { siteUrl } })`, or server configuration. Raw `Host` headers are never trusted in production.
-6. **Strict Server-Only Boundaries**:
-   - `src/main.ts` is universal: developers **never** write `process.env` in `main.ts`.
-   - Dynamic sitemap queries (databases, private APIs) live in server-only modules (`sitemap.config.ts` or `server/sitemap.ts`).
-7. **Unified SEO Contract (`SeoInput`)**: Application defaults, route metadata, and page composables share **one consistent SEO schema**.
-8. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
+4. **Synchronous `useSeo()` Registration**: `useSeo()` registers its contributions **synchronously during component `setup()`**, ensuring full availability during SSR before rendering HTML.
+5. **Universal API with Reactive Scoping**: Works seamlessly during SSR (waiting for async page data settling) and browser navigation (with transactional updates and `<KeepAlive>` support).
+6. **Safe Canonical & Origin Resolution**: Production canonical URLs resolve authoritatively from `process.env.PUBLIC_URL`, `defineApplication({ seo: { siteUrl } })`, or server configuration. Raw `Host` headers are never trusted in production.
+7. **Strict Server-Only Boundaries**:
+   - `src/main.ts` is strictly universal: developers **never** write `process.env` in `main.ts`.
+   - Dynamic sitemap queries (databases, private APIs) live in the server-only `sitemap.config.ts` module.
+8. **Unified SEO Contract (`SeoInput`)**: Application defaults, route metadata, and page composables share **one consistent SEO schema**.
+9. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
 
 ---
 
@@ -73,35 +74,36 @@ The architecture is designed to support four distinct developer personas with pr
 PERSONA A — JUNIOR / FIRST SSR PROJECT (Zero SSR knowledge required)
 ├── defineApplication({ root: App, routes })
 └── useSeo({ title, description })
+└── Development: Zero config (http://localhost:<port>)
 └── Deployment: PUBLIC_URL=https://example.com
 
 PERSONA B — NORMAL MID-LEVEL APPLICATION DEVELOPER
-├── defineApplication({ seo: { siteName, title, image } })
+├── defineApplication({ seo: { siteName, title, titleTemplate, image } })
 └── Route metadata: meta.seo, meta.ssr
 
 PERSONA C — SENIOR APPLICATION DEVELOPER
 ├── usePublicConfig<T>()
 ├── sitemap.config.ts (Dynamic sitemap data provider)
 ├── JSON-LD structured data
+├── Advanced head extensibility (meta[], links[])
 ├── Custom canonical overrides & trailing slash policies
-└── Internal app escape hatch: defineApplication({ seo: false })
+└── Private/internal app mode: defineApplication({ seo: 'private' })
 
 PERSONA D — PLATFORM & INFRASTRUCTURE ENGINEER
-├── ssr.config.ts (defineSsrConfig)
+├── ssr.config.ts (defineSsrConfig: publicConfig, resolveSiteUrl, trustProxy)
 ├── useSsrRequestContext()
-├── Custom-domain origin resolvers (resolveSiteUrl)
 ├── setResponseStatus()
 └── Custom server middleware, hooks & caching overrides
 ```
 
 ### API Classification
 
-| Category | Exports | Boundary |
+| Category | Exports | File Boundary |
 |---|---|---|
 | **Normal (Level 1)** | `defineApplication`, `useSeo` | Universal (`src/`) |
 | **Common (Level 2)** | `usePublicConfig` | Universal (`src/`) |
-| **Advanced** | `setResponseStatus` | Universal (`src/`) |
-| **Server-Only (Level 3)** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
+| **Advanced Universal** | `setResponseStatus` (Server: sets status; Client: safe no-op) | Universal (`src/`) |
+| **Server Configuration** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
 
 ---
 
@@ -181,37 +183,58 @@ export default defineApplication({
 
   seo: {
     siteName: 'Builto',
-    title: {
-      default: 'Builto',
-      template: '%s | Builto',
-    },
+    title: 'Builto',
+    titleTemplate: '%s | Builto',
     description: 'Create websites, documents, and organize your workspace.',
     image: '/assets/brand/social-card.png',
   },
 })
 ```
 
-### Step 3: Escape Hatch for Internal / Non-Public Applications (Persona C)
+### Step 3: Private / Internal Applications Mode (Persona C)
 
-If an application is an internal dashboard, private portal, or behind an intranet where public SEO features (sitemaps, robots.txt, canonical URLs, `PUBLIC_URL` validation) are not desired:
+If an application is an internal dashboard, private portal, or behind authentication:
 
 ```ts
 export default defineApplication({
   root: App,
   routes,
-  seo: false, // Disables sitemap.xml, robots.txt, canonical generation & PUBLIC_URL requirement
+  seo: 'private', // or seo: { mode: 'private' }
 })
 ```
+
+#### Private Mode Semantics:
+- **What continues to work**: `useSeo()` `title`, `description`, custom `meta`, `links`, and client `document.title` + SSR `<title>` tags function normally for application usability.
+- **What is disabled**: No canonical URL generation, no `/sitemap.xml` endpoint, no `/robots.txt` endpoint, no `PUBLIC_URL` deployment requirement, and default emission of `<meta name="robots" content="noindex, nofollow">`.
 
 ---
 
 ## 5. Unified Public SEO Schema (`SeoInput`)
 
-To eliminate cognitive friction, **Application SEO, Route SEO, and Page SEO share the exact same core schema**. A developer uses the same property names everywhere.
+To eliminate cognitive friction, **Application SEO, Route SEO, and Page SEO share the exact same core schema**.
 
 ### Core Type Definitions
 
 ```ts
+/** Generic custom meta tag entry */
+export interface SeoMetaEntry {
+  name?: string
+  property?: string
+  httpEquiv?: string
+  content: string
+  [key: string]: any
+}
+
+/** Generic custom link tag entry */
+export interface SeoLinkEntry {
+  rel: string
+  href: string
+  hreflang?: string
+  type?: string
+  media?: string
+  [key: string]: any
+}
+
 /** Core SEO input schema used across Page, Route, and Application levels */
 export interface SeoInput {
   title?: string
@@ -240,28 +263,33 @@ export interface SeoInput {
     nosnippet?: boolean
   }
   structuredData?: Record<string, any> | Array<Record<string, any>>
+  meta?: SeoMetaEntry[]
+  links?: SeoLinkEntry[]
 }
 
 /** Route-level metadata schema */
-export type SeoRouteInput = Pick<
-  SeoInput,
-  'title' | 'description' | 'image' | 'canonical' | 'index' | 'follow' | 'robots'
-> & {
+export interface SeoRouteInput extends SeoInput {
   sitemap?: boolean
 }
 
-/** Global application defaults schema */
-export type SeoApplicationDefaults = SeoInput & {
+/** Global application configuration schema */
+export interface SeoApplicationConfig extends SeoInput {
   siteName?: string
-  title?: string | { default?: string; template?: string }
+  titleTemplate?: string
+  siteUrl?: string
   trailingSlash?: boolean
+  mode?: 'public' | 'private'
+  robotsTxt?: {
+    disallow?: string[]
+    allow?: string[]
+  }
 }
 ```
 
 ### TypeScript Module Augmentation Built-In
 
 ```ts
-// Built into vue-ssr-lite — no manual app-level augmentation needed:
+// Built into vue-ssr-lite — autocomplete and validation work out of the box:
 declare module 'vue-router' {
   interface RouteMeta {
     seo?: SeoRouteInput
@@ -300,7 +328,7 @@ useSeo({
 #### Automatic Property Derivation:
 - `<title>About | Builto</title>`
 - `<meta name="description" content="Learn more about Builto and our mission.">`
-- `<link rel="canonical" href="https://builto.com/about">` (automatically derived from current route)
+- `<link rel="canonical" href="https://builto.com/about">` (automatically derived from active route)
 - `<meta property="og:title" content="About | Builto">`
 - `<meta property="og:description" content="Learn more about Builto and our mission.">`
 - `<meta property="og:url" content="https://builto.com/about">`
@@ -308,26 +336,63 @@ useSeo({
 - `<meta name="twitter:description" content="Learn more about Builto and our mission.">`
 - `<meta name="twitter:card" content="summary_large_image">`
 
-### 6.2 Advanced Overrides
+### 6.2 Advanced Overrides & Custom Tags (Escape Hatch)
 
-Manual overrides are used only when intentionally deviating from standard behavior:
+Senior developers can override specific properties or inject arbitrary meta/link tags without hitting an artificial ceiling:
 
 ```ts
 useSeo({
   title: 'Introducing Workspaces',
-  canonical: '/blog/introducing-workspaces', // Explicit path override
-  // canonical: 'https://other-domain.com/article', // Absolute cross-domain canonical
+  canonical: '/blog/introducing-workspaces', // Path override
+  // canonical: 'https://other-domain.com/article', // Cross-domain canonical
   // canonical: false, // Disables canonical link tag
   index: false, // Emits noindex
   openGraph: {
     title: 'Custom Social Title', // Override if different from <title>
   },
+  meta: [
+    { name: 'author', content: 'Safdar' },
+    { property: 'article:published_time', content: '2026-08-24T00:00:00Z' },
+    { name: 'theme-color', content: '#0f172a' },
+  ],
+  links: [
+    { rel: 'alternate', hreflang: 'ar', href: '/ar/about' },
+  ],
 })
 ```
 
-### 6.3 Deterministic Scoping Hierarchy
+### 6.3 Synchronous Registration & Lifecycle Invariant
 
-SEO precedence is determined by **component hierarchy**, never by unpredictable mount timing:
+> **Critical Lifecycle Invariant**:  
+> `useSeo()` registers its contribution **synchronously when invoked during component `setup()`**.  
+> It does **not** wait for `onMounted()`, ensuring that SEO state is immediately available during SSR HTML string rendering.
+
+```text
+SSR EXECUTION LIFECYCLE:
+Component setup()
+       │
+       └── useSeo() registers contribution immediately in request-scoped SEO store
+                 │
+                 ▼
+       renderToString() captures settled SEO state
+                 │
+                 ▼
+       Request finished ➔ Request scope disposed (Zero memory leaks)
+
+
+CLIENT EXECUTION LIFECYCLE:
+Component setup()
+       │
+       └── useSeo() registers contribution in client SEO store
+                 │
+                 ├── onUnmounted() ➔ Cleans up contribution, restoring ancestor state
+                 │
+                 └── onDeactivated() / onActivated() ➔ Suspends/restores state in <KeepAlive>
+```
+
+### 6.4 Deterministic Scoping Hierarchy
+
+SEO precedence is determined strictly by **component hierarchy**:
 
 ```text
 APPLICATION DEFAULTS (defineApplication.seo)
@@ -342,18 +407,7 @@ DESCENDANT COMPONENT (useSeo in Child / Modal)
 ```
 
 - **Within the same component instance**: The latest `useSeo()` call updates and overrides previous properties.
-- **For sibling components at equal depth**: Follows stable Vue component creation order (with best practice recommending page-level metadata at the page/layout level).
-
-### 6.4 Lifecycle & `<KeepAlive>` Support
-
-`useSeo()` binds to the active component instance and manages contribution lifecycles:
-
-- **Mounting (`onMounted`)**: Registers the component's SEO contribution.
-- **Unmounting (`onUnmounted`)**: Cleans up the contribution, restoring ancestor/page values.
-- **Route Navigation**: Clears the leaving page's contribution so properties (e.g. `image: 'a.png'`) never leak into the next page.
-- **`<KeepAlive>` Caching (`onActivated` / `onDeactivated`)**:
-  - When Page A is cached in `<KeepAlive>` and deactivated, its SEO contribution is **suspended**.
-  - When Page A is reactivated, its SEO contribution is **restored**.
+- **For sibling components at equal depth**: Conflicting same-depth declarations are an anti-pattern; the latest registration updates the store, and in development, a warning is emitted. Page-level metadata should reside at the page/layout boundary.
 
 ### 6.5 Reactivity & Defined Async Settling Sources
 
@@ -384,15 +438,13 @@ SSR captures the final SEO snapshot **only after** these registered sources have
 3. **`vue-ssr-lite` router navigation hooks**;
 4. **Registered plugin resolution promises**.
 
-*(The library does not claim to detect arbitrary untracked background promises.)*
-
 ---
 
-## 7. Head Tag Ownership Markers & Hydration Reconciliation
+## 7. Head Tag Ownership Markers, Conflict Policy & Navigation Batching
 
-To prevent duplicate tags and protect consumer-owned elements in `index.html`, `vue-ssr-lite` places explicit internal ownership markers on all managed head elements.
+### 7.1 Managed Ownership Attributes
 
-### Managed Ownership Attributes
+All tags generated by `vue-ssr-lite` are marked with `data-vue-ssr-lite-head`:
 
 ```html
 <title data-vue-ssr-lite-head="title">About | Builto</title>
@@ -403,12 +455,17 @@ To prevent duplicate tags and protect consumer-owned elements in `index.html`, `
 <script type="application/ld+json" data-vue-ssr-lite-head="json-ld">...</script>
 ```
 
-### Reconciliation Algorithm
+### 7.2 Conflict Resolution with Pre-existing `index.html` Tags
 
-1. **SSR Generation**: Injects managed tags with their corresponding `data-vue-ssr-lite-head="<key>"` marker.
-2. **Client Hydration**: Adopts existing marked DOM nodes without recreating elements.
-3. **Client Navigation**: Computes diffs and updates only nodes with `data-vue-ssr-lite-head` attributes.
-4. **Consumer Safety**: Unmarked tags in `index.html` (favicons, fonts, external stylesheets, analytics scripts) are **never modified or removed**.
+- **Unrelated unmanaged tags** (favicons, font stylesheets, analytics scripts): **Never modified or deleted**.
+- **Conflicting unmanaged SEO singleton tags** (e.g. static `<title>`, `<meta name="description">`, `<meta name="robots">`, `<link rel="canonical">` present in `index.html`):
+  - **Policy**: `vue-ssr-lite` managed SEO **supersedes** the static conflicting tag.
+  - **Development**: Emits a concise warning informing the developer to remove the duplicate static tag from `index.html`.
+  - **Production**: Guarantees exactly one authoritative tag exists in the DOM.
+
+### 7.3 Transactional Navigation Batching
+
+On client-side route navigation (Page A ➔ Page B), the client head reconciler **batches all DOM updates atomically**. This prevents intermediate flashing of fallback/default titles or tags during page transitions.
 
 ---
 
@@ -416,9 +473,8 @@ To prevent duplicate tags and protect consumer-owned elements in `index.html`, `
 
 ### 8.1 Resolution Invariant
 
-For 99% of public deployments:
-- **Zero SSR source code required.**
-- **One authoritative deployment URL**: `PUBLIC_URL=https://builto.com`.
+- **Local Development**: Zero configuration required (automatically resolves `http://localhost:<port>`).
+- **Production Deployment**: Set **one environment variable**: `PUBLIC_URL=https://builto.com`.
 
 ```text
 PRODUCTION RESOLUTION PRIORITY:
@@ -487,7 +543,7 @@ export const routes: RouteRecordRaw[] = [
 
 ### 9.2 Safe 4xx/5xx Defaults
 
-- Setting `meta.ssr.status = 404` (or any 4xx/5xx code) automatically implies `index: false` (`noindex`).
+- Setting `meta.ssr.status = 404` (or calling `setResponseStatus(404)`) automatically implies `index: false` (`noindex`).
 - Developers do not need to write redundant `seo: { index: false }` on error routes.
 
 ---
@@ -496,7 +552,7 @@ export const routes: RouteRecordRaw[] = [
 
 ### 10.1 Static Route Discovery Rules
 
-`vue-ssr-lite` automatically discovers indexable static routes from the router tree:
+`vue-ssr-lite` discovers indexable routes by traversing Vue Router's resolved route records (correctly handling pathless parents `path: ''` and nested child routes):
 
 #### INCLUDED in Static Sitemap:
 - Concrete, navigable static routes (`/`, `/about`, `/pricing`).
@@ -512,7 +568,7 @@ export const routes: RouteRecordRaw[] = [
 
 ### 10.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`)
 
-For dynamic content, applications provide an optional `sitemap.config.ts` at the project root (or `server/sitemap.ts`):
+For dynamic content, applications provide an optional `sitemap.config.ts` at the project root:
 
 ```ts
 // sitemap.config.ts (SERVER-ONLY — Never bundled into client!)
@@ -558,7 +614,7 @@ export default defineApplication({
   root: App,
   routes,
   seo: {
-    robots: {
+    robotsTxt: {
       disallow: ['/internal-preview/'],
     },
   },
@@ -589,7 +645,7 @@ useSeo({
 
 Safe server-to-client configuration transport without application context boilerplate:
 
-### In `ssr.config.ts` (Server Configuration)
+### In `ssr.config.ts` (Level 2 Server Configuration)
 
 ```ts
 import { defineSsrConfig } from 'vue-ssr-lite'
@@ -658,9 +714,10 @@ export default defineSsrConfig({
 | `createSSRApp()` / `createApp()` lifecycle | **OWNS** | — | — |
 | Request isolation & context management | **OWNS** | — | — |
 | `renderToString()` & hydration execution | **OWNS** | — | — |
-| Scoped & reactive SEO store | **OWNS** | — | — |
+| Synchronous & reactive SEO store | **OWNS** | — | — |
 | `useSeo()` implementation | **OWNS** | — | Optional consumer |
 | Head reconciliation & ownership markers | **OWNS** | — | — |
+| Conflicting static head tag superseding | **OWNS** | — | — |
 | Automatic canonical URL derivation | **OWNS** | — | — |
 | Safe origin resolution (`PUBLIC_URL` / `siteUrl`) | **OWNS** | — | — |
 | Static route discovery for sitemap | **OWNS** | — | — |
@@ -669,6 +726,7 @@ export default defineSsrConfig({
 | HTTP response status codes & 404 defaults | **OWNS** | — | — |
 | `usePublicConfig<T>()` transport & serialization | **OWNS** | — | — |
 | JSON-LD structural validation, escaping & insertion | **OWNS** | — | — |
+| Advanced head tags (`meta[]`, `links[]`) | **OWNS** | — | — |
 | Structured data business schema content | — | **OWNS** | Optional schema helpers |
 | Page titles, descriptions, social images | — | **OWNS** | — |
 | Global site branding & default SEO | — | **OWNS** | — |
@@ -680,18 +738,24 @@ export default defineSsrConfig({
 
 ```text
 PHASE 0: Public API & DX Contract Freeze
-├── Freeze unified SeoInput, SeoRouteInput, and SeoApplicationDefaults types
-├── Freeze useSeo() function signature and reactive input types
+├── Freeze unified SeoInput, SeoRouteInput, and SeoApplicationConfig types
+├── Freeze title as string everywhere and titleTemplate in SeoApplicationConfig
+├── Freeze robots meta vs robotsTxt naming distinction
+├── Freeze useSeo() synchronous setup() registration invariant
 ├── Freeze RouteMeta module augmentation
 ├── Freeze ownership marker format (data-vue-ssr-lite-head="<key>")
-└── Freeze server-only file conventions (sitemap.config.ts, ssr.config.ts)
+├── Freeze conflicting static tag superseding policy with dev warning
+├── Freeze same-depth sibling conflict policy (latest wins + dev warning)
+├── Freeze private mode semantics (seo: 'private')
+├── Freeze advanced escape hatches (meta[], links[])
+└── Freeze canonical dynamic sitemap file (sitemap.config.ts)
 
 PHASE 1: Core SEO Types & Request/Client SEO Store
 ├── Implement request-scoped SEO store for SSR
 └── Implement reactive client-scoped SEO store
 
 PHASE 2: useSeo() Lifecycle, Reactivity & Scoped Cleanup
-├── Implement useSeo() bound to getCurrentInstance()
+├── Implement synchronous registration during setup()
 ├── Implement onUnmounted() contribution cleanup
 ├── Implement onActivated() / onDeactivated() for <KeepAlive> support
 ├── Add support for Ref, ComputedRef, and getter inputs
@@ -699,7 +763,8 @@ PHASE 2: useSeo() Lifecycle, Reactivity & Scoped Cleanup
 
 PHASE 3: SSR Head Finalization & Client Head Reconciliation
 ├── Implement SSR head tag serializer with data-vue-ssr-lite-head markers
-├── Implement browser DOM head reconciler with deterministic diffing
+├── Implement browser DOM head reconciler with deterministic diffing & navigation batching
+├── Implement conflicting static tag superseding with dev warning
 └── Add JSON-LD script breakout protection (\u003C/script\u003E)
 
 PHASE 4: Authoritative Origin Resolution & Canonical Path Normalization
@@ -714,7 +779,7 @@ PHASE 5: Route Metadata Contracts & HTTP Statuses
 └── Connect HTTP 4xx/5xx statuses to automatic noindex defaults
 
 PHASE 6: Static Sitemap & Robots.txt Infrastructure
-├── Implement static route discovery engine from Vue Router tree
+├── Implement static route discovery engine from Vue Router tree (handling pathless parents)
 ├── Implement XML sitemap serializer, caching headers & physical file collision checks
 └── Implement /robots.txt endpoint with standard defaults and physical file collision checks
 
@@ -744,21 +809,26 @@ PHASE 11: Comprehensive Test Suite & Production Verification
 
 | Area | Test Scenario | Expected Outcome |
 |---|---|---|
+| **SSR Registration** | `useSeo()` called in `setup()` | SEO tags present in SSR HTML without waiting for `onMounted()` |
 | **DX / Types** | Minimal TypeScript consumer | Autocomplete works for `useSeo()` and `meta.seo`; invalid keys fail type-check without manual `RouteMeta` augmentation |
+| **DX / Types** | Strict type contract | `title` is string; `titleTemplate` exists on app config; `robots` meta separate from `robotsTxt` |
 | **DX / Types** | Server-only bundle guard | `sitemap.config.ts` or server utilities cannot be imported into client bundle |
 | **SSR** | Concurrent requests with different routes | Request A and Request B do not leak or share SEO state |
 | **SSR** | Asynchronous page data resolution (`await fetch...`) | Final `<head>` contains resolved title, not `undefined` |
 | **SSR** | HTTP 404 Not Found route | Response status is 404; `<meta name="robots" content="noindex, follow">` present |
 | **SSR** | Production canonical resolution | Emits authoritative canonical URL matching `PUBLIC_URL` / `siteUrl` |
 | **SSR** | Production missing `PUBLIC_URL` | Fails fast with clear actionable error; never emits `localhost` |
-| **Internal App**| `defineApplication({ seo: false })` | No `PUBLIC_URL` required; `/sitemap.xml` and `/robots.txt` endpoints disabled |
+| **Private Mode** | `defineApplication({ seo: 'private' })` | `document.title` and `<title>` work; no canonical emitted; no sitemap/robots generated; no `PUBLIC_URL` required |
 | **Client** | Route navigation (Page A ➔ Page B) | Page A's SEO is discarded; Page B's SEO applied to DOM |
 | **Client** | Component unmount (Modal with `useSeo`) | Unmounting modal restores underlying page SEO state |
 | **Client** | `<KeepAlive>` Page Navigation | Page A deactivation suspends SEO; Page B applies SEO; returning to Page A restores Page A's SEO |
 | **Client** | Hydration tag reconciliation | Reconciles existing marked SSR tags; zero duplicate `<meta>`/`<link>` tags created |
+| **Client** | Conflicting static tag in `index.html` | Managed SEO supersedes static tag; logs dev warning; zero duplicate tags |
 | **Client** | Consumer `index.html` tags | Unmarked user tags (favicons, fonts, scripts) remain untouched |
+| **Client** | Navigation Batching | Head updates committed atomically on route changes; no intermediate title/meta flash |
 | **Client** | Browser Back/Forward navigation | SEO state accurately reflects active history state |
-| **Sitemap** | Static nested routes | Concatenated paths (`/docs/intro`) included in sitemap |
+| **Advanced Head** | Custom `meta[]` and `links[]` | Custom meta/link entries rendered in SSR, adopted in hydration, cleaned on route change |
+| **Sitemap** | Static nested routes | Resolved paths (including pathless parents) included in sitemap |
 | **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, and `meta.seo.index: false` excluded |
 | **Sitemap** | Physical file collision | If `public/sitemap.xml` exists, physical file is served without running generator |
 | **Sitemap** | Server-only dynamic entries | `sitemap.config.ts` dynamic URLs merged into `/sitemap.xml` |
