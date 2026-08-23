@@ -2,7 +2,8 @@
 
 > **Architectural Principle:**  
 > **Hosted applications declare intent. `vue-ssr-lite` handles SSR/SEO infrastructure.**  
-> **Automate mechanics. Default safe conventions. Declare business meaning.**
+> **Simple outside. Small inside. Powerful when needed.**  
+> **Automate the common 95% safely. Provide lean escape hatches for the remaining 5%.**
 
 ---
 
@@ -16,7 +17,7 @@
                      │                       │
            Universal main.ts               Pages / Components
                      │                       │
-           defineApplication()          useSeo(...) [Synchronous & Scoped]
+           defineApplication()             useSeo(...)
                      │                       │
                      └───────────┬───────────┘
                                  │
@@ -29,15 +30,15 @@
                         │ Router Engine  │
                         │ SSR Lifecycle  │
                         │ Hydration Sync │
-                        │ SEO Store      │
-                        │ Head Reconciler│
+                        │ SEO State      │
+                        │ Head Reconcile │
                         │ Canonical URLs │
                         │ Static Sitemap │
                         │ robots.txt     │
                         │ HTTP Statuses  │
                         │ Origin Resolver│
                         │ publicConfig   │
-                        │ JSON-LD Engine │
+                        │ JSON-LD Sync   │
                         │ Server Runtime │
                         └───────┬────────┘
                                 │
@@ -56,13 +57,14 @@
 2. **No Third SEO Package**: SEO primitives live directly in `vue-ssr-lite`. `@vue-ssr-lite/seo-core` is rejected for architectural minimalism.
 3. **No `<SeoProvider>` Required**: Developers call `useSeo()` directly in components, pages, or layouts. Scoped SEO state is managed automatically per component and request.
 4. **Synchronous `useSeo()` Registration**: `useSeo()` registers its contributions **synchronously during component `setup()`**, ensuring full availability during SSR before rendering HTML.
-5. **Universal API with Reactive Scoping**: Works seamlessly during SSR (waiting for async page data settling) and browser navigation (with transactional updates and `<KeepAlive>` support).
+5. **Universal API with Reactive Scoping**: Works seamlessly during SSR (participating in the existing async settling lifecycle) and browser navigation (with batched head reconciliation and `<KeepAlive>` support).
 6. **Safe Canonical & Origin Resolution**: Production canonical URLs resolve authoritatively from `process.env.PUBLIC_URL`, `defineApplication({ seo: { siteUrl } })`, or server configuration. Raw `Host` headers are never trusted in production.
 7. **Strict Server-Only Boundaries**:
    - `src/main.ts` is strictly universal: developers **never** write `process.env` in `main.ts`.
    - Dynamic sitemap queries (databases, private APIs) live in the server-only `sitemap.config.ts` module.
 8. **Unified SEO Contract (`SeoInput` & `UseSeoInput`)**: Application defaults, route metadata, and page composables share **one consistent SEO vocabulary**, with explicit typing for reactive inputs in `useSeo()`.
-9. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
+9. **Technical SEO Scope**: `vue-ssr-lite` guarantees technical correctness and search engine crawlability (HTML tags, status codes, canonicals, sitemaps, robots). It does not attempt content ranking, keyword density analysis, or search-console automation.
+10. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
 
 ---
 
@@ -74,7 +76,7 @@ The architecture is designed to support four distinct developer personas with pr
 PERSONA A — JUNIOR / FIRST SSR PROJECT (Zero SSR knowledge required)
 ├── defineApplication({ root: App, routes })
 └── useSeo({ title, description })
-└── Development: Zero config (http://localhost:<port>)
+└── Local: Zero config (http://localhost:<port>)
 └── Deployment: PUBLIC_URL=https://example.com
 
 PERSONA B — NORMAL MID-LEVEL APPLICATION DEVELOPER
@@ -83,8 +85,8 @@ PERSONA B — NORMAL MID-LEVEL APPLICATION DEVELOPER
 
 PERSONA C — SENIOR APPLICATION DEVELOPER
 ├── usePublicConfig<T>()
-├── sitemap.config.ts (Dynamic sitemap data provider with multi-app context)
-├── JSON-LD structured data
+├── sitemap.config.ts (Dynamic sitemap data provider)
+├── Structured data (JSON-LD)
 ├── Advanced head extensibility (meta[], links[])
 ├── Custom canonical overrides & trailing slash policies
 └── Private/internal app mode: defineApplication({ seo: { mode: 'private' } })
@@ -96,18 +98,16 @@ PERSONA D — PLATFORM & INFRASTRUCTURE ENGINEER
 └── Custom server middleware, hooks & caching overrides
 ```
 
-### API Classification
+### Public API Surface
 
 | Category | Exports | File Boundary |
 |---|---|---|
 | **Normal (Level 1)** | `defineApplication`, `useSeo` | Universal (`src/`) |
-| **Common (Level 2)** | `usePublicConfig` | Universal (`src/`) |
-| **Advanced Universal** | `setResponseStatus` (Server: sets status; Client: safe no-op) | Universal (`src/`) |
-| **Server Configuration** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
+| **Advanced Application (Level 2)** | `usePublicConfig`, `setResponseStatus` | Universal (`src/`) |
+| **Server Configuration (Level 3)** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
 
 ### Layered Documentation Structure
 
-To ensure lower-level developers are never overwhelmed, documentation is structured in four clear layers:
 1. **Getting Started / Quickstart**: Persona A (Install, Vite plugin, `defineApplication`, `useSeo`, `PUBLIC_URL` deployment).
 2. **SEO & Routing Guide**: Persona B (Site-wide defaults, `meta.seo`, `meta.ssr`, 404 handling, private mode).
 3. **Advanced Application Features**: Persona C (`sitemap.config.ts`, `usePublicConfig`, structured data, `meta[]`/`links[]`).
@@ -233,37 +233,23 @@ import type { Ref, ComputedRef } from 'vue'
 /** Reactive or plain value wrapper */
 export type SeoResolvable<T> = T | Ref<T> | ComputedRef<T> | (() => T)
 
-/** Open Graph object type */
-export type OpenGraphType =
-  | 'website'
-  | 'article'
-  | 'profile'
-  | 'book'
-  | (string & {})
-
-/** Explicitly typed custom meta tag entry */
+/** Thin escape hatch for custom meta tags */
 export interface SeoMetaEntry {
+  key?: string
   name?: string
   property?: string
   httpEquiv?: string
-  charset?: string
   content: string
-  key?: string
-  attrs?: Record<string, string | boolean>
 }
 
-/** Explicitly typed custom link tag entry */
+/** Thin escape hatch for custom link tags */
 export interface SeoLinkEntry {
+  key?: string
   rel: string
   href: string
   hreflang?: string
   type?: string
   media?: string
-  sizes?: string
-  crossorigin?: '' | 'anonymous' | 'use-credentials'
-  referrerpolicy?: string
-  key?: string
-  attrs?: Record<string, string | boolean>
 }
 
 /** Core plain serializable SEO data contract */
@@ -275,14 +261,14 @@ export interface SeoInput {
   index?: boolean
   follow?: boolean
   openGraph?: {
-    type?: OpenGraphType
+    type?: string
     title?: string
     description?: string
     image?: string
     url?: string
   }
   twitter?: {
-    card?: 'summary' | 'summary_large_image' | 'app' | 'player'
+    card?: string
     title?: string
     description?: string
     image?: string
@@ -351,7 +337,7 @@ declare module 'vue-router' {
 
 ## 6. Universal `useSeo()`: Scoping, Lifecycle & Reactivity
 
-### 6.1 Standard Page Usage (Automatic Canonical)
+### 6.1 Standard Page Usage (Automatic Canonical & Social Tags)
 
 In normal usage, canonical URLs, Open Graph tags, and Twitter cards are **completely automatic**:
 
@@ -385,7 +371,7 @@ useSeo({
 
 ### 6.2 Advanced Overrides & Custom Tags (Escape Hatch)
 
-Senior developers can override specific properties or inject arbitrary meta/link tags with strict type-safety:
+Senior developers can override specific properties or inject custom meta/link tags:
 
 ```ts
 useSeo({
@@ -410,55 +396,14 @@ useSeo({
 })
 ```
 
-### 6.3 Synchronous Registration & Lifecycle Invariant
+### 6.3 Synchronous Registration & Internal Lifecycle
 
-> **Critical Lifecycle Invariant**:  
-> `useSeo()` registers its contribution **synchronously when invoked during component `setup()`**.  
-> It does **not** wait for `onMounted()`, ensuring that SEO state is immediately available during SSR HTML string rendering.
+- **SSR**: `useSeo()` registers its contribution **synchronously during component `setup()`**. When the SSR request finishes rendering, the request scope is cleanly disposed.
+- **Client**: `setup()` registers the contribution. When a component unmounts (`onUnmounted()`), its contribution is removed, restoring the parent/layout state.
+- **`<KeepAlive>`**: Inactive components suspend their SEO contributions on `onDeactivated()` and restore them on `onActivated()`.
+- **Precedence Hierarchy**: `APPLICATION < ROUTE < LAYOUT < PAGE < DESCENDANT COMPONENT`. (Developers simply call `useSeo()` in pages and optionally in layouts for defaults; the internal hierarchy manages resolution).
 
-```text
-SSR EXECUTION LIFECYCLE:
-Component setup()
-       │
-       └── useSeo() registers contribution immediately in request-scoped SEO store
-                 │
-                 ▼
-       renderToString() captures settled SEO state
-                 │
-                 ▼
-       Request finished ➔ Request scope disposed (Zero memory leaks)
-
-
-CLIENT EXECUTION LIFECYCLE:
-Component setup()
-       │
-       └── useSeo() registers contribution in client SEO store
-                 │
-                 ├── onUnmounted() ➔ Cleans up contribution, restoring ancestor state
-                 │
-                 └── onDeactivated() / onActivated() ➔ Suspends/restores state in <KeepAlive>
-```
-
-### 6.4 Deterministic Scoping Hierarchy
-
-SEO precedence is determined strictly by **component hierarchy**:
-
-```text
-APPLICATION DEFAULTS (defineApplication.seo)
-            <
-ROUTE METADATA (route.meta.seo)
-            <
-LAYOUT CONTRIBUTIONS (useSeo in App / Layout)
-            <
-PAGE CONTRIBUTIONS (useSeo in active Page)
-            <
-DESCENDANT COMPONENT (useSeo in Child / Modal)
-```
-
-- **Within the same component instance**: The latest `useSeo()` call updates and overrides previous properties.
-- **For sibling components at equal depth**: Conflicting same-depth declarations are an anti-pattern; the latest registration updates the store, and in development, a warning is emitted. Page-level metadata should reside at the page/layout boundary.
-
-### 6.5 Reactivity & Defined Async Settling Sources
+### 6.4 Reactivity & Participation in Existing SSR Settling
 
 `useSeo()` accepts standard Vue reactive inputs (`Ref`, `ComputedRef`, or getter functions `() => T`):
 
@@ -470,7 +415,7 @@ import { useSeo } from 'vue-ssr-lite'
 const props = defineProps<{ slug: string }>()
 const article = ref<{ title: string; excerpt: string } | null>(null)
 
-// Plain Vue async setup (supported out of the box):
+// Plain Vue async setup:
 article.value = await fetchArticle(props.slug)
 
 useSeo({
@@ -480,16 +425,11 @@ useSeo({
 </script>
 ```
 
-#### Exact SSR Settling Sources:
-SSR captures the final SEO snapshot **only after** these registered sources have settled:
-1. **Vue async `setup()`** (components using top-level `await`);
-2. **`<Suspense>` dependencies**;
-3. **`vue-ssr-lite` router navigation hooks**;
-4. **Registered plugin resolution promises**.
+> **SSR Lifecycle Invariant**: SEO does not create a separate settling engine. It reads the final state at the existing SSR settling point (after top-level async `setup` and `<Suspense>` resolution).
 
 ---
 
-## 7. Head Tag Ownership Markers, Conflict Policy & Deduplication
+## 7. Head Tag Ownership Markers & Batched Reconciliation
 
 ### 7.1 Managed Ownership Attributes & Tag Identity
 
@@ -504,26 +444,24 @@ All tags generated by `vue-ssr-lite` are marked with `data-vue-ssr-lite-head`:
 <script type="application/ld+json" data-vue-ssr-lite-head="json-ld">...</script>
 ```
 
-### 7.2 Custom `meta[]` and `links[]` Identity & Deduplication Rules
+### 7.2 Custom `meta[]` and `links[]` Identity Rules
 
-- **Singleton Built-in Tags**: Identified by fixed library key (`title`, `description`, `canonical`, `og:title`, etc.).
-- **Custom `meta[]` and `links[]` Entries**:
-  - **Explicit Key**: If `key?: string` is provided, it serves as the unique identity.
-  - **Derived Tuple (when `key` omitted)**:
-    - For `meta`: Derived from `(name || property || httpEquiv || charset) + ':' + content`. This preserves multiple valid entries (e.g. multiple `article:author` meta tags).
-    - For `link`: Derived from `rel + ':' + (hreflang || '') + ':' + (media || '') + ':' + href`. This preserves multiple valid alternate language links (e.g. `rel="alternate"` for `en` and `ar`).
+- **Built-in Tags**: Identified by fixed library keys (`title`, `description`, `canonical`, `og:title`, etc.).
+- **Custom Entries**:
+  - If `key?: string` is provided, it serves as the explicit unique identity.
+  - If `key` is omitted, identity is derived from primary attributes: `(name || property || httpEquiv) + ':' + content` for meta, and `rel + ':' + (hreflang || '') + ':' + (media || '') + ':' + href` for links.
 
 ### 7.3 Conflict Resolution with Pre-existing `index.html` Tags
 
 - **Unrelated unmanaged tags** (favicons, font stylesheets, analytics scripts): **Never modified or deleted**.
-- **Conflicting unmanaged SEO singleton tags** (e.g. static `<title>`, `<meta name="description">`, `<meta name="robots">`, `<link rel="canonical">` present in `index.html`):
-  - **Policy**: `vue-ssr-lite` managed SEO **supersedes** the static conflicting tag.
-  - **Development**: Emits a concise warning informing the developer to remove the duplicate static tag from `index.html`.
-  - **Production**: Guarantees exactly one authoritative tag exists in the DOM.
+- **Conflicting unmanaged SEO singleton tags** (e.g. static `<title>`, `<meta name="description">`, `<meta name="robots">`, `<link rel="canonical">` in `index.html`):
+  - `vue-ssr-lite` managed SEO **supersedes** the static conflicting tag.
+  - In development: emits a concise warning advising removal of the static duplicate.
+  - In production: ensures exactly one authoritative tag exists in the DOM.
 
-### 7.4 Transactional Navigation Batching
+### 7.4 Batched Head Reconciliation on Navigation
 
-On client-side route navigation (Page A ➔ Page B), the client head reconciler **batches all DOM updates atomically**. This prevents intermediate flashing of fallback/default titles or tags during page transitions.
+On client-side route navigation (Page A ➔ Page B), the head reconciler calculates the final head snapshot and commits the DOM updates in a single batched pass. This prevents intermediate flashing of fallback/default titles or tags during page transitions.
 
 ---
 
@@ -611,7 +549,7 @@ export const routes: RouteRecordRaw[] = [
 
 ---
 
-## 10. Sitemap Infrastructure (`/sitemap.xml`) & Multi-App Context
+## 10. Sitemap Infrastructure (`/sitemap.xml`)
 
 ### 10.1 Static Route Discovery Rules
 
@@ -629,9 +567,9 @@ export const routes: RouteRecordRaw[] = [
 - Routes with `meta.seo.index === false`.
 - Routes with explicit `meta.seo.sitemap === false`.
 
-### 10.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`) with Multi-App Context
+### 10.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`)
 
-For dynamic content, applications provide an optional `sitemap.config.ts` at the project root. `defineSitemap` receives a typed server-only `SitemapContext`:
+For dynamic content, applications provide an optional `sitemap.config.ts` at the project root. Simplified for Google SEO standards (omitting useless `priority` and `changefreq` fields):
 
 ```ts
 // sitemap.config.ts (SERVER-ONLY — Never bundled into client!)
@@ -639,24 +577,28 @@ import { defineSitemap, type SitemapContext } from 'vue-ssr-lite/server'
 import { db } from './server/db'
 
 export default defineSitemap(async (context: SitemapContext) => {
-  // context.applicationId, context.siteUrl, context.request available for multi-app / multi-tenant
   const articles = await db.article.findMany({ select: { slug: true, updatedAt: true } })
 
   return articles.map(article => ({
     loc: `/blog/${article.slug}`,
-    lastmod: article.updatedAt.toISOString(),
-    changefreq: 'weekly',
-    priority: 0.8,
+    lastmod: article.updatedAt,
   }))
 })
 ```
 
-#### Dynamic Entry Validation:
-- `loc`: Required; must be a valid relative path or absolute URL.
-- `priority`: Optional; must be between `0.0` and `1.0`.
-- `changefreq`: Optional; must be one of `'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never'`.
-- `lastmod`: Optional; must serialize to a valid ISO date string.
-- Actionable diagnostics are logged if invalid entries are returned.
+#### Sitemap Types:
+```ts
+export interface SitemapEntry {
+  loc: string
+  lastmod?: string | Date
+}
+
+export interface SitemapContext {
+  applicationId: string
+  siteUrl: string
+  request?: any
+}
+```
 
 ### 10.3 Deterministic File Collision Policy
 
@@ -694,10 +636,10 @@ export default defineApplication({
 
 ---
 
-## 12. Structured Data (JSON-LD)
+## 12. Structured Data Support (JSON-LD)
 
 - **Application Responsibility**: Supplies schema content and domain meaning.
-- **Library Responsibility**: Structural validation (object/array check), JSON-LD serialization, character escaping, script breakout prevention (`</script>` ➔ `\u003C/script\u003E`), script tag insertion, and DOM reconciliation.
+- **Library Responsibility**: Accepts JSON-compatible object(s), safely escapes script breakout (`</script>` ➔ `\u003C/script\u003E`), renders `<script type="application/ld+json">`, and updates on client navigation.
 
 ```ts
 useSeo({
@@ -796,7 +738,7 @@ export default defineSsrConfig({
 | `renderToString()` & hydration execution | **OWNS** | — | — |
 | Synchronous & reactive SEO store | **OWNS** | — | — |
 | `useSeo()` implementation | **OWNS** | — | Optional consumer |
-| Head reconciliation & ownership markers | **OWNS** | — | — |
+| Batched head reconciliation & ownership markers | **OWNS** | — | — |
 | Conflicting static head tag superseding | **OWNS** | — | — |
 | Automatic canonical URL derivation | **OWNS** | — | — |
 | Safe origin resolution (`PUBLIC_URL` / `siteUrl`) | **OWNS** | — | — |
@@ -805,8 +747,8 @@ export default defineSsrConfig({
 | `/robots.txt` endpoint & standard formatting | **OWNS** | — | — |
 | HTTP response status codes & 404 defaults | **OWNS** | — | — |
 | `usePublicConfig<T>()` transport & serialization security | **OWNS** | — | — |
-| JSON-LD structural validation, escaping & insertion | **OWNS** | — | — |
-| Advanced head tags (`meta[]`, `links[]`) | **OWNS** | — | — |
+| Structured data (JSON-LD) escaping & insertion | **OWNS** | — | — |
+| Custom head tags escape hatch (`meta[]`, `links[]`) | **OWNS** | — | — |
 | Structured data business schema content | — | **OWNS** | Optional schema helpers |
 | Page titles, descriptions, social images | — | **OWNS** | — |
 | Global site branding & default SEO | — | **OWNS** | — |
@@ -814,7 +756,30 @@ export default defineSsrConfig({
 
 ---
 
-## 17. Phased Implementation Plan
+## 17. Internal Module Structure
+
+To prevent over-engineering, `vue-ssr-lite` organizes SEO and server capabilities in simple internal modules:
+
+```text
+src/
+├── seo/
+│   ├── types.ts          <── SeoInput, UseSeoInput, SeoApplicationConfig
+│   ├── state.ts          <── Request-scoped and client SEO state store
+│   ├── normalize.ts      <── SEO property derivation & social card propagation
+│   ├── server.ts         <── SSR HTML <head> tag generation & JSON-LD escaping
+│   └── client.ts         <── Batched browser DOM head reconciliation & KeepAlive
+│
+├── server/
+│   ├── sitemap.ts        <── Static discovery, sitemap.config.ts runner, XML generator
+│   ├── robots.ts         <── robots.txt endpoint handler
+│   └── origin.ts         <── Safe PUBLIC_URL / siteUrl resolution & validation
+│
+└── runtime/              <── Existing SSR runtime, request context, publicConfig transport
+```
+
+---
+
+## 18. Phased Implementation Plan
 
 ```text
 PHASE 0: Public API & DX Contract Freeze
@@ -824,29 +789,26 @@ PHASE 0: Public API & DX Contract Freeze
 ├── Freeze useSeo() synchronous setup() registration invariant
 ├── Freeze RouteMeta module augmentation
 ├── Freeze ownership marker format (data-vue-ssr-lite-head="<key>")
-├── Freeze custom meta[]/links[] deduplication tuples and key override
+├── Freeze custom meta[]/links[] thin escape hatches
 ├── Freeze conflicting static tag superseding policy with dev warning
-├── Freeze same-depth sibling conflict policy (latest wins + dev warning)
 ├── Freeze canonical private mode syntax (seo: { mode: 'private' })
-├── Freeze SitemapContext interface for defineSitemap
+├── Freeze SitemapContext and simplified SitemapEntry (loc, lastmod)
 ├── Freeze publicConfig serialization security rules
 └── Freeze canonical dynamic sitemap file (sitemap.config.ts)
 
-PHASE 1: Core SEO Types & Request/Client SEO Store
+PHASE 1: Core SEO Types & State Store
 ├── Implement request-scoped SEO store for SSR
-└── Implement reactive client-scoped SEO store
+└── Implement reactive client-scoped SEO store with synchronous setup() registration
 
-PHASE 2: useSeo() Lifecycle, Reactivity & Scoped Cleanup
-├── Implement synchronous registration during setup()
+PHASE 2: useSeo() Composable & Reactivity
+├── Implement useSeo() accepting UseSeoInput (Ref, ComputedRef, getters)
 ├── Implement onUnmounted() contribution cleanup
 ├── Implement onActivated() / onDeactivated() for <KeepAlive> support
-├── Add support for Ref, ComputedRef, and getter inputs via UseSeoInput
-└── Integrate with SSR async setup / Suspense settling
+└── Connect to existing SSR settling point (async setup / Suspense)
 
-PHASE 3: SSR Head Finalization & Client Head Reconciliation
+PHASE 3: SSR Head Rendering & Batched Browser Reconciliation
 ├── Implement SSR head tag serializer with data-vue-ssr-lite-head markers
-├── Implement browser DOM head reconciler with deterministic diffing & navigation batching
-├── Implement custom meta[]/links[] identity deduplication
+├── Implement batched browser DOM head reconciler with custom tag key/tuple identity
 ├── Implement conflicting static tag superseding with dev warning
 └── Add JSON-LD script breakout protection (\u003C/script\u003E)
 
@@ -868,28 +830,23 @@ PHASE 6: Static Sitemap & Robots.txt Infrastructure
 
 PHASE 7: Server-Only Dynamic Sitemap Extension
 ├── Implement defineSitemap helper with SitemapContext in vue-ssr-lite/server
-├── Implement runtime validation for dynamic sitemap entries
 └── Connect dynamic sitemap provider (sitemap.config.ts) to /sitemap.xml endpoint
 
 PHASE 8: usePublicConfig<T>() Transport Cleanup & Serialization Security
 ├── Implement safe server-to-client configuration serializer with script breakout protection
 └── Expose universal usePublicConfig<T>() composable
 
-PHASE 9: vlite3 Coexistence & Package Independence
-├── Verify clean separation: vue-ssr-lite has zero vlite3 dependencies
-└── Ensure single authoritative head manager when vlite3 components are imported
-
-PHASE 10: Builto Landing Migration & Cleanup
+PHASE 9: Builto Landing Migration & Cleanup
 ├── Update Builto Landing to use new defineApplication() and useSeo()
 └── Delete legacy files (LandingSsrContext, PublicSsrSeo, PublicSiteOrigin, etc.)
 
-PHASE 11: Comprehensive Test Suite & Production Verification
+PHASE 10: Comprehensive Test Suite & Production Verification
 └── Execute full verification test matrix across SSR, Client, Sitemap, DX, and Security
 ```
 
 ---
 
-## 18. Validation & Verification Test Matrix
+## 19. Validation & Verification Test Matrix
 
 | Area | Test Scenario | Expected Outcome |
 |---|---|---|
@@ -910,14 +867,12 @@ PHASE 11: Comprehensive Test Suite & Production Verification
 | **Client** | Hydration tag reconciliation | Reconciles existing marked SSR tags; zero duplicate `<meta>`/`<link>` tags created |
 | **Client** | Conflicting static tag in `index.html` | Managed SEO supersedes static tag; logs dev warning; zero duplicate tags |
 | **Client** | Consumer `index.html` tags | Unmarked user tags (favicons, fonts, scripts) remain untouched |
-| **Client** | Navigation Batching | Head updates committed atomically on route changes; no intermediate title/meta flash |
+| **Client** | Batched Reconciliation | Head updates committed in one pass on route changes; no intermediate title/meta flash |
 | **Client** | Browser Back/Forward navigation | SEO state accurately reflects active history state |
 | **Advanced Head** | Custom `meta[]` and `links[]` | Custom meta/link entries rendered in SSR, adopted in hydration, cleaned on route change |
-| **Custom Head Tuple** | Multiple `hreflang` / `article:author` entries | Deduplication tuple preserves distinct language links and multi-author tags |
 | **Sitemap** | Static nested routes | Resolved paths (including pathless parents) included in sitemap |
 | **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, and `meta.seo.index: false` excluded |
 | **Sitemap** | Physical file collision | If `public/sitemap.xml` exists, physical file is served without running generator |
-| **Sitemap** | Dynamic sitemap validation | Invalid `loc`/`priority`/`changefreq` entries log actionable error diagnostics |
 | **Multi-App Sitemap** | Dynamic sitemap `SitemapContext` | `context.applicationId` and `context.siteUrl` accurately reflect active tenant |
 | **Robots** | Physical file collision | If `public/robots.txt` exists, physical file is served |
 | **Security** | Spoofed `Host` header | Request canonical URL remains authoritative; does not reflect spoofed host |
@@ -930,7 +885,7 @@ PHASE 11: Comprehensive Test Suite & Production Verification
 
 ---
 
-## 19. Builto Landing Target End-State & Acceptance Criteria
+## 20. Builto Landing Target End-State & Acceptance Criteria
 
 ### Acceptance Criteria Checklist
 
