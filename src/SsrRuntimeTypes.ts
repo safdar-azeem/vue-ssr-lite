@@ -1,5 +1,10 @@
 import type { App, Component, Plugin } from 'vue'
-import type { Router, RouteRecordRaw, RouterScrollBehavior } from 'vue-router'
+import type {
+  Router,
+  RouterHistory,
+  RouteRecordRaw,
+  RouterScrollBehavior,
+} from 'vue-router'
 import type {
   SsrHydrationContext,
   SsrHydrationController,
@@ -135,18 +140,29 @@ export interface SsrApplicationDefinition<
   TPublicConfig = unknown,
   TExtension = unknown,
 > {
-  id: string
-  rootComponent: Component
-  mountSelector?: string
+  /** The universal root component used for both SSR and browser execution. */
+  root: Component
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+  /**
+   * Advanced request-safe router factory. vue-ssr-lite supplies memory history
+   * on the server and web history in the browser.
+   */
+  router?: (options: {
+    history: RouterHistory
+    server: boolean
+  }) => Router
   /**
    * Optional router scroll behaviour. When omitted, a sensible default is used
    * (restore saved position, scroll to hash, otherwise top). Provide one to keep
    * an application's existing behaviour exactly when adopting the definition.
    */
   scrollBehavior?: RouterScrollBehavior
-  /** Generic Vue plugins installed for every isolated server/browser app. */
-  plugins?: readonly Plugin[]
+  /**
+   * Vue plugins installed for every isolated server/browser app. Prefer a
+   * factory for stateful plugins so concurrent SSR requests never share state.
+   * A static list is suitable only for stateless/global-safe plugins.
+   */
+  plugins?: readonly Plugin[] | (() => readonly Plugin[])
   createInitialState?: () => TApplicationState
   createExtension?: (
     context: Omit<
@@ -164,6 +180,17 @@ export interface SsrApplicationDefinition<
     context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
   ) => void | Promise<void>
 }
+
+/** Internal application definition after configuration assigns its identity. */
+export type SsrResolvedApplicationDefinition<
+  TApplicationState = Record<string, unknown>,
+  TPublicConfig = unknown,
+  TExtension = unknown,
+> = SsrApplicationDefinition<
+  TApplicationState,
+  TPublicConfig,
+  TExtension
+> & { id: string }
 
 export interface SsrCreatedApplication<
   TApplicationState = Record<string, unknown>,
