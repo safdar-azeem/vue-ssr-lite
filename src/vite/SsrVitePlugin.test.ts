@@ -41,7 +41,7 @@ export default {
   await mkdir(join(root, 'src'), { recursive: true })
   await writeFile(
     join(root, 'src/SsrApplication.ts'),
-    `export const websiteApplication = { id: 'storefront', rootComponent: {} }`,
+    `export default { root: {} }`,
     'utf8'
   )
   await writeFile(join(root, 'site.html'), '<html><body><div id="app"></div></body></html>')
@@ -116,6 +116,7 @@ describe('SSR Vite package identity', () => {
     expect(config.resolve?.dedupe).toContain('vue')
     expect(config.resolve?.dedupe).toContain('vue-router')
     expect(config.resolve?.dedupe).toContain('vue-ssr-lite')
+    expect(config.resolve?.dedupe).not.toContain('@vue/server-renderer')
     expect(config.ssr?.external).toContain('vue-ssr-lite')
     expect(config.ssr?.noExternal).not.toContain('vue-ssr-lite')
   })
@@ -199,7 +200,7 @@ describe('SSR Vite package identity', () => {
     expect(config.build?.outDir).toBe('build/browser')
   })
 
-  it('strips all module-src scripts from matched templates', async () => {
+  it('preserves module scripts that are not the configured application entry', async () => {
     const pluginRoot = await writeMinimalConfig()
     await writeFile(
       join(pluginRoot, 'site.html'),
@@ -243,8 +244,8 @@ describe('SSR Vite package identity', () => {
         : result && typeof result === 'object' && 'html' in result
           ? String(result.html)
           : ''
-    expect(htmlOut).not.toContain('legacy-boot')
-    expect(htmlOut).not.toContain('other.ts')
+    expect(htmlOut).toContain('legacy-boot')
+    expect(htmlOut).toContain('other.ts')
     const tags =
       result && typeof result === 'object' && 'tags' in result
         ? result.tags
