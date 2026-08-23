@@ -1,8 +1,12 @@
 # vue-ssr-lite
 
-Convention-first SSR for Vue 3 and Vite. A normal Vue application keeps its
-existing `src/main.ts` and `index.html`; `vue-ssr-lite` owns the server/browser
-bootstrap, router history, hydration, request isolation, and Node lifecycle.
+Convention-first SSR for Vue 3 and Vite that scales from one normal Vue app to
+many independent applications in one repository. A website, admin, dashboard,
+shop, or customer portal can each choose SSR or SPA and be selected by domain
+or subdomain—without separate repositories or manual server/browser bootstraps.
+`vue-ssr-lite` owns the unified runtime, host routing, router history,
+hydration, request isolation, and Node lifecycle while your applications remain
+normal Vue applications.
 
 ## Install
 
@@ -26,6 +30,37 @@ the host application (existing routed applications should keep their current
 dependency).
 
 Requires Node.js 20 or newer.
+
+## One repo, one app or many
+
+Start with the zero-config path when the repository contains one application.
+When a product grows, add `applications` to keep multiple independently routed
+Vue applications in the same codebase:
+
+```text
+my-platform/
+├── src/
+│   ├── website/main.ts       → example.com       → SSR
+│   ├── admin/main.ts         → admin.example.com → SPA
+│   ├── shop/main.ts          → shop.example.com  → SSR
+│   └── dashboard/main.ts     → app.example.com   → SPA
+├── index.html
+├── ssr.config.ts
+├── vite.config.ts
+└── package.json
+```
+
+One unified `vue-ssr-lite` runtime/server selects the application from the
+incoming host; different subdomains do not require separate repositories or
+separate SSR implementations:
+
+```text
+one repository → vue-ssr-lite runtime
+  example.com       → website   → SSR
+  admin.example.com → admin     → SPA
+  shop.example.com  → shop      → SSR
+  app.example.com   → dashboard → SPA
+```
 
 ## Zero-config single application
 
@@ -203,7 +238,11 @@ create Vue Router history at all.
 
 ## Multi-application projects
 
-Introduce `applications` only when there are actually multiple applications.
+Multi-app mode is for products where several Vue applications live in the same
+repository. They can share components, packages, types, services, and
+infrastructure while keeping independent roots, routes, rendering modes,
+templates, and host routing. Introduce `applications` only when there are
+actually multiple applications; a single app does not need this configuration.
 Each object key is the canonical application ID; do not repeat it in
 `src/*/main.ts`.
 
@@ -216,20 +255,27 @@ export default defineSsrConfig({
       app: './src/website/main.ts',
       host: 'example.com',
     },
+    admin: {
+      app: './src/admin/main.ts',
+      render: 'spa',
+      host: 'admin.example.com',
+    },
+    shop: {
+      app: './src/shop/main.ts',
+      host: 'shop.example.com',
+    },
     dashboard: {
       app: './src/dashboard/main.ts',
       render: 'spa',
       host: 'app.example.com',
     },
-    store: {
-      app: './src/store/main.ts',
-      host: '*.shop.example.com',
-    },
   },
 })
 ```
 
-SSR is the default. Only an SPA needs `render: 'spa'`. Each application module
+Omitted `render` means SSR, so `website` and `shop` are SSR applications while
+`admin` and `dashboard` are SPAs. Rendering mode belongs to each application;
+one SPA does not change the mode of the others. Each application module
 default-exports `defineApplication(...)`:
 
 ```ts
@@ -242,9 +288,11 @@ export default defineApplication({
 })
 ```
 
-For multi-app host routing, use exact hosts, wildcard hosts, or the advanced
-`domain` options. Host specificity determines the winner; duplicate ownership
-and ambiguous routing fail during startup.
+For application host routing, use exact hosts such as `example.com`,
+subdomains such as `admin.example.com`, wildcard hosts such as
+`*.shop.example.com`, or the advanced `domain` options. Host specificity
+determines the winner; duplicate ownership and ambiguous routing fail during
+startup.
 
 ## Advanced capabilities
 
