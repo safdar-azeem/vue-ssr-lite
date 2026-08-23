@@ -37,6 +37,14 @@ const FRAMEWORK_DEDUPE = [
   'vue-ssr-lite',
 ]
 
+/**
+ * Stable browser-facing URLs for generated application clients.
+ *
+ * This is deliberately separate from Vite's internal virtual-module ids. The
+ * URL is emitted into HTML and resolved back to the internal id by this
+ * plugin, so consumers never depend on Vite's `\0`/`/@id` representation.
+ */
+const SSR_CLIENT_PUBLIC_PREFIX = '/@vue-ssr-lite/client/'
 const RESOLVED_RUNTIME = `\0${SSR_RUNTIME_VIRTUAL_ID}`
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
@@ -62,24 +70,43 @@ const isSsrConfigFile = (filePath: string, configPath?: string): boolean => {
 
 export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let root = resolve(options.root || process.cwd())
+  let base = '/'
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
   let clientOutDir = DEFAULT_CLIENT_OUT_DIR
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
+  const publicClients = new Map<string, SsrViteApplicationEntry>()
+
+  const clientPublicUrl = (applicationId: string): string =>
+    `${SSR_CLIENT_PUBLIC_PREFIX}${applicationId}`
+
+  const stripViteBase = (id: string): string => {
+    const cleanId = id.split(/[?#]/, 1)[0]
+    if (base === '/' || !base.startsWith('/')) return cleanId
+    const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base
+    return cleanId === normalizedBase
+      ? '/'
+      : cleanId.startsWith(`${normalizedBase}/`)
+        ? cleanId.slice(normalizedBase.length)
+        : cleanId
+  }
 
   const syncVirtualClients = () => {
     virtualClients.clear()
+    publicClients.clear()
     for (const application of entries?.applications ?? []) {
       virtualClients.set(
         `${SSR_CLIENT_VIRTUAL_PREFIX}${application.id}`,
         application
       )
+      publicClients.set(clientPublicUrl(application.id), application)
     }
   }
 
   const invalidateConfigCache = () => {
     entries = null
     virtualClients.clear()
+    publicClients.clear()
     clientOutDir = DEFAULT_CLIENT_OUT_DIR
   }
 
@@ -139,6 +166,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     configResolved(config) {
       root = config.root
+      base = config.base
     },
     configureServer(server) {
       void ensureEntries().then(() => {
@@ -159,6 +187,11 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (isSsrRuntimeVirtualId(id)) return RESOLVED_RUNTIME
       if (virtualClients.has(id)) {
         return `${RESOLVED_CLIENT_PREFIX}${id.slice(SSR_CLIENT_VIRTUAL_PREFIX.length)}`
+      }
+      const publicId = stripViteBase(normalizePath(id))
+      const publicEntry = publicClients.get(publicId)
+      if (publicEntry) {
+        return `${RESOLVED_CLIENT_PREFIX}${publicEntry.id}`
       }
       return undefined
     },
@@ -186,7 +219,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
             filename === normalizePath(resolve(root, candidate.template))
         )
         if (!entry) return html
-        const virtualId = `${SSR_CLIENT_VIRTUAL_PREFIX}${entry.id}`
+        const clientUrl = clientPublicUrl(entry.id)
         const prepared = prepareSsrHtmlTemplate(
           html,
           entry.mountSelector || '#app'
@@ -204,7 +237,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
             return normalizePath(sourcePath) === definitionPath ? '' : script
           }
         )
-        if (withoutManualEntry.includes(`import ${JSON.stringify(virtualId)}`)) {
+        if (withoutManualEntry.includes(clientUrl)) {
           return withoutManualEntry
         }
         return {
@@ -212,8 +245,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           tags: [
             {
               tag: 'script',
-              attrs: { type: 'module' },
-              children: `import ${JSON.stringify(virtualId)}`,
+              attrs: { type: 'module', src: clientUrl },
               injectTo: 'body',
             },
           ],
