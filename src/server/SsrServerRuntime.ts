@@ -54,7 +54,10 @@ class SsrRequestTimeoutError extends Error {
 }
 
 const parsePort = (value: number | undefined): number => {
-  const port = value ?? 4173
+  const environmentPort = Number(process.env.PORT)
+  const port = value ?? (Number.isFinite(environmentPort) && environmentPort > 0
+    ? environmentPort
+    : 4173)
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('SSR server port must be an integer between 0 and 65535.')
   }
@@ -559,7 +562,7 @@ export const createSsrManagedServer = async (
       const application = entry.application!
       template = prepareSsrHtmlTemplate(
         template,
-        entry.mountSelector || application.mountSelector || '#app'
+        entry.mountSelector
       )
       const requestTimeoutMs = serverOptions.requestTimeoutMs ?? 15_000
       const rendered = await withTimeout(
