@@ -3,6 +3,7 @@ import {
   createMemoryHistory,
   createRouter,
   createWebHistory,
+  type Router,
 } from 'vue-router'
 import {
   installSsrDomainContext,
@@ -19,11 +20,11 @@ import {
   type SsrResolutionController,
 } from './SsrRequestResolution'
 import type {
-  SsrApplicationDefinition,
   SsrCreatedApplication,
   SsrHydrationState,
   SsrRenderRequest,
   SsrRequestContext,
+  SsrResolvedApplicationDefinition,
 } from './SsrRuntimeTypes'
 
 export interface SsrCreateApplicationOptions<
@@ -55,15 +56,17 @@ export const createSsrApplication = async <
   TPublicConfig = unknown,
   TExtension = unknown,
 >(
-  definition: SsrApplicationDefinition<
+  definition: SsrResolvedApplicationDefinition<
     TApplicationState,
     TPublicConfig,
     TExtension
   >,
   options: SsrCreateApplicationOptions<TApplicationState, TPublicConfig>
 ): Promise<SsrCreatedApplication<TApplicationState, TPublicConfig, TExtension>> => {
-  if (!definition?.id || !definition.rootComponent) {
-    throw new Error('An SSR application requires an id and rootComponent.')
+  if (!definition?.id || !definition.root) {
+    throw new Error(
+      'A resolved application requires an internal id and a root component.'
+    )
   }
   if (
     options.hydrationState &&
@@ -72,24 +75,36 @@ export const createSsrApplication = async <
     throw new Error('Hydration state belongs to a different SSR application.')
   }
 
+  if (definition.routes && definition.router) {
+    throw new Error(
+      `Application "${definition.id}" cannot declare both routes and router.`
+    )
+  }
   const routes =
     typeof definition.routes === 'function'
       ? definition.routes()
       : definition.routes
-  const router = routes
-    ? createRouter({
-        history: options.server ? createMemoryHistory() : createWebHistory(),
-        routes,
-        scrollBehavior:
-          definition.scrollBehavior ??
-          ((to, from, savedPosition) => {
-            if (savedPosition) return savedPosition
-            if (to.hash) return { el: to.hash, top: 24 }
-            if (to.fullPath === from.fullPath) return
-            return { left: 0, top: 0 }
-          }),
-      })
-    : null
+  let router: Router | null = null
+  if (definition.router || routes) {
+    // Do not touch Vue Router at all for router-less applications. This is
+    // important during browser hydration where a test or embedded document may
+    // not have a usable location URL yet.
+    const history = options.server ? createMemoryHistory() : createWebHistory()
+    router = definition.router
+      ? definition.router({ history, server: options.server })
+      : createRouter({
+          history,
+          routes: routes!,
+          scrollBehavior:
+            definition.scrollBehavior ??
+            ((to, from, savedPosition) => {
+              if (savedPosition) return savedPosition
+              if (to.hash) return { el: to.hash, top: 24 }
+              if (to.fullPath === from.fullPath) return
+              return { left: 0, top: 0 }
+            }),
+        })
+  }
 
   const state =
     options.hydrationState?.application ??
@@ -149,8 +164,8 @@ export const createSsrApplication = async <
 
   try {
     const app = options.spa
-      ? createApp(definition.rootComponent)
-      : createSSRApp(definition.rootComponent)
+      ? createApp(definition.root)
+      : createSSRApp(definition.root)
     if (router) app.use(router)
     app.provide(SSR_DOMAIN_CONTEXT, options.request.domain)
     // Provide the generic hydration and resolution contracts BEFORE the
@@ -160,7 +175,11 @@ export const createSsrApplication = async <
     app.provide(SSR_HYDRATION_CONTEXT, hydration)
     app.provide(SSR_REQUEST_RESOLUTION, resolution)
     app.provide(SSR_REQUEST_CONTEXT, context)
-    for (const plugin of definition.plugins ?? []) app.use(plugin)
+    const plugins =
+      typeof definition.plugins === 'function'
+        ? definition.plugins()
+        : definition.plugins ?? []
+    for (const plugin of plugins) app.use(plugin)
     await definition.install?.({
       app,
       router,
