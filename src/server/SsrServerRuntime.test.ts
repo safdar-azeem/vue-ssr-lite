@@ -101,7 +101,7 @@ describe('managed SSR server lifecycle', () => {
           applications: {
             ssr: {
               render: 'ssr',
-              application: { id: 'test-app', rootComponent: Root },
+              application: { id: 'test-app', root: Root },
               template: 'site.html',
               domain: {
                 development: 'localhost',
@@ -157,7 +157,7 @@ describe('managed SSR server lifecycle', () => {
           applications: {
             storefront: {
               render: 'ssr',
-              application: { id: 'storefront', rootComponent: Root },
+              application: { id: 'storefront', root: Root },
               template: 'site.html',
               roles: ['unified', 'storefront'],
               domain: {
