@@ -8,8 +8,8 @@ export interface SsrCliOptions {
   command: SsrCliCommand
   root: string
   /**
-   * Absolute path to `ssr.config.*`. Present for `dev` / `build` only —
-   * production `start` loads the baked runtime and never reads source config.
+   * Absolute path to optional `ssr.config.*` overrides. Production `start`
+   * loads the baked runtime and never reads source config.
    */
   config?: string
   serverOutput: string
@@ -38,7 +38,7 @@ const assertProductionRuntimeExists = async (serverOutput: string) => {
 /**
  * Parse CLI argv for `vue-ssr-lite <dev|build|start>`.
  *
- * - `dev` / `build` discover (or accept `--config`) source `ssr.config.*`.
+ * - `dev` / `build` use conventions plus optional `ssr.config.*` overrides.
  * - `start` only requires the baked server bundle (`--server-output` or
  *   `dist/server/SsrRuntime.js`) so slim production images need not COPY
  *   source config.
