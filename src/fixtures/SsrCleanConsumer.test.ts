@@ -1,7 +1,9 @@
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { tmpdir } from 'node:os'
+import { afterEach, describe, expect, it } from 'vitest'
+import { build, createServer, type ViteDevServer } from 'vite'
 import {
   extractSsrViteEntries,
   generateSsrClientModule,
@@ -16,6 +18,18 @@ const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
   '../../fixtures/clean-consumer'
 )
+
+let devServer: ViteDevServer | undefined
+let productionOutDir = ''
+
+afterEach(async () => {
+  await devServer?.close()
+  devServer = undefined
+  if (productionOutDir) {
+    await rm(productionOutDir, { recursive: true, force: true })
+    productionOutDir = ''
+  }
+})
 
 describe('zero-config clean consumer fixture', () => {
   it('discovers standard Vue files without ssr.config', async () => {
@@ -89,8 +103,62 @@ describe('zero-config clean consumer fixture', () => {
     const html = typeof result === 'string' ? result : String(result?.html || '')
     expect(html).not.toContain('/src/main.ts')
     expect(html).toContain('/analytics.ts')
-    expect(JSON.stringify(typeof result === 'object' ? result.tags : [])).toContain(
-      'virtual:vue-ssr-lite/client/app'
-    )
+    const tags = JSON.stringify(typeof result === 'object' ? result.tags : [])
+    expect(tags).toContain('/@vue-ssr-lite/client/app')
+    expect(tags).not.toContain('children')
+  })
+
+  it('serves the generated browser entry through Vite without an HTML proxy', async () => {
+    devServer = await createServer({
+      root: fixtureRoot,
+      configFile: join(fixtureRoot, 'vite.config.ts'),
+      server: { middlewareMode: true },
+      appType: 'custom',
+    })
+
+    const source = `${await readFile(join(fixtureRoot, 'index.html'), 'utf8')}
+<script type="module" src="/analytics.ts"></script>`
+    const html = await devServer.transformIndexHtml('/index.html', source, '/')
+    const clientUrl = html.match(
+      /src=["'](\/@vue-ssr-lite\/client\/[^"']+)["']/i
+    )?.[1]
+
+    expect(html).not.toContain('/src/main.ts')
+    expect(html).toContain('/analytics.ts')
+    expect(clientUrl?.split(/[?#]/, 1)[0]).toBe('/@vue-ssr-lite/client/app')
+    expect(html).not.toContain('?html-proxy&index=')
+
+    const browserEntry = await devServer.transformRequest(clientUrl!)
+    expect(browserEntry?.code).toContain('hydrateSsrApplication')
+    expect(browserEntry?.code).toContain('/src/main.ts')
+    expect(browserEntry?.code).not.toContain('?html-proxy&index=')
+  })
+
+  it('bundles the generated browser entry as the production HTML entry', async () => {
+    productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
+    await build({
+      root: fixtureRoot,
+      configFile: join(fixtureRoot, 'vite.config.ts'),
+      build: {
+        outDir: productionOutDir,
+        emptyOutDir: true,
+      },
+    })
+
+    const builtHtml = await readFile(join(productionOutDir, 'index.html'), 'utf8')
+    const manifest = JSON.parse(
+      await readFile(join(productionOutDir, '.vite/manifest.json'), 'utf8')
+    ) as Record<string, { file?: string; isEntry?: boolean }>
+
+    expect(builtHtml).toContain('<title>Clean Consumer</title>')
+    expect(builtHtml).not.toContain('/src/main.ts')
+    expect(builtHtml).not.toContain('/@vue-ssr-lite/client/app')
+    expect(builtHtml).not.toContain('?html-proxy&index=')
+    expect(builtHtml).toMatch(/<script type="module"[^>]+src="\/assets\/[^"']+\.js"/)
+    expect(
+      Object.values(manifest).some(
+        (entry) => entry.isEntry && entry.file?.endsWith('.js')
+      )
+    ).toBe(true)
   })
 })
