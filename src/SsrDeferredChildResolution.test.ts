@@ -8,7 +8,7 @@ import {
   ref,
 } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
-import { defineSsrApplication } from './index'
+import { defineApplication } from './index'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
@@ -119,9 +119,9 @@ const Shell = defineComponent({
 const routes: RouteRecordRaw[] = [{ path: '/:x(.*)*', component: Page }]
 
 const buildApplication = (source: ReturnType<typeof createSource>) =>
-  defineSsrApplication<AppState, unknown, { source: typeof source }>({
+  defineApplication<AppState, unknown, { source: typeof source }>({
     id: 'parent-child',
-    rootComponent: Shell,
+    root: Shell,
     routes,
     createInitialState: () => ({ ids: [], store: reactive(new Map()) }),
     createExtension: () => ({ source }),
@@ -184,9 +184,9 @@ describe('deferred parent → child SSR resolution (no application orchestration
   })
 
   it('completes a page with no deferred children in a single pass', async () => {
-    const application = defineSsrApplication<AppState, unknown, { source: any }>({
+    const application = defineApplication<AppState, unknown, { source: any }>({
       id: 'no-children',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup: () => () => h('main', 'static content'),
       }),
       createInitialState: () => ({ ids: [], store: reactive(new Map()) }),
