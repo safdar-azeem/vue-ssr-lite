@@ -101,7 +101,7 @@ PERSONA A — JUNIOR / FIRST SSR PROJECT (Zero SSR knowledge required)
 
 PERSONA B — NORMAL MID-LEVEL APPLICATION DEVELOPER
 ├── defineApplication({ seo: { siteName, title, titleTemplate, image } })
-└── Route metadata: meta.seo, meta.ssr
+└── Route metadata: meta.seo
 
 PERSONA C — SENIOR APPLICATION DEVELOPER
 ├── usePublicConfig<T>()
@@ -169,7 +169,7 @@ export default defineApplication({
 ### Layered Documentation Structure
 
 1. **Getting Started / Quickstart**: Persona A (Install, Vite plugin, `defineApplication`, `useSeo`, `PUBLIC_URL` deployment). No mention of extension internals.
-2. **SEO & Routing Guide**: Persona B (Site-wide defaults, `meta.seo`, `meta.ssr`, 404 handling, private mode). No need to explain that SEO is internally an extension.
+2. **SEO & Routing Guide**: Persona B (Site-wide defaults, `meta.seo`, 404 handling, private mode). No need to explain that SEO is internally an extension.
 3. **Advanced Application Features**: Persona C (`sitemap.config.ts`, `usePublicConfig`, structured data, `meta[]`/`links[]`).
 4. **Advanced Extensions Guide**: Persona D (`defineExtension()`, `extensions: []`, extension lifecycle, context, request isolation).
 5. **Architecture / Contributor Guide**: Built-in extension architecture, SEO extension implementation, extension runtime internals.
@@ -716,6 +716,24 @@ export default defineApplication({
 - No `/robots.txt` endpoint is generated.
 - No built-in SEO `<head>` tags (title, description, OG, Twitter, canonical, robots meta, JSON-LD) are serialized.
 - No `PUBLIC_URL` origin validation is enforced.
+
+**What Remains Active (Core Invariant — M-1):**
+- **HTTP Response Status**: `meta.seo.status` and `setResponseStatus()` are **Core-owned** runtime capabilities. Disabling the SEO extension does **not** disable HTTP status handling. A catch-all route with `meta.seo.status: 404` still correctly returns HTTP 404 on SSR, even with `seo: { enabled: false }`.
+
+```ts
+// Example: SEO Disabled but HTTP 404 correctly preserved
+defineApplication({
+  root: App,
+  routes: [
+    { path: '/', component: Home },
+    { path: '/:pathMatch(.*)*', component: NotFound, meta: { seo: { status: 404 } } },
+  ],
+  seo: {
+    enabled: false,
+  },
+})
+// SSR Response: HTTP 404 status, zero SEO head tags, no /sitemap.xml, no /robots.txt
+```
 
 #### Disabling vs. Replacing Built-in SEO (v1 Boundary)
 
@@ -1359,7 +1377,19 @@ export interface UseSeoInput {
 
 /** Route-level metadata schema */
 export interface SeoRouteInput extends SeoInput {
+  /**
+   * Include/exclude this concrete static route from generated sitemap.
+   * Default: true for static concrete routes, false for redirects/wildcards.
+   */
   sitemap?: boolean
+
+  /**
+   * HTTP status code emitted during SSR for this route (e.g. 404).
+   * Validated at runtime as a finite integer between 100 and 599.
+   * Any effective 4xx/5xx response automatically forces noindex,
+   * regardless of index: true.
+   */
+  status?: number
 }
 
 /** Global application configuration schema */
@@ -1385,9 +1415,6 @@ export interface SeoApplicationConfig extends SeoInput {
 declare module 'vue-router' {
   interface RouteMeta {
     seo?: SeoRouteInput
-    ssr?: {
-      status?: number
-    }
   }
 }
 ```
@@ -1571,14 +1598,24 @@ PUBLIC_URL=https://example.com
 
 ---
 
-## 11. Route Metadata, HTTP 404 & Status Precedence
+## 11. Route Metadata, HTTP Statuses & Search Precedence (`meta.seo`)
 
-### 11.1 Route Definition
+All route-level technical SEO, sitemap exclusion, indexing, and SSR HTTP status defaults live under one consolidated namespace:
+
+```text
+meta.seo
+```
+
+The architecture preserves standard Vue Router code and imports. Developers continue using standard `RouteRecordRaw[]` and standard `meta`. No custom routing wrappers (`defineRoutes`, `SSRRouteRecordRaw`, etc.) are introduced.
+
+### 11.1 Standard Route Definition
 
 ```ts
-import { RouteRecordRaw } from 'vue-router'
+import type { RouteRecordRaw } from 'vue-router'
 import Home from './pages/Home.vue'
 import Dashboard from './pages/Dashboard.vue'
+import Preview from './pages/Preview.vue'
+import About from './pages/About.vue'
 import NotFound from './pages/NotFound.vue'
 
 export const routes: RouteRecordRaw[] = [
@@ -1591,7 +1628,30 @@ export const routes: RouteRecordRaw[] = [
     component: Dashboard,
     meta: {
       seo: {
-        index: false, // Application sets indexing; sitemap exclusion is automatic
+        index: false, // Explicit noindex; automatically excluded from static sitemap
+      },
+    },
+  },
+  {
+    path: '/preview',
+    component: Preview,
+    meta: {
+      seo: {
+        sitemap: false, // Excluded from sitemap only; indexing otherwise unaffected
+      },
+    },
+  },
+  {
+    path: '/about',
+    component: About,
+    meta: {
+      seo: {
+        title: 'About Builto',
+        description: 'Learn more about Builto.',
+        canonical: '/about',
+        openGraph: {
+          type: 'website',
+        },
       },
     },
   },
@@ -1599,16 +1659,83 @@ export const routes: RouteRecordRaw[] = [
     path: '/:pathMatch(.*)*',
     component: NotFound,
     meta: {
-      ssr: { status: 404 }, // Automatically defaults seo.index to false!
+      seo: {
+        status: 404, // SSR response status; automatically defaults effective index to false!
+      },
     },
   },
 ]
 ```
 
-### 11.2 Safe 4xx/5xx Defaults & Precedence
+### 11.2 Architectural Tradeoff & Internal Layering (M-1)
 
-- **Automatic Noindex**: Setting `meta.ssr.status = 404` (or calling `setResponseStatus(404)`) automatically implies `index: false` (`noindex`).
-- **Status Precedence**: An effective HTTP 4xx/5xx status code overrides default page-level `index: true` settings, ensuring search engines never accidentally index error or not-found pages.
+`meta.seo.status` is an HTTP/SSR response property placed under `meta.seo` for developer convenience:
+
+1. **One Mental Model**: Developers only need to remember one namespace (`meta.seo`) for all route-specific technical search and delivery behaviors.
+2. **Direct SEO Impact**: HTTP status directly dictates indexing (e.g. 404 forces `noindex` and sitemap exclusion).
+3. **No Namespace Fragmentation**: Eliminates confusing fragmentation across `meta.seo`, `meta.ssr`, `meta.sitemap`, etc.
+
+**Internal Layering & Ownership:**
+- **Developer-facing location**: `meta.seo.status`
+- **Runtime Owner**: `vue-ssr-lite` **Core** / SSR response-status runtime.
+- **SEO Extension**: Observes the effective response status and applies SEO consequences (4xx/5xx ➔ `noindex`) *only when SEO is enabled*.
+- **SEO Disabled Invariant**: Disabling built-in SEO (`seo: { enabled: false }`) disables SEO tags, canonical, sitemap, and robots, but **does NOT disable Core HTTP status handling**. A route with `meta.seo.status: 404` still correctly returns HTTP 404 on SSR.
+
+```text
+    Vue Route
+        │
+        └── meta.seo.status
+                 │
+                 ▼
+        CORE RESPONSE STATUS RUNTIME
+                 │
+          effective status (setResponseStatus > meta.seo.status > 200)
+                 │
+        ┌────────┴─────────┐
+        │                  │
+        ▼                  ▼
+    HTTP response      SEO extension (if enabled)
+                          │
+                          └── 4xx/5xx ➔ force <meta name="robots" content="noindex, follow">
+```
+
+### 11.3 Status Resolution, Precedence & Runtime Validation (N-1)
+
+Status codes participate in deterministic resolution:
+
+```text
+STATUS PRECEDENCE:
+  setResponseStatus(status)  [Dynamic runtime override]
+           ↓ (overrides)
+  meta.seo.status            [Static route default]
+           ↓ (overrides)
+  200                        [Default SSR status]
+```
+
+- **Static Route Status**: Configured via `meta.seo.status` (e.g. `404` for catch-all routes).
+- **Dynamic Runtime Status**: Components or page setups call `setResponseStatus(404)` when dynamic data is missing (e.g. article slug not found in database).
+- **Precedence**: Runtime `setResponseStatus()` overrides the route default `meta.seo.status`.
+- **Runtime Validation (N-1)**: Both `meta.seo.status` and `setResponseStatus()` validate that `status` is a finite integer within `100 <= status <= 599`. Invalid values (`0`, `-1`, `999`, `NaN`, `404.5`) fail with an actionable error.
+
+### 11.4 Search Safety: Status vs. Indexing Precedence
+
+To guarantee that error or not-found pages are never indexed by search engines:
+
+```text
+effective 4xx / 5xx response status  >  explicit index: true
+```
+
+If a route resolves to an effective 4xx or 5xx status (via `meta.seo.status` or `setResponseStatus()`), `vue-ssr-lite` **automatically forces `noindex`** (`<meta name="robots" content="noindex, follow">`), even if `meta.seo.index: true` or a page-level `useSeo({ index: true })` was called.
+
+### 11.5 Sitemap vs. Indexing Distinction & Runtime Boundaries (M-2, N-2)
+
+- **`meta.seo.index === false`**: Emits `<meta name="robots" content="noindex, follow">` AND automatically excludes the route from the generated static `/sitemap.xml`.
+- **`meta.seo.sitemap === false`**: Excludes the route from `/sitemap.xml` ONLY. Does **not** force `noindex`. (Useful for landing pages or deep links intended to be discovered via direct marketing links rather than search sitemaps).
+- **Static Discovery vs. Runtime Status (M-2)**:
+  - **Static sitemap discovery** inspects route definitions statically (path, redirect, alias, wildcard, dynamic params, `meta.seo.index: false`, `meta.seo.sitemap: false`, and declared static `meta.seo.status >= 400`).
+  - Static sitemap discovery **never renders components, executes page `setup()`, or discovers runtime `setResponseStatus()`**.
+  - Dynamic parameter routes are already excluded from static discovery; their valid indexable URLs come from `sitemap.config.ts`.
+  - Runtime `setResponseStatus(404)` forces runtime `noindex` on the active response, but does not affect static sitemap route evaluation.
 
 ---
 
@@ -1629,6 +1756,7 @@ export const routes: RouteRecordRaw[] = [
 - Dynamic parameter routes (`/blog/:slug`, `/user/:id`).
 - Routes with `meta.seo.index === false`.
 - Routes with explicit `meta.seo.sitemap === false`.
+- Static routes with declared error status (`meta.seo.status >= 400`).
 
 ### 12.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`)
 
@@ -1874,7 +2002,14 @@ PHASE 0: Public API + Extension Contract Freeze
 ├── Freeze strict JSON types (JsonPrimitive, JsonValue, JsonObject) for structuredData
 ├── Freeze robots meta vs robotsTxt naming distinction
 ├── Freeze useSeo() synchronous setup() registration invariant
-├── Freeze RouteMeta module augmentation
+├── Freeze RouteMeta module augmentation (exposing only seo?: SeoRouteInput; meta.ssr removed)
+├── Freeze SeoRouteInput contract (including sitemap?: boolean and status?: number)
+├── Freeze meta.seo.status as Core-owned response status (remains active when SEO extension is disabled)
+├── Freeze HTTP status runtime validation (100 <= status <= 599 as finite integer)
+├── Freeze status precedence: setResponseStatus() > meta.seo.status > 200 default
+├── Freeze 4xx/5xx status overrides index:true precedence (forces noindex)
+├── Freeze sitemap:false exclusion semantics (does not imply noindex)
+├── Freeze sitemap exclusion distinction (declared static status >= 400 excluded statically; runtime setResponseStatus() does not mutate static discovery)
 ├── Freeze ownership marker format (data-vue-ssr-lite-head="<key>")
 ├── Freeze custom meta[]/links[] thin escape hatches
 ├── Freeze conflicting static tag superseding policy with dev warning
@@ -1938,10 +2073,14 @@ PHASE 5: Authoritative Origin Resolution & Canonical Path Normalization
 ├── Implement automatic current-route canonical URL derivation
 └── Implement canonical path normalizer (strip queries/hashes, trailing slash policy)
 
-PHASE 6: Route Metadata Contracts & HTTP Statuses
-├── Export RouteMeta TypeScript module augmentation
-├── Implement status code handler (setResponseStatus and meta.ssr.status)
-└── Connect HTTP 4xx/5xx statuses to automatic noindex defaults and precedence
+PHASE 6: Route SEO Metadata & HTTP Statuses
+├── Export RouteMeta TypeScript module augmentation (seo?: SeoRouteInput only)
+├── Implement Core route default status resolver from meta.seo.status (active even if SEO disabled)
+├── Implement HTTP status validation (100 <= status <= 599 finite integer)
+├── Preserve dynamic setResponseStatus() runtime API
+├── Apply setResponseStatus() > meta.seo.status > 200 precedence
+├── Connect effective runtime 4xx/5xx statuses to forced noindex robots metadata
+└── Expose route-declared meta.seo.status (>= 400) to static sitemap eligibility evaluation
 
 PHASE 7: Static Sitemap & Robots.txt Infrastructure (Internal Endpoints)
 ├── Implement static route discovery engine from Vue Router tree (handling pathless parents)
@@ -1980,11 +2119,17 @@ PHASE 12: Comprehensive Test Suite & Production Verification
 |---|---|---|
 | **SSR Registration** | `useSeo()` called in `setup()` | SEO tags present in SSR HTML without waiting for `onMounted()` |
 | **DX / Types** | Minimal TypeScript consumer | Autocomplete works for `useSeo()` and `meta.seo`; invalid keys fail type-check without manual `RouteMeta` augmentation |
+| **DX / Types** | Strict RouteMeta type contract | `RouteMeta` only exposes `seo?: SeoRouteInput`; `meta.ssr` is not present in types |
 | **DX / Types** | Strict type contract | `title` is string; `UseSeoInput` accepts `Ref`/`ComputedRef`/getters; `robots` meta separate from `robotsTxt` |
 | **DX / Types** | Server-only bundle guard | `sitemap.config.ts` or server utilities cannot be imported into client bundle |
 | **SSR** | Concurrent requests with different routes | Request A and Request B do not leak or share SEO state |
 | **SSR** | Asynchronous page data resolution (`await fetch...`) | Final `<head>` contains resolved title, not `undefined` |
-| **SSR** | HTTP 404 Not Found route | Response status is 404; `<meta name="robots" content="noindex, follow">` present |
+| **Route Status** | Route-declared `meta.seo.status = 404` | Response status is 404; `<meta name="robots" content="noindex, follow">` present; route statically excluded from `/sitemap.xml` |
+| **Status Precedence** | `meta.seo.status = 404` and `meta.seo.index = true` | Response status is 404; forced `noindex` (effective 4xx status overrides index:true) |
+| **Runtime Status Override** | `meta.seo.status = 200` and `setResponseStatus(404)` | Response status is 404; forced runtime `noindex`; static sitemap generator unaffected |
+| **Route Status Validation** | Invalid status value (e.g. `0`, `-1`, `999`, `NaN`, `404.5`) | Throws actionable runtime error rejecting invalid HTTP status |
+| **Index Exclusion** | `meta.seo.index = false` | Emits `noindex`; automatically excluded from static sitemap |
+| **Sitemap Exclusion** | `meta.seo.sitemap = false` | Excluded from static sitemap; page indexing otherwise unaffected |
 | **SSR** | Production canonical resolution | Emits authoritative canonical URL matching `PUBLIC_URL` / `siteUrl` |
 | **SSR** | Production missing `PUBLIC_URL` | Fails fast with clear actionable error; never emits `localhost` |
 | **Origin Normalization**| Malformed `PUBLIC_URL=https://ex.com/p?q=1#h` | Rejects/strips path, query, hash; canonical resolves to `https://ex.com/route` |
@@ -1999,7 +2144,7 @@ PHASE 12: Comprehensive Test Suite & Production Verification
 | **Client** | Browser Back/Forward navigation | SEO state accurately reflects active history state |
 | **Advanced Head** | Custom `meta[]` and `links[]` | Custom meta/link entries rendered in SSR, adopted in hydration, cleaned on route change |
 | **Sitemap** | Static nested routes | Resolved paths (including pathless parents) included in sitemap |
-| **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, and `meta.seo.index: false` excluded |
+| **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, `meta.seo.index: false`, and `meta.seo.status >= 400` excluded |
 | **Sitemap** | Physical file collision | If `public/sitemap.xml` exists, physical file is served without running generator |
 | **Multi-App Sitemap** | Dynamic sitemap `SitemapContext` | `context.applicationId` and `context.siteUrl` accurately reflect active tenant |
 | **Robots** | Physical file collision | If `public/robots.txt` exists, physical file is served |
@@ -2013,6 +2158,8 @@ PHASE 12: Comprehensive Test Suite & Production Verification
 | **Extension / DX** | Built-in SEO disabled | `defineApplication({ seo: { enabled: false } })` prevents built-in SEO from initializing |
 | **Extension / SEO Disabled** | `useSeo()` called with `seo.enabled: false` | Dev emits actionable warning `[vue-ssr-lite] useSeo() was called, but the built-in SEO extension is disabled.`; production is safe no-op with zero crash |
 | **Extension / SEO Disabled** | Server infrastructure with `seo.enabled: false` | Built-in `/sitemap.xml`, `/robots.txt`, and canonical derivation are completely uninitialized |
+| **Extension / SEO Disabled** | Route with `meta.seo.status = 404` and `seo.enabled = false` | HTTP response status is 404; zero SEO tags; zero sitemap/robots endpoints (Core HTTP status functions without SEO extension) |
+| **Extension / SEO Disabled** | `setResponseStatus(404)` called and `seo.enabled = false` | HTTP response status is 404; Core response status functions without SEO extension |
 | **Extension / DX** | Custom extension via `extensions` | Custom extension passed through `extensions: [...]` initializes correctly |
 | **Extension / DX** | Vue `plugins` and `extensions` coexist | No ambiguity or collision between Vue plugins and SSR extensions |
 | **Extension Isolation** | Two concurrent requests, same extension definition | Different request state for each request |
