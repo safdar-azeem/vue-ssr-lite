@@ -25,9 +25,9 @@ export interface SsrDomainParamDefinition {
 
 export interface SsrApplicationDomainConfig {
   /** Apex used while `NODE_ENV !== 'production'`. */
-  development: string
-  /** Apex used in production. Required in production (no silent fallback). */
-  production: string
+  development?: string
+  /** Apex used in production. Optional when host routing is not required. */
+  production?: string
   /** Defaults to `root-and-subdomains`. */
   mode?: SsrDomainMode
   /** Register loopback aliases in development. Defaults to false. */
@@ -65,6 +65,11 @@ export interface SsrApplicationModuleRef {
   exportName?: string
 }
 
+/**
+ * Low-level programmatic source accepted by server compilation APIs. The
+ * consumer-facing `SsrApplicationConfig.app` intentionally accepts only a
+ * statically analyzable module path/ref so Vite can generate browser entries.
+ */
 export type SsrApplicationSource = SsrApplicationLoader | SsrApplicationModuleRef
 
 /**
@@ -72,19 +77,19 @@ export type SsrApplicationSource = SsrApplicationLoader | SsrApplicationModuleRe
  * `applications` is the canonical application ID everywhere.
  */
 export interface SsrApplicationConfig {
-  /** Browser SPA shell or server-rendered application. */
-  render: SsrRenderMode
-  /**
-   * Application module. Required for both SPA and SSR so the library can
-   * generate client entries from `ssr.config` alone.
-   */
-  application: SsrApplicationSource
-  template: string
+  /** Statically analyzable application module. Defaults to `./src/main.ts`. */
+  app?: SsrApplicationModuleRef | string
+  /** Browser SPA shell or server-rendered application. Defaults to SSR. */
+  render?: SsrRenderMode
+  /** Existing Vite HTML entry. Defaults to `./index.html`. */
+  template?: string
   roles?: readonly string[]
-  domain: SsrApplicationDomainConfig
+  /** Simple host pattern(s), primarily for multi-application routing. */
+  host?: string | readonly string[]
+  domain?: SsrApplicationDomainConfig
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
-  mountSelector?: string
+  mount?: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
   /**
@@ -115,19 +120,44 @@ export interface SsrConfigServerOptions {
 }
 
 /**
- * Flat Vite/Nuxt-style SSR configuration.
- * Everything about an application lives under `applications.<id>`.
+ * Optional convention overrides. Single-application options stay flat;
+ * `applications.<id>` is introduced only for multi-application projects.
  */
-export interface SsrConfig {
-  name: string
+export interface SsrConfigShared {
+  name?: string
   server?: SsrConfigServerOptions
-  /** Active process role (`unified`, `erp`, `storefront`, …). Required in production. */
+  /** Advanced process role (`unified`, `erp`, `storefront`, …). */
   runtime?: string
-  applications: Record<string, SsrApplicationConfig>
   /** Used only when no application host pattern matches. */
   defaultApplicationId?: string
   readiness?: SsrReadinessProbe[]
 }
+
+/** Flat convention overrides for one application. */
+export type SsrSingleApplicationConfig = SsrConfigShared &
+  SsrApplicationConfig & {
+    applications?: never
+  }
+
+/** Multi-application configuration. Single-app fields are intentionally forbidden. */
+export type SsrMultiApplicationConfig = SsrConfigShared & {
+  applications: Record<string, SsrApplicationConfig>
+  app?: never
+  application?: never
+  render?: never
+  template?: never
+  host?: never
+  domain?: never
+  cookies?: never
+  endpoints?: never
+  mount?: never
+  mountSelector?: never
+  cacheControl?: never
+  responseCache?: never
+  publicConfig?: never
+}
+
+export type SsrConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfig
 
 export type SsrConfigExport =
   | SsrConfig
