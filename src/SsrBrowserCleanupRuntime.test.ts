@@ -24,7 +24,7 @@ describe('browser hydration cleanup', () => {
 
     await expect(hydrateSsrApplication({
       id: 'browser-failure',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup() { throw new Error('mount failed') },
       }),
       install: ({ hydration }) => hydration.onDispose(dispose),
