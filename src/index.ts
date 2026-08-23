@@ -18,6 +18,19 @@ export * from './SsrDiagnosticsRuntime'
 
 import type { SsrApplicationDefinition } from './SsrRuntimeTypes'
 
-export const defineSsrApplication = <T extends SsrApplicationDefinition<any, any, any>>(
-  definition: T
-): T => definition
+/** Define the universal Vue application used by server and browser runtimes. */
+export const defineApplication = <
+  TApplicationState = Record<string, unknown>,
+  TPublicConfig = unknown,
+  TExtension = unknown,
+>(
+  definition: SsrApplicationDefinition<
+    TApplicationState,
+    TPublicConfig,
+    TExtension
+  >
+): SsrApplicationDefinition<
+  TApplicationState,
+  TPublicConfig,
+  TExtension
+> => definition
