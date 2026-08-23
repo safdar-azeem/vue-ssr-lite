@@ -61,7 +61,7 @@
 7. **Strict Server-Only Boundaries**:
    - `src/main.ts` is strictly universal: developers **never** write `process.env` in `main.ts`.
    - Dynamic sitemap queries (databases, private APIs) live in the server-only `sitemap.config.ts` module.
-8. **Unified SEO Contract (`SeoInput`)**: Application defaults, route metadata, and page composables share **one consistent SEO schema**.
+8. **Unified SEO Contract (`SeoInput` & `UseSeoInput`)**: Application defaults, route metadata, and page composables share **one consistent SEO vocabulary**, with explicit typing for reactive inputs in `useSeo()`.
 9. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
 
 ---
@@ -83,11 +83,11 @@ PERSONA B — NORMAL MID-LEVEL APPLICATION DEVELOPER
 
 PERSONA C — SENIOR APPLICATION DEVELOPER
 ├── usePublicConfig<T>()
-├── sitemap.config.ts (Dynamic sitemap data provider)
+├── sitemap.config.ts (Dynamic sitemap data provider with multi-app context)
 ├── JSON-LD structured data
 ├── Advanced head extensibility (meta[], links[])
 ├── Custom canonical overrides & trailing slash policies
-└── Private/internal app mode: defineApplication({ seo: 'private' })
+└── Private/internal app mode: defineApplication({ seo: { mode: 'private' } })
 
 PERSONA D — PLATFORM & INFRASTRUCTURE ENGINEER
 ├── ssr.config.ts (defineSsrConfig: publicConfig, resolveSiteUrl, trustProxy)
@@ -104,6 +104,14 @@ PERSONA D — PLATFORM & INFRASTRUCTURE ENGINEER
 | **Common (Level 2)** | `usePublicConfig` | Universal (`src/`) |
 | **Advanced Universal** | `setResponseStatus` (Server: sets status; Client: safe no-op) | Universal (`src/`) |
 | **Server Configuration** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
+
+### Layered Documentation Structure
+
+To ensure lower-level developers are never overwhelmed, documentation is structured in four clear layers:
+1. **Getting Started / Quickstart**: Persona A (Install, Vite plugin, `defineApplication`, `useSeo`, `PUBLIC_URL` deployment).
+2. **SEO & Routing Guide**: Persona B (Site-wide defaults, `meta.seo`, `meta.ssr`, 404 handling, private mode).
+3. **Advanced Application Features**: Persona C (`sitemap.config.ts`, `usePublicConfig`, structured data, `meta[]`/`links[]`).
+4. **Server & Platform Architecture**: Persona D (`ssr.config.ts`, custom domain resolvers, request isolation, server hooks).
 
 ---
 
@@ -199,7 +207,11 @@ If an application is an internal dashboard, private portal, or behind authentica
 export default defineApplication({
   root: App,
   routes,
-  seo: 'private', // or seo: { mode: 'private' }
+  seo: {
+    mode: 'private', // Single canonical syntax for private applications
+    title: 'Builto Dashboard',
+    titleTemplate: '%s | Builto Workspace',
+  },
 })
 ```
 
@@ -209,33 +221,52 @@ export default defineApplication({
 
 ---
 
-## 5. Unified Public SEO Schema (`SeoInput`)
+## 5. Unified Public SEO Schemas & TypeScript Contracts
 
-To eliminate cognitive friction, **Application SEO, Route SEO, and Page SEO share the exact same core schema**.
+To eliminate cognitive friction, **Application SEO, Route SEO, and Page SEO share the exact same core schema**, with dedicated typing for composable reactivity.
 
 ### Core Type Definitions
 
 ```ts
-/** Generic custom meta tag entry */
+import type { Ref, ComputedRef } from 'vue'
+
+/** Reactive or plain value wrapper */
+export type SeoResolvable<T> = T | Ref<T> | ComputedRef<T> | (() => T)
+
+/** Open Graph object type */
+export type OpenGraphType =
+  | 'website'
+  | 'article'
+  | 'profile'
+  | 'book'
+  | (string & {})
+
+/** Explicitly typed custom meta tag entry */
 export interface SeoMetaEntry {
   name?: string
   property?: string
   httpEquiv?: string
+  charset?: string
   content: string
-  [key: string]: any
+  key?: string
+  attrs?: Record<string, string | boolean>
 }
 
-/** Generic custom link tag entry */
+/** Explicitly typed custom link tag entry */
 export interface SeoLinkEntry {
   rel: string
   href: string
   hreflang?: string
   type?: string
   media?: string
-  [key: string]: any
+  sizes?: string
+  crossorigin?: '' | 'anonymous' | 'use-credentials'
+  referrerpolicy?: string
+  key?: string
+  attrs?: Record<string, string | boolean>
 }
 
-/** Core SEO input schema used across Page, Route, and Application levels */
+/** Core plain serializable SEO data contract */
 export interface SeoInput {
   title?: string
   description?: string
@@ -244,7 +275,7 @@ export interface SeoInput {
   index?: boolean
   follow?: boolean
   openGraph?: {
-    type?: 'website' | 'article' | 'profile' | 'book'
+    type?: OpenGraphType
     title?: string
     description?: string
     image?: string
@@ -265,6 +296,22 @@ export interface SeoInput {
   structuredData?: Record<string, any> | Array<Record<string, any>>
   meta?: SeoMetaEntry[]
   links?: SeoLinkEntry[]
+}
+
+/** Composable input schema supporting Vue reactivity */
+export interface UseSeoInput {
+  title?: SeoResolvable<string | undefined>
+  description?: SeoResolvable<string | undefined>
+  image?: SeoResolvable<string | undefined>
+  canonical?: SeoResolvable<string | false | undefined>
+  index?: SeoResolvable<boolean | undefined>
+  follow?: SeoResolvable<boolean | undefined>
+  openGraph?: SeoResolvable<SeoInput['openGraph']>
+  twitter?: SeoResolvable<SeoInput['twitter']>
+  robots?: SeoResolvable<SeoInput['robots']>
+  structuredData?: SeoResolvable<SeoInput['structuredData']>
+  meta?: SeoResolvable<SeoMetaEntry[] | undefined>
+  links?: SeoResolvable<SeoLinkEntry[] | undefined>
 }
 
 /** Route-level metadata schema */
@@ -338,7 +385,7 @@ useSeo({
 
 ### 6.2 Advanced Overrides & Custom Tags (Escape Hatch)
 
-Senior developers can override specific properties or inject arbitrary meta/link tags without hitting an artificial ceiling:
+Senior developers can override specific properties or inject arbitrary meta/link tags with strict type-safety:
 
 ```ts
 useSeo({
@@ -348,7 +395,8 @@ useSeo({
   // canonical: false, // Disables canonical link tag
   index: false, // Emits noindex
   openGraph: {
-    title: 'Custom Social Title', // Override if different from <title>
+    type: 'article',
+    title: 'Custom Social Title',
   },
   meta: [
     { name: 'author', content: 'Safdar' },
@@ -357,6 +405,7 @@ useSeo({
   ],
   links: [
     { rel: 'alternate', hreflang: 'ar', href: '/ar/about' },
+    { rel: 'alternate', hreflang: 'en', href: '/en/about' },
   ],
 })
 ```
@@ -440,9 +489,9 @@ SSR captures the final SEO snapshot **only after** these registered sources have
 
 ---
 
-## 7. Head Tag Ownership Markers, Conflict Policy & Navigation Batching
+## 7. Head Tag Ownership Markers, Conflict Policy & Deduplication
 
-### 7.1 Managed Ownership Attributes
+### 7.1 Managed Ownership Attributes & Tag Identity
 
 All tags generated by `vue-ssr-lite` are marked with `data-vue-ssr-lite-head`:
 
@@ -455,7 +504,16 @@ All tags generated by `vue-ssr-lite` are marked with `data-vue-ssr-lite-head`:
 <script type="application/ld+json" data-vue-ssr-lite-head="json-ld">...</script>
 ```
 
-### 7.2 Conflict Resolution with Pre-existing `index.html` Tags
+### 7.2 Custom `meta[]` and `links[]` Identity & Deduplication Rules
+
+- **Singleton Built-in Tags**: Identified by fixed library key (`title`, `description`, `canonical`, `og:title`, etc.).
+- **Custom `meta[]` and `links[]` Entries**:
+  - **Explicit Key**: If `key?: string` is provided, it serves as the unique identity.
+  - **Derived Tuple (when `key` omitted)**:
+    - For `meta`: Derived from `(name || property || httpEquiv || charset) + ':' + content`. This preserves multiple valid entries (e.g. multiple `article:author` meta tags).
+    - For `link`: Derived from `rel + ':' + (hreflang || '') + ':' + (media || '') + ':' + href`. This preserves multiple valid alternate language links (e.g. `rel="alternate"` for `en` and `ar`).
+
+### 7.3 Conflict Resolution with Pre-existing `index.html` Tags
 
 - **Unrelated unmanaged tags** (favicons, font stylesheets, analytics scripts): **Never modified or deleted**.
 - **Conflicting unmanaged SEO singleton tags** (e.g. static `<title>`, `<meta name="description">`, `<meta name="robots">`, `<link rel="canonical">` present in `index.html`):
@@ -463,7 +521,7 @@ All tags generated by `vue-ssr-lite` are marked with `data-vue-ssr-lite-head`:
   - **Development**: Emits a concise warning informing the developer to remove the duplicate static tag from `index.html`.
   - **Production**: Guarantees exactly one authoritative tag exists in the DOM.
 
-### 7.3 Transactional Navigation Batching
+### 7.4 Transactional Navigation Batching
 
 On client-side route navigation (Page A ➔ Page B), the client head reconciler **batches all DOM updates atomically**. This prevents intermediate flashing of fallback/default titles or tags during page transitions.
 
@@ -471,7 +529,7 @@ On client-side route navigation (Page A ➔ Page B), the client head reconciler 
 
 ## 8. Safe Public Origin & "One Deployment URL"
 
-### 8.1 Resolution Invariant
+### 8.1 Resolution & Origin Normalization Invariant
 
 - **Local Development**: Zero configuration required (automatically resolves `http://localhost:<port>`).
 - **Production Deployment**: Set **one environment variable**: `PUBLIC_URL=https://builto.com`.
@@ -487,6 +545,11 @@ DEVELOPMENT RESOLUTION:
 1. Configured siteUrl / PUBLIC_URL (if provided)
 2. Current local dev server origin (http://localhost:<port>)
 ```
+
+#### Origin Normalization & Validation:
+- `PUBLIC_URL` / `siteUrl` must be a valid origin: `http(s)://hostname[:port]`.
+- Paths (e.g. `/foo`), query parameters (`?x=1`), and hashes (`#abc`) are rejected or stripped.
+- Production requires `https://` unless explicitly configured for local/unusual environments.
 
 ### 8.2 Actionable Production Error Message
 
@@ -507,7 +570,7 @@ PUBLIC_URL=https://example.com
 
 ---
 
-## 9. Route Metadata & HTTP 404 Handling
+## 9. Route Metadata, HTTP 404 & Status Precedence
 
 ### 9.1 Route Definition
 
@@ -541,14 +604,14 @@ export const routes: RouteRecordRaw[] = [
 ]
 ```
 
-### 9.2 Safe 4xx/5xx Defaults
+### 9.2 Safe 4xx/5xx Defaults & Precedence
 
-- Setting `meta.ssr.status = 404` (or calling `setResponseStatus(404)`) automatically implies `index: false` (`noindex`).
-- Developers do not need to write redundant `seo: { index: false }` on error routes.
+- **Automatic Noindex**: Setting `meta.ssr.status = 404` (or calling `setResponseStatus(404)`) automatically implies `index: false` (`noindex`).
+- **Status Precedence**: An effective HTTP 4xx/5xx status code overrides default page-level `index: true` settings, ensuring search engines never accidentally index error or not-found pages.
 
 ---
 
-## 10. Sitemap Infrastructure (`/sitemap.xml`)
+## 10. Sitemap Infrastructure (`/sitemap.xml`) & Multi-App Context
 
 ### 10.1 Static Route Discovery Rules
 
@@ -566,16 +629,17 @@ export const routes: RouteRecordRaw[] = [
 - Routes with `meta.seo.index === false`.
 - Routes with explicit `meta.seo.sitemap === false`.
 
-### 10.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`)
+### 10.2 Server-Only Dynamic Sitemap (`sitemap.config.ts`) with Multi-App Context
 
-For dynamic content, applications provide an optional `sitemap.config.ts` at the project root:
+For dynamic content, applications provide an optional `sitemap.config.ts` at the project root. `defineSitemap` receives a typed server-only `SitemapContext`:
 
 ```ts
 // sitemap.config.ts (SERVER-ONLY — Never bundled into client!)
-import { defineSitemap } from 'vue-ssr-lite/server'
+import { defineSitemap, type SitemapContext } from 'vue-ssr-lite/server'
 import { db } from './server/db'
 
-export default defineSitemap(async () => {
+export default defineSitemap(async (context: SitemapContext) => {
+  // context.applicationId, context.siteUrl, context.request available for multi-app / multi-tenant
   const articles = await db.article.findMany({ select: { slug: true, updatedAt: true } })
 
   return articles.map(article => ({
@@ -586,6 +650,13 @@ export default defineSitemap(async () => {
   }))
 })
 ```
+
+#### Dynamic Entry Validation:
+- `loc`: Required; must be a valid relative path or absolute URL.
+- `priority`: Optional; must be between `0.0` and `1.0`.
+- `changefreq`: Optional; must be one of `'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never'`.
+- `lastmod`: Optional; must serialize to a valid ISO date string.
+- Actionable diagnostics are logged if invalid entries are returned.
 
 ### 10.3 Deterministic File Collision Policy
 
@@ -641,11 +712,20 @@ useSeo({
 
 ---
 
-## 13. Runtime Configuration Transport (`usePublicConfig<T>`) — Level 2
+## 13. Runtime Configuration Transport & Security (`usePublicConfig<T>`) — Level 2
 
 Safe server-to-client configuration transport without application context boilerplate:
 
-### In `ssr.config.ts` (Level 2 Server Configuration)
+### 13.1 Serialization Security Invariants
+
+- `publicConfig` **must contain browser-safe data only**.
+- `vue-ssr-lite` secures the serialized hydration payload:
+  - Strings containing `</script>`, `<`, `>`, `&`, `\u2028`, and `\u2029` are safely escaped (e.g. `\u003C/script\u003E`).
+  - Functions, symbols, cyclic references, and non-serializable objects are rejected with clear diagnostics.
+
+### 13.2 Usage
+
+In `ssr.config.ts` (Level 2 Server Configuration):
 
 ```ts
 import { defineSsrConfig } from 'vue-ssr-lite'
@@ -658,7 +738,7 @@ export default defineSsrConfig({
 })
 ```
 
-### In Application Components (Universal)
+In Application Components (Universal):
 
 ```vue
 <script setup lang="ts">
@@ -724,7 +804,7 @@ export default defineSsrConfig({
 | Dynamic sitemap execution & endpoint | **OWNS** | **OWNS** (`sitemap.config.ts`) | — |
 | `/robots.txt` endpoint & standard formatting | **OWNS** | — | — |
 | HTTP response status codes & 404 defaults | **OWNS** | — | — |
-| `usePublicConfig<T>()` transport & serialization | **OWNS** | — | — |
+| `usePublicConfig<T>()` transport & serialization security | **OWNS** | — | — |
 | JSON-LD structural validation, escaping & insertion | **OWNS** | — | — |
 | Advanced head tags (`meta[]`, `links[]`) | **OWNS** | — | — |
 | Structured data business schema content | — | **OWNS** | Optional schema helpers |
@@ -738,16 +818,18 @@ export default defineSsrConfig({
 
 ```text
 PHASE 0: Public API & DX Contract Freeze
-├── Freeze unified SeoInput, SeoRouteInput, and SeoApplicationConfig types
+├── Freeze unified SeoInput, UseSeoInput, SeoRouteInput, and SeoApplicationConfig types
 ├── Freeze title as string everywhere and titleTemplate in SeoApplicationConfig
 ├── Freeze robots meta vs robotsTxt naming distinction
 ├── Freeze useSeo() synchronous setup() registration invariant
 ├── Freeze RouteMeta module augmentation
 ├── Freeze ownership marker format (data-vue-ssr-lite-head="<key>")
+├── Freeze custom meta[]/links[] deduplication tuples and key override
 ├── Freeze conflicting static tag superseding policy with dev warning
 ├── Freeze same-depth sibling conflict policy (latest wins + dev warning)
-├── Freeze private mode semantics (seo: 'private')
-├── Freeze advanced escape hatches (meta[], links[])
+├── Freeze canonical private mode syntax (seo: { mode: 'private' })
+├── Freeze SitemapContext interface for defineSitemap
+├── Freeze publicConfig serialization security rules
 └── Freeze canonical dynamic sitemap file (sitemap.config.ts)
 
 PHASE 1: Core SEO Types & Request/Client SEO Store
@@ -758,17 +840,18 @@ PHASE 2: useSeo() Lifecycle, Reactivity & Scoped Cleanup
 ├── Implement synchronous registration during setup()
 ├── Implement onUnmounted() contribution cleanup
 ├── Implement onActivated() / onDeactivated() for <KeepAlive> support
-├── Add support for Ref, ComputedRef, and getter inputs
+├── Add support for Ref, ComputedRef, and getter inputs via UseSeoInput
 └── Integrate with SSR async setup / Suspense settling
 
 PHASE 3: SSR Head Finalization & Client Head Reconciliation
 ├── Implement SSR head tag serializer with data-vue-ssr-lite-head markers
 ├── Implement browser DOM head reconciler with deterministic diffing & navigation batching
+├── Implement custom meta[]/links[] identity deduplication
 ├── Implement conflicting static tag superseding with dev warning
 └── Add JSON-LD script breakout protection (\u003C/script\u003E)
 
 PHASE 4: Authoritative Origin Resolution & Canonical Path Normalization
-├── Implement server-side siteUrl resolution (PUBLIC_URL fallback)
+├── Implement server-side siteUrl resolution (PUBLIC_URL fallback with origin validation)
 ├── Implement production fail-fast validator with concise error message
 ├── Implement automatic current-route canonical URL derivation
 └── Implement canonical path normalizer (strip queries/hashes, trailing slash policy)
@@ -776,7 +859,7 @@ PHASE 4: Authoritative Origin Resolution & Canonical Path Normalization
 PHASE 5: Route Metadata Contracts & HTTP Statuses
 ├── Export RouteMeta TypeScript module augmentation
 ├── Implement status code handler (setResponseStatus and meta.ssr.status)
-└── Connect HTTP 4xx/5xx statuses to automatic noindex defaults
+└── Connect HTTP 4xx/5xx statuses to automatic noindex defaults and precedence
 
 PHASE 6: Static Sitemap & Robots.txt Infrastructure
 ├── Implement static route discovery engine from Vue Router tree (handling pathless parents)
@@ -784,11 +867,12 @@ PHASE 6: Static Sitemap & Robots.txt Infrastructure
 └── Implement /robots.txt endpoint with standard defaults and physical file collision checks
 
 PHASE 7: Server-Only Dynamic Sitemap Extension
-├── Implement defineSitemap helper in vue-ssr-lite/server
+├── Implement defineSitemap helper with SitemapContext in vue-ssr-lite/server
+├── Implement runtime validation for dynamic sitemap entries
 └── Connect dynamic sitemap provider (sitemap.config.ts) to /sitemap.xml endpoint
 
-PHASE 8: usePublicConfig<T>() Transport Cleanup
-├── Implement server-to-client configuration serializer
+PHASE 8: usePublicConfig<T>() Transport Cleanup & Serialization Security
+├── Implement safe server-to-client configuration serializer with script breakout protection
 └── Expose universal usePublicConfig<T>() composable
 
 PHASE 9: vlite3 Coexistence & Package Independence
@@ -811,14 +895,15 @@ PHASE 11: Comprehensive Test Suite & Production Verification
 |---|---|---|
 | **SSR Registration** | `useSeo()` called in `setup()` | SEO tags present in SSR HTML without waiting for `onMounted()` |
 | **DX / Types** | Minimal TypeScript consumer | Autocomplete works for `useSeo()` and `meta.seo`; invalid keys fail type-check without manual `RouteMeta` augmentation |
-| **DX / Types** | Strict type contract | `title` is string; `titleTemplate` exists on app config; `robots` meta separate from `robotsTxt` |
+| **DX / Types** | Strict type contract | `title` is string; `UseSeoInput` accepts `Ref`/`ComputedRef`/getters; `robots` meta separate from `robotsTxt` |
 | **DX / Types** | Server-only bundle guard | `sitemap.config.ts` or server utilities cannot be imported into client bundle |
 | **SSR** | Concurrent requests with different routes | Request A and Request B do not leak or share SEO state |
 | **SSR** | Asynchronous page data resolution (`await fetch...`) | Final `<head>` contains resolved title, not `undefined` |
 | **SSR** | HTTP 404 Not Found route | Response status is 404; `<meta name="robots" content="noindex, follow">` present |
 | **SSR** | Production canonical resolution | Emits authoritative canonical URL matching `PUBLIC_URL` / `siteUrl` |
 | **SSR** | Production missing `PUBLIC_URL` | Fails fast with clear actionable error; never emits `localhost` |
-| **Private Mode** | `defineApplication({ seo: 'private' })` | `document.title` and `<title>` work; no canonical emitted; no sitemap/robots generated; no `PUBLIC_URL` required |
+| **Origin Normalization**| Malformed `PUBLIC_URL=https://ex.com/p?q=1#h` | Rejects/strips path, query, hash; canonical resolves to `https://ex.com/route` |
+| **Private Mode** | `defineApplication({ seo: { mode: 'private' } })` | `document.title` and `<title>` work; no canonical emitted; no sitemap/robots generated; no `PUBLIC_URL` required |
 | **Client** | Route navigation (Page A ➔ Page B) | Page A's SEO is discarded; Page B's SEO applied to DOM |
 | **Client** | Component unmount (Modal with `useSeo`) | Unmounting modal restores underlying page SEO state |
 | **Client** | `<KeepAlive>` Page Navigation | Page A deactivation suspends SEO; Page B applies SEO; returning to Page A restores Page A's SEO |
@@ -828,15 +913,19 @@ PHASE 11: Comprehensive Test Suite & Production Verification
 | **Client** | Navigation Batching | Head updates committed atomically on route changes; no intermediate title/meta flash |
 | **Client** | Browser Back/Forward navigation | SEO state accurately reflects active history state |
 | **Advanced Head** | Custom `meta[]` and `links[]` | Custom meta/link entries rendered in SSR, adopted in hydration, cleaned on route change |
+| **Custom Head Tuple** | Multiple `hreflang` / `article:author` entries | Deduplication tuple preserves distinct language links and multi-author tags |
 | **Sitemap** | Static nested routes | Resolved paths (including pathless parents) included in sitemap |
 | **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, and `meta.seo.index: false` excluded |
 | **Sitemap** | Physical file collision | If `public/sitemap.xml` exists, physical file is served without running generator |
-| **Sitemap** | Server-only dynamic entries | `sitemap.config.ts` dynamic URLs merged into `/sitemap.xml` |
+| **Sitemap** | Dynamic sitemap validation | Invalid `loc`/`priority`/`changefreq` entries log actionable error diagnostics |
+| **Multi-App Sitemap** | Dynamic sitemap `SitemapContext` | `context.applicationId` and `context.siteUrl` accurately reflect active tenant |
 | **Robots** | Physical file collision | If `public/robots.txt` exists, physical file is served |
 | **Security** | Spoofed `Host` header | Request canonical URL remains authoritative; does not reflect spoofed host |
 | **Security** | JSON-LD script breakout | `</script>` tags in JSON-LD escaped to `\u003C/script\u003E` |
+| **Security** | `publicConfig` payload escaping | Malicious/script-like `publicConfig` strings cannot escape hydration script |
 | **Multi-App** | Multi-tenant isolation | App A and App B maintain completely isolated origins and sitemaps |
-| **Fixture** | `fixtures/basic-consumer/` | Basic app runs with zero SSR glue code |
+| **Basic Fixture** | `fixtures/basic-consumer/` | Basic zero-config app runs with zero SSR glue code |
+| **Advanced Fixture**| `fixtures/advanced-consumer/` | Advanced app tests `publicConfig`, dynamic sitemap, multi-app context, custom head |
 | **Production**| Full build & start (`builto-landing`) | Production build runs with zero SSR glue code |
 
 ---
