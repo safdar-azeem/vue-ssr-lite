@@ -141,7 +141,7 @@ plugins: [
 
 Those correspond to `app.use(...)` — standard Vue application plugins.
 
-`vue-ssr-lite` runtime extensions are different. They participate in the SSR lifecycle, contribute to head rendering, register endpoints, and manage request-scoped state. Therefore the architecture clearly distinguishes:
+`vue-ssr-lite` runtime extensions are distinct from Vue plugins. Public v1 extensions participate in universal-safe lifecycle and scoped state management and contribute to the core managed head pipeline. Built-in/internal extensions may additionally utilize internal server capabilities such as endpoint registration. Therefore the architecture clearly distinguishes:
 
 | Term | Meaning |
 |---|---|
@@ -219,7 +219,7 @@ These remain part of the stable `vue-ssr-lite` **core**. They are fundamental ru
 │ Request Context               │
 │ SSR Resolution / Settling     │
 │ Core Serialization / Hydration│
-│ Extension Discovery / Runtime │
+│ Extension Resolution / Runtime│
 │ Core Error Handling           │
 └───────────────────────────────┘
 ```
@@ -244,6 +244,8 @@ That would be over-engineering. The core handles core.
 | **OPT-IN** | Built-in capability shipped by `vue-ssr-lite` but only activated when configured. | *(future)* diagnostics, advanced caching, performance tooling |
 
 OPT-IN examples are architecture proofs only. Do NOT pre-design or implement them.
+
+> **Implementation Note:** This classification is conceptual documentation only. Do NOT create `enum ExtensionMode`, `ExtensionDescriptor.mode`, or a built-in extension mode registry unless implementation genuinely requires it. `resolveBuiltInExtensions(application)` can simply decide whether to include each built-in.
 
 ### 3.4 Built-in Extensions Are Auto-Attached
 
@@ -350,7 +352,7 @@ defineApplication({
 
 This distinction must remain consistent.
 
-### 3.7 Custom Application Extensions
+### 3.7 Custom Application Extensions & Universal Boundary
 
 Advanced hosted applications extend the SSR runtime explicitly:
 
@@ -367,6 +369,49 @@ export default defineApplication({
 ```
 
 Normal developers should **never** need the `extensions` property. Custom extension support is progressive disclosure for senior/platform users.
+
+#### Universal-Safe Boundary (Critical)
+
+`src/main.ts` is **universal** — it enters both the server bundle and the client bundle. Therefore:
+
+> Custom extensions registered through `defineApplication({ extensions: [...] })` **MUST** be universal-safe. They MUST NOT import server-only dependencies (databases, Node APIs, private SDKs, `fs`, `process.env`).
+
+Custom extensions in `extensions: [...]` may use universal capabilities:
+
+- Extension-scoped state (request-scoped on server, application-scoped on client)
+- Route/application information
+- Managed head contribution via `contributeHead()`
+- Client lifecycle
+- SSR-safe universal behavior
+
+Custom extensions in `extensions: [...]` **MUST NOT**:
+
+- Import server-only modules (database clients, Node built-ins, private API keys)
+- Assume server-only globals exist
+- Register server endpoints (v1)
+
+#### Server-Only Extension Capabilities in v1
+
+Built-in extensions (e.g., SEO) can internally use server-side capabilities (endpoint registration, server-only modules) because their server/client entry boundaries are controlled by `vue-ssr-lite` itself.
+
+Public server-only extension authoring (e.g., custom endpoint registration from hosted application code) is **explicitly out of scope for v1**.
+
+If a future real consumer requires custom server endpoints, a proper server-only registration boundary should be designed (for example, through `ssr.config.ts`). Do NOT blur the universal/server environments before that requirement exists.
+
+```text
+v1 EXTENSION BOUNDARY:
+
+    defineApplication({ extensions: [...] })
+        = UNIVERSAL-SAFE custom extensions only
+
+    Built-in extensions (SEO)
+        = may use INTERNAL server capabilities
+        = controlled by vue-ssr-lite's own build boundaries
+
+    Future (v2+, if needed):
+        ssr.config.ts extensions: [...]
+        = server-only custom extensions
+```
 
 ### 3.8 `defineExtension()` API
 
@@ -426,15 +471,22 @@ Instead, Phase 0 derives the smallest lifecycle needed by:
 A conceptual starting point (illustrative only — NOT frozen):
 
 ```ts
-interface SsrExtension {
+interface ExtensionDefinition<TState = unknown> {
   name: string
-  setup?(context: ExtensionContext): void
-  resolve?(context: ExtensionContext): void | Promise<void>
-  head?(context: ExtensionContext): HeadContribution | void
-  client?(context: ExtensionContext): void
-  dispose?(context: ExtensionContext): void
+  createState?(): TState
+  setup?(context: ExtensionContext<TState>): void | (() => void)
+  client?(context: ExtensionContext<TState>): void
 }
 ```
+
+> **Naming:** The type is `ExtensionDefinition`, not `SsrExtension`. The same extension participates in both server and client lifecycles, so a server-specific name would be misleading. Choose one consistent vocabulary during Phase 0.
+
+> **Single Head Contribution Model (M-1):** Head participation is a **runtime capability** exposed via `context.contributeHead(...)` within `setup()`, rather than a separate `head?()` lifecycle hook. This ensures:
+> 1. Exactly **one** mental model for head contributions across built-in SEO and custom extensions.
+> 2. No competing hooks or ambiguous precedence rules between `head()` and `contributeHead()`.
+> 3. The core managed head pipeline remains the sole authoritative collector and reconciler.
+
+> **Cleanup:** Returning a cleanup function from `setup()` is preferred over a separate `dispose()` hook when it integrates naturally with existing disposal. Phase 0 should determine which pattern fits best with the current runtime lifetime management. Do not create both unless necessary.
 
 The final implementation may need fewer or different hooks.
 
@@ -454,23 +506,42 @@ extension(runtime) {
 }
 ```
 
-**Instead, expose controlled capabilities (conceptual):**
+**v1 public extension context — minimal universal-safe capabilities:**
 
 ```text
 ExtensionContext
-├── application
-├── route
-├── request
-├── response
-├── publicConfig
-├── provide()
-├── inject() / get()
-├── registerResolution()
-├── contributeHead()
-└── registerEndpoint()
+├── application         (application config/identity)
+├── route               (current route information)
+├── environment         (server vs client, dev vs production)
+├── state               (typed per-extension scoped state)
+└── contributeHead()    (managed head contribution)
 ```
 
-Only include capabilities actually needed by implementation. Do NOT expose private renderer/runtime internals merely for convenience. This creates a stable extension API while allowing `vue-ssr-lite` internals to evolve independently.
+Phase 0 must derive this list from what is actually required by:
+
+1. The SEO built-in extension.
+2. One realistic universal custom extension fixture.
+
+> **State Creation Rule (N-3):** Phase 0 will determine the exact state initialization shape (e.g., `createState()` on `ExtensionDefinition` or `context.createState(...)`). The critical invariant is that **extension authors must NOT manually manage SSR request isolation**. The extension runtime guarantees that `context.state` is:
+> - **Server:** Scoped per SSR request, created fresh on request entry and disposed on response completion.
+> - **Client:** Scoped per application instance, created on app initialization and disposed on unmount.
+> 
+> No complicated generic store or state registry is introduced.
+
+Do NOT include capabilities merely because they could be useful. In particular:
+
+```text
+DEFERRED — not proven necessary for v1 public context:
+├── provide() / inject()    (resembles DI container — violates anti-overengineering rules)
+├── request / response      (server-only — cannot safely exist in universal extensions)
+├── registerEndpoint()      (server-only — not available to public extensions in v1)
+├── registerResolution()    (evaluate whether existing SSR lifecycle already covers this)
+└── publicConfig            (evaluate whether extensions genuinely need this)
+```
+
+**Internal built-in extension context** may have additional server-side capabilities (e.g., endpoint registration, request access) because built-in extensions are part of `vue-ssr-lite` and their server/client boundaries are controlled by the library. These internal capabilities are NOT part of the public extension API.
+
+Only include capabilities in the public `ExtensionContext` when implementation genuinely requires them. Do NOT expose private renderer/runtime internals merely for convenience. This creates a stable extension API while allowing `vue-ssr-lite` internals to evolve independently.
 
 ### 3.11 Request-Scoped Extension State
 
@@ -576,7 +647,12 @@ defineExtension({
 })
 ```
 
-The runtime detects duplicate extension names in development and provides an actionable error/warning. Do not silently initialize the same extension twice.
+A duplicate extension identity is a **configuration error**. The runtime **MUST** fail deterministically in **all environments** (development and production) when two resolved extensions share the same name.
+
+- Development: descriptive error with both extension sources if possible.
+- Production: concise diagnostic with extension name.
+
+Runtime semantics must remain the same regardless of `NODE_ENV`. Do not silently initialize the same extension twice. Do not allow production to behave differently from development for extension identity conflicts.
 
 ### 3.16 Extension Errors
 
@@ -614,14 +690,130 @@ Extensions that allocate request/application resources must have a safe cleanup 
 
 Cleanup integrates with existing request/application disposal. Do not create a separate extension resource lifecycle engine. Reuse the existing SSR lifetime boundaries.
 
-### 3.18 Extension Access to Head
+### 3.18 Built-in Extension Disabling (`seo.enabled = false`)
 
-SEO requires head contribution. The design is generic enough that a custom extension may also contribute head items without becoming a second head manager.
+DEFAULT-mode built-in extensions (e.g., SEO) are automatically attached by default. An advanced consumer may choose to completely disable the built-in SEO extension.
+
+#### Disabling Contract (v1)
+
+Setting `seo: { enabled: false }` **completely disables** the built-in SEO extension:
+
+```ts
+export default defineApplication({
+  root: App,
+  routes,
+
+  seo: {
+    enabled: false,
+  },
+})
+```
+
+**Consequences of Disabling Built-in SEO:**
+- No request-scoped or client-scoped SEO store is created.
+- No automatic canonical URL generation occurs.
+- No `/sitemap.xml` dynamic endpoint is generated.
+- No `/robots.txt` endpoint is generated.
+- No built-in SEO `<head>` tags (title, description, OG, Twitter, canonical, robots meta, JSON-LD) are serialized.
+- No `PUBLIC_URL` origin validation is enforced.
+
+#### Disabling vs. Replacing Built-in SEO (v1 Boundary)
+
+In v1, public custom extensions in `extensions: [...]` are **strictly universal-safe** and cannot register server endpoints. Therefore:
+
+- A custom universal extension may provide its own universal/head behavior (e.g. via `contributeHead()`).
+- However, a custom extension **CANNOT** replace server-only built-in SEO infrastructure (such as `/sitemap.xml` or `/robots.txt`) in v1.
+- **Full built-in SEO replacement is explicitly OUT OF SCOPE for v1.**
+
+| Scenario | Behavior |
+|---|---|
+| No `seo` configuration | Built-in SEO active with defaults |
+| `seo: { siteName: '...' }` | Built-in SEO configured |
+| `seo: { mode: 'private' }` | Built-in SEO active in private mode (noindex default, no canonical/sitemap/robots) |
+| `seo: { enabled: false }` | Built-in SEO **completely disabled** |
+| `seo: { enabled: false }` + `extensions: [customUniversalExtension()]` | Built-in SEO disabled; custom extension runs universal logic. Full replacement of server SEO infrastructure is out of scope for v1 |
+
+Do NOT export `seoExtension()` itself. The built-in implementation remains internal.
+
+#### `useSeo()` Behavior When Built-in SEO Is Disabled (M-2)
+
+If a component or page calls `useSeo()` while `seo.enabled === false`:
+
+- **Development:** Emits a concise actionable console warning:
+  ```text
+  [vue-ssr-lite] useSeo() was called, but the built-in SEO extension is disabled.
+  ```
+- **Production:** Safe no-op (returns safely, does not throw, does not crash on missing context or store).
+
+**Important Invariants:**
+- A custom extension does **NOT** automatically take ownership of the library's `useSeo()` composable.
+- If a custom extension author wishes to provide a composable API, they export their own composable (e.g., `useMySeo()`). No extension-to-`useSeo` adapter layer exists in v1.
+
+### 3.19 Resource Conflict Semantics
+
+When multiple extensions contribute the same managed resource, behavior must be deterministic.
+
+**Head contributions (Public Extension Contract):**
+
+Contributions have stable keys. A **later** extension's contribution replaces an earlier contribution with the same key. This naturally allows advanced customization because custom extensions run after built-ins.
+
+```text
+built-in SEO → contributes title key
+custom extension → contributes title key (same key)
+    → custom extension wins (later in resolved order)
+```
+
+**Server Endpoints (Internal Server Runtime Invariant — N-2):**
+
+For internal built-in/platform endpoints, duplicate `method + path` is a **configuration error**. Do NOT silently replace routes. The server runtime fails with an actionable diagnostic naming both contributing sources. (Public custom endpoint registration is out of scope for v1).
+
+**Other named resources:**
+
+Define deterministic semantics only if/when they exist. Do not add a generic conflict-resolution framework.
+
+### 3.20 Extension Access to Head
+
+The **managed head pipeline is part of core**, not part of any individual extension:
+
+```text
+               CORE HEAD PIPELINE
+
+      ┌──────────────┼──────────────┐
+      │              │              │
+    SEO Ext      Custom Ext      Future Ext
+      │              │              │
+      └──────────────┼──────────────┘
+                     │
+                     ▼
+                FINAL HEAD
+                     │
+             ┌───────┴────────┐
+             ▼                ▼
+           SSR             Browser
+```
+
+**Core owns (generic head mechanics):**
+
+- Head contribution collection
+- Head tag identity/key system
+- Contribution merging with conflict resolution
+- SSR head serialization pipeline
+- Browser head reconciliation
+- Ownership markers (`data-vue-ssr-lite-head`)
+- Hydration adoption
+
+**SEO extension produces (SEO-specific head content):**
+
+- title, description, canonical
+- Open Graph, Twitter metadata
+- robots meta, JSON-LD
+
+Custom extensions contribute through the same `contributeHead()` capability.
 
 **Correct:**
 
 ```text
-extension → contribute to vue-ssr-lite managed head
+extension → contribute to vue-ssr-lite managed head (core pipeline)
 ```
 
 **Incorrect:**
@@ -633,15 +825,22 @@ extension → independently mutate document.head with its own head manager
 
 `vue-ssr-lite` is the **single authoritative head reconciliation system**. SEO is one producer of head state. Custom extensions contribute to the same managed head pipeline through a controlled capability.
 
-### 3.19 Extension Access to Server Endpoints
+### 3.21 Extension Access to Server Endpoints (Internal Only in v1)
 
-SEO needs `/sitemap.xml` and `/robots.txt`. Endpoint contribution is a generic capability:
+SEO needs `/sitemap.xml` and `/robots.txt`. Endpoint registration is an **internal** capability used by built-in extensions whose server/client boundaries are controlled by `vue-ssr-lite`.
+
+Built-in extensions register endpoints through internal server-side capabilities:
 
 ```ts
-context.registerEndpoint(...)
+// Internal to vue-ssr-lite — not part of public ExtensionContext
+internalContext.registerEndpoint(...)
 ```
 
-SEO internally registers `/sitemap.xml` and `/robots.txt`. Future extensions may register other internal endpoints.
+SEO internally registers `/sitemap.xml` and `/robots.txt`.
+
+**v1 scope:** Public custom extensions registered through `defineApplication({ extensions: [...] })` **cannot** register server endpoints. This is consistent with the universal-safe boundary (§3.7).
+
+If a future real consumer needs custom runtime endpoints, design a proper server-only extension registration boundary (e.g., through `ssr.config.ts`).
 
 Important:
 
@@ -649,7 +848,7 @@ Important:
 - Do NOT expose the underlying server implementation directly.
 - Endpoint registration reuses existing `vue-ssr-lite` endpoint routing/collision handling.
 
-### 3.20 Extension Participation in SSR Settling
+### 3.22 Extension Participation in SSR Settling
 
 Extensions integrate with the existing SSR resolution lifecycle. SEO already needs the final settled page state.
 
@@ -663,7 +862,7 @@ or the existing equivalent abstraction.
 
 Do NOT build `ExtensionResolutionEngine` or `PluginPromiseRegistry` if the existing SSR runtime already provides resolution registration. Extensions consume the existing lifecycle.
 
-### 3.21 Do NOT Expose Built-in SEO Extension Unnecessarily
+### 3.23 Do NOT Expose Built-in SEO Extension Unnecessarily
 
 The public API should **NOT** encourage:
 
@@ -682,7 +881,7 @@ defineApplication({ seo: { ... } })
 
 This prevents the internal architecture from leaking into application code.
 
-### 3.22 Type Safety
+### 3.24 Type Safety
 
 The extension system is strongly typed:
 
@@ -693,7 +892,7 @@ The extension system is strongly typed:
 
 However: Do NOT introduce a massive generic type system purely for type-level perfection. Prefer understandable TypeScript over clever conditional-type machinery.
 
-### 3.23 Tree-Shaking & Bundle Behavior
+### 3.25 Tree-Shaking & Bundle Behavior
 
 - Built-in extensions necessary for the selected runtime/configuration are included.
 - Optional built-in functionality does not force large unnecessary browser bundles.
@@ -701,7 +900,7 @@ However: Do NOT introduce a massive generic type system purely for type-level pe
 - The SEO extension has clear internal server/client boundaries.
 - Hosted developers do not manually manage that split.
 
-### 3.24 Extension Testability
+### 3.26 Extension Testability
 
 Each built-in extension is independently testable against the extension contract.
 
@@ -717,7 +916,7 @@ SEO tests exercise:
 
 Custom extension fixture proves external extension usage works without private imports.
 
-### 3.25 Future Built-in Extension Example
+### 3.27 Future Built-in Extension Example
 
 A future feature can be added without modifying the core:
 
@@ -748,20 +947,55 @@ defineApplication({
 
 > **Scope Note:** Do NOT add diagnostics to the implementation scope. It is only an architecture proof example.
 
-### 3.26 Custom Extension Example (Advanced)
+### 3.28 Custom Extension Example (Advanced)
 
 > ⚠️ **ADVANCED** — This example is for Persona D (Platform Engineers) only. Do not include in Getting Started.
 
+A meaningful universal-safe custom extension maintains runtime-scoped state and contributes to the core managed head pipeline without server dependencies:
+
 ```ts
-// src/extensions/request-id.ts
+// src/extensions/custom-analytics.ts
 import { defineExtension } from 'vue-ssr-lite'
 
-export const requestIdExtension = () =>
+export interface AnalyticsOptions {
+  propertyId: string
+}
+
+export interface AnalyticsState {
+  trackId: string
+}
+
+export const analyticsExtension = (options: AnalyticsOptions) =>
   defineExtension({
-    name: 'request-id',
+    name: 'custom-analytics',
+
+    // Phase 0 will freeze the exact runtime-owned scoped-state creation mechanism
+    // (e.g. createState() on definition or context.createState()).
+    // Invariant: extension authors must NOT manually manage SSR request isolation;
+    // state is scoped per SSR request on the server and per application on the client.
+    createState(): AnalyticsState {
+      return { trackId: options.propertyId }
+    },
 
     setup(context) {
-      // Use only documented extension capabilities.
+      // Uses runtime-provided scoped state (per-request on server, per-app on client)
+      const state = context.state as AnalyticsState
+
+      // Contributes to core managed head pipeline
+      context.contributeHead({
+        meta: [
+          {
+            key: 'analytics-id',
+            name: 'x-analytics-id',
+            content: state.trackId,
+          },
+        ],
+      })
+
+      // Optional cleanup function returned from setup
+      return () => {
+        // resource cleanup on request completion or app unmount
+      }
     },
   })
 ```
@@ -769,19 +1003,19 @@ export const requestIdExtension = () =>
 Application:
 
 ```ts
-import { requestIdExtension } from './extensions/request-id'
+import { analyticsExtension } from './extensions/custom-analytics'
 
 export default defineApplication({
   root: App,
   routes,
 
   extensions: [
-    requestIdExtension(),
+    analyticsExtension({ propertyId: 'UA-123456' }),
   ],
 })
 ```
 
-### 3.27 Anti-Overengineering Rules
+### 3.29 Anti-Overengineering Rules
 
 The extension architecture **MUST NOT** initially contain:
 
@@ -931,12 +1165,14 @@ export default defineApplication({
 
 ### Step 4: Advanced Custom Extensions (Persona D — Platform)
 
+Advanced platforms can register universal-safe custom extensions:
+
 ```ts
 import { defineApplication } from 'vue-ssr-lite'
 import App from './App.vue'
 import { routes } from './routes'
 import { createVLite } from 'vlite3'
-import { requestIdExtension } from './extensions/request-id'
+import { analyticsExtension } from './extensions/custom-analytics'
 
 export default defineApplication({
   root: App,
@@ -945,7 +1181,7 @@ export default defineApplication({
   plugins: [createVLite()],
 
   extensions: [
-    requestIdExtension(),
+    analyticsExtension({ propertyId: 'UA-123456' }),
   ],
 
   seo: {
@@ -954,7 +1190,7 @@ export default defineApplication({
 })
 ```
 
-Vue `plugins` and `vue-ssr-lite` `extensions` coexist without ambiguity.
+Vue `plugins` and `vue-ssr-lite` `extensions` coexist without ambiguity. All extensions registered in `main.ts` must be **universal-safe** (no server-only imports).
 
 ---
 
@@ -963,18 +1199,23 @@ Vue `plugins` and `vue-ssr-lite` `extensions` coexist without ambiguity.
 The SEO functionality is designed internally as the **first built-in extension** — a DEFAULT-mode extension automatically attached with safe defaults.
 
 ```text
-Core Runtime
-     │
-     └── SEO Extension
-          ├── useSeo state integration
-          ├── head rendering
-          ├── canonical URLs
-          ├── Open Graph
-          ├── Twitter metadata
-          ├── structured data
-          ├── sitemap.xml
-          └── robots.txt
+       Core Runtime (Owns Generic Head Pipeline & Reconciler)
+                                │
+                                ▼
+                       SEO Built-in Extension
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         │                      │                      │
+   SEO Head Content     Dynamic Sitemap        robots.txt Handler
+   (title, desc, OG,    (static discovery,     (/robots.txt endpoint)
+    twitter, canonical,  sitemap.config.ts)
+    JSON-LD, robots)
 ```
+
+**Architectural Layering (M-1):**
+- **Core Runtime** owns generic head mechanics: head contribution collection, stable tag identity, contribution merging, SSR `<head>` serialization, ownership markers, and browser DOM reconciliation.
+- **SEO Extension** is a feature extension producing SEO-specific head contributions and server endpoints (`/sitemap.xml`, `/robots.txt`).
+- **Custom Extensions** contribute to the same core managed head pipeline via `contributeHead()`.
 
 **Important:** Do NOT split this into many tiny extensions:
 
@@ -1041,6 +1282,11 @@ To eliminate cognitive friction, **Application SEO, Route SEO, and Page SEO shar
 ```ts
 import type { Ref, ComputedRef } from 'vue'
 
+/** Strict JSON-compatible value types for safe serialization */
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type JsonObject = { [key: string]: JsonValue }
+
 /** Reactive or plain value wrapper */
 export type SeoResolvable<T> = T | Ref<T> | ComputedRef<T> | (() => T)
 
@@ -1090,7 +1336,7 @@ export interface SeoInput {
     noarchive?: boolean
     nosnippet?: boolean
   }
-  structuredData?: Record<string, any> | Array<Record<string, any>>
+  structuredData?: JsonObject | JsonObject[]
   meta?: SeoMetaEntry[]
   links?: SeoLinkEntry[]
 }
@@ -1106,7 +1352,7 @@ export interface UseSeoInput {
   openGraph?: SeoResolvable<SeoInput['openGraph']>
   twitter?: SeoResolvable<SeoInput['twitter']>
   robots?: SeoResolvable<SeoInput['robots']>
-  structuredData?: SeoResolvable<SeoInput['structuredData']>
+  structuredData?: SeoResolvable<JsonObject | JsonObject[] | undefined>
   meta?: SeoResolvable<SeoMetaEntry[] | undefined>
   links?: SeoResolvable<SeoLinkEntry[] | undefined>
 }
@@ -1118,6 +1364,8 @@ export interface SeoRouteInput extends SeoInput {
 
 /** Global application configuration schema */
 export interface SeoApplicationConfig extends SeoInput {
+  /** Explicitly enable or disable the built-in SEO extension (default: true) */
+  enabled?: boolean
   siteName?: string
   titleTemplate?: string
   siteUrl?: string
@@ -1411,7 +1659,6 @@ export interface SitemapEntry {
 export interface SitemapContext {
   applicationId: string
   siteUrl: string
-  request?: any
 }
 ```
 
@@ -1587,24 +1834,24 @@ src/
 ├── core/
 │   ├── application/        <── Application definition/resolution
 │   ├── runtime/            <── SSR runtime, request context, publicConfig transport
-│   ├── rendering/          <── renderToString, HTML serialization
+│   ├── rendering/          <── renderToString, HTML serialization, generic managed head pipeline
 │   ├── router/             <── Router creation, history handling
-│   ├── hydration/          <── Browser hydration
+│   ├── hydration/          <── Browser hydration, DOM head reconciliation
 │   │
 │   └── extensions/         <── Extension infrastructure (part of core)
-│       ├── Extension.ts         <── Extension interface/types
-│       ├── ExtensionContext.ts  <── Capability-based context
-│       ├── ExtensionRuntime.ts  <── Resolution, ordering, lifecycle execution
-│       └── defineExtension.ts   <── Typed extension factory helper
+│       ├── ExtensionDefinition.ts <── Extension interface/types (ExtensionDefinition)
+│       ├── ExtensionContext.ts    <── Capability-based minimal context
+│       ├── ExtensionRuntime.ts    <── Resolution, ordering, lifecycle execution
+│       └── defineExtension.ts     <── Typed extension factory helper
 │
 ├── extensions/             <── Built-in feature extensions (≠ core infrastructure)
 │   └── seo/
-│       ├── index.ts        <── SEO extension entry point
+│       ├── index.ts        <── SEO extension entry point (auto-attached built-in)
 │       ├── types.ts        <── SeoInput, UseSeoInput, SeoApplicationConfig
 │       ├── state.ts        <── Request-scoped and client SEO state store
 │       ├── normalize.ts    <── SEO property derivation & social card propagation
-│       ├── server.ts       <── SSR HTML <head> tag generation & JSON-LD escaping
-│       ├── client.ts       <── Batched browser DOM head reconciliation & KeepAlive
+│       ├── server.ts       <── SEO head tag generator & JSON-LD escaping (contributes to core head)
+│       ├── client.ts       <── Client SEO state sync & KeepAlive integration
 │       ├── sitemap.ts      <── Static discovery, sitemap.config.ts runner, XML generator
 │       └── robots.ts       <── robots.txt endpoint handler
 │
@@ -1612,7 +1859,7 @@ src/
     └── ...                 <── Existing server/platform infrastructure, origin resolution
 ```
 
-> **Important separation:** `core/extensions/` contains the extension infrastructure (part of core). `extensions/` contains built-in feature extensions implemented using that infrastructure. These are not the same thing.
+> **Important separation:** `core/extensions/` contains the extension infrastructure (part of core). `extensions/` contains built-in feature extensions implemented using that infrastructure. Generic head mechanics belong to `core/` (rendering/hydration); domain-specific SEO tags belong to `extensions/seo/`.
 
 > **Note:** Before committing exact paths, align them with the repository's existing structure and naming conventions. Do NOT reorganize unrelated working code merely to match this diagram.
 
@@ -1624,6 +1871,7 @@ src/
 PHASE 0: Public API + Extension Contract Freeze
 ├── Freeze unified SeoInput, UseSeoInput, SeoRouteInput, and SeoApplicationConfig types
 ├── Freeze title as string everywhere and titleTemplate in SeoApplicationConfig
+├── Freeze strict JSON types (JsonPrimitive, JsonValue, JsonObject) for structuredData
 ├── Freeze robots meta vs robotsTxt naming distinction
 ├── Freeze useSeo() synchronous setup() registration invariant
 ├── Freeze RouteMeta module augmentation
@@ -1631,32 +1879,41 @@ PHASE 0: Public API + Extension Contract Freeze
 ├── Freeze custom meta[]/links[] thin escape hatches
 ├── Freeze conflicting static tag superseding policy with dev warning
 ├── Freeze canonical private mode syntax (seo: { mode: 'private' })
-├── Freeze SitemapContext and simplified SitemapEntry (loc, lastmod)
+├── Freeze built-in SEO disable semantics (seo: { enabled: false }) and record full replacement as out-of-scope for v1
+├── Freeze useSeo() behavior when SEO is disabled (dev warning, production no-op)
+├── Freeze SitemapContext (applicationId, siteUrl — without request: any) and simplified SitemapEntry
 ├── Freeze publicConfig serialization security rules
 ├── Freeze canonical dynamic sitemap file (sitemap.config.ts)
 ├── Freeze plugins vs extensions terminology distinction
-├── Freeze defineExtension() helper signature
-├── Freeze minimal extension lifecycle (derive from SEO requirements)
-├── Freeze ExtensionContext capabilities
-├── Freeze request-scoped state model
+├── Freeze defineExtension() helper signature & ExtensionDefinition interface name
+├── Freeze universal-safe boundary for custom extensions (no server-only imports in main.ts)
+├── Freeze public server-only extension authoring as out-of-scope for v1
+├── Freeze generic managed head pipeline ownership in Core (SEO extension produces SEO tags)
+├── Freeze single head contribution model (context.contributeHead) and remove separate head() hook
+├── Freeze resource conflict semantics (later wins for head keys; duplicate method+path is error)
+├── Freeze duplicate extension failure in ALL environments (dev and production)
+├── Freeze minimal public ExtensionContext (application, route, environment, state, contributeHead)
+├── Freeze runtime-owned scoped-state initialization mechanism (createState or context.createState) and TypeScript typing
+├── Freeze request-scoped state model (per-request on server, per-app on client)
 ├── Freeze extension ordering (built-in first, then custom in array order)
-├── Freeze built-in vs custom extension behavior
-├── Freeze extension error handling (name + cause through existing SSR errors)
-└── Freeze server/client extension boundaries
+├── Freeze extension cleanup pattern (cleanup function returned from setup)
+└── Freeze extension error handling (name + cause through existing SSR errors)
 
 PHASE 1: Minimal Core Extension Runtime
-├── Implement typed extension interface (SsrExtension)
+├── Implement typed extension interface (ExtensionDefinition)
 ├── Implement defineExtension() factory helper
-├── Implement ExtensionContext with controlled capabilities
+├── Implement minimal ExtensionContext with controlled capabilities
 ├── Implement resolveExtensions() (built-in + custom registration)
 ├── Implement request-scoped extension state creation/disposal
 ├── Implement client-scoped extension state lifecycle
 ├── Implement extension ordering (built-in → custom, array order)
-├── Implement duplicate extension name detection (dev diagnostics)
+├── Implement deterministic duplicate extension name rejection across all environments
 └── Implement extension error wrapping (name + cause)
 
 PHASE 2: Core SEO Types & State Store (First Built-in Extension)
-├── Implement SEO as built-in DEFAULT extension using extension contract
+├── Implement SEO as built-in DEFAULT extension using internal extension contract
+├── Implement built-in disable support (seo.enabled === false bypasses SEO initialization entirely)
+├── Implement safe useSeo() fallback when disabled (dev warning, prod no-op)
 ├── Implement request-scoped SEO store for SSR
 └── Implement reactive client-scoped SEO store with synchronous setup() registration
 
@@ -1666,11 +1923,13 @@ PHASE 3: useSeo() Composable & Reactivity
 ├── Implement onActivated() / onDeactivated() for <KeepAlive> support
 └── Connect to existing SSR settling point (async setup / Suspense)
 
-PHASE 4: SSR Head Rendering & Batched Browser Reconciliation
+PHASE 4: SSR Head Rendering & Batched Browser Reconciliation (Core Pipeline)
+├── Implement core managed head collector & stable tag identity system
+├── Implement contribution merging with same-key override rule (later wins)
 ├── Implement SSR head tag serializer with data-vue-ssr-lite-head markers
 ├── Implement batched browser DOM head reconciler with custom tag key/tuple identity
 ├── Implement conflicting static tag superseding with dev warning
-├── Implement extension head contribution pipeline (contributeHead capability)
+├── Connect SEO extension and custom extensions to contributeHead capability
 └── Add JSON-LD script breakout protection (\u003C/script\u003E)
 
 PHASE 5: Authoritative Origin Resolution & Canonical Path Normalization
@@ -1684,14 +1943,14 @@ PHASE 6: Route Metadata Contracts & HTTP Statuses
 ├── Implement status code handler (setResponseStatus and meta.ssr.status)
 └── Connect HTTP 4xx/5xx statuses to automatic noindex defaults and precedence
 
-PHASE 7: Static Sitemap & Robots.txt Infrastructure (via Extension Endpoints)
+PHASE 7: Static Sitemap & Robots.txt Infrastructure (Internal Endpoints)
 ├── Implement static route discovery engine from Vue Router tree (handling pathless parents)
 ├── Implement XML sitemap serializer, caching headers & physical file collision checks
 ├── Implement /robots.txt endpoint with standard defaults and physical file collision checks
-└── Implement endpoint registration through extension context (registerEndpoint capability)
+└── Connect SEO built-in extension to internal endpoint registration
 
 PHASE 8: Server-Only Dynamic Sitemap Extension
-├── Implement defineSitemap helper with SitemapContext in vue-ssr-lite/server
+├── Implement defineSitemap helper with minimal SitemapContext in vue-ssr-lite/server
 └── Connect dynamic sitemap provider (sitemap.config.ts) to /sitemap.xml endpoint
 
 PHASE 9: usePublicConfig<T>() Transport Cleanup & Serialization Security
@@ -1699,9 +1958,10 @@ PHASE 9: usePublicConfig<T>() Transport Cleanup & Serialization Security
 └── Expose universal usePublicConfig<T>() composable
 
 PHASE 10: Custom Extension Fixture & External Extension API Validation
-├── Add fixtures/advanced-consumer/ with extensions: [testExtension()]
-├── Validate extension setup, typed context, request state, SSR participation
-├── Validate client-side extension participation
+├── Add fixtures/advanced-consumer/ with universal-safe custom extension
+├── Validate extension setup, typed context, request state, and contributeHead()
+├── Validate client-side extension participation and cleanup
+├── Validate no Node/server dependencies enter client bundle
 └── Validate custom extension works without private imports
 
 PHASE 11: Builto Landing Migration & Cleanup
@@ -1750,6 +2010,9 @@ PHASE 12: Comprehensive Test Suite & Production Verification
 | **Extension / DX** | Basic consumer has zero `extensions` configuration | `fixtures/basic-consumer/` contains no `extensions` property |
 | **Extension / DX** | Built-in SEO works automatically | SEO functions without explicit extension registration |
 | **Extension / DX** | `useSeo()` works without importing SEO extension | Normal API, not extension API |
+| **Extension / DX** | Built-in SEO disabled | `defineApplication({ seo: { enabled: false } })` prevents built-in SEO from initializing |
+| **Extension / SEO Disabled** | `useSeo()` called with `seo.enabled: false` | Dev emits actionable warning `[vue-ssr-lite] useSeo() was called, but the built-in SEO extension is disabled.`; production is safe no-op with zero crash |
+| **Extension / SEO Disabled** | Server infrastructure with `seo.enabled: false` | Built-in `/sitemap.xml`, `/robots.txt`, and canonical derivation are completely uninitialized |
 | **Extension / DX** | Custom extension via `extensions` | Custom extension passed through `extensions: [...]` initializes correctly |
 | **Extension / DX** | Vue `plugins` and `extensions` coexist | No ambiguity or collision between Vue plugins and SSR extensions |
 | **Extension Isolation** | Two concurrent requests, same extension definition | Different request state for each request |
@@ -1757,16 +2020,16 @@ PHASE 12: Comprehensive Test Suite & Production Verification
 | **Extension Isolation** | Custom extension request isolation | Custom extension cannot receive another request's scoped state through standard APIs |
 | **Extension Ordering** | Built-in extension setup | Occurs deterministically before custom extensions |
 | **Extension Ordering** | Custom extension array order | Declaration order is preserved |
-| **Extension Ordering** | Duplicate extension names | Produces actionable development diagnostic |
-| **Extension Boundary** | Server-only extension modules | Never enter client build |
+| **Extension Ordering** | Duplicate extension names | Fails deterministically in ALL environments (dev and production) |
+| **Extension Boundary** | Universal custom extension bundling | No Node/server dependencies enter client bundle |
 | **Extension Boundary** | Client-side extension lifecycle | Works correctly after hydration |
 | **Extension Errors** | Extension error during SSR | Includes extension identity and flows through existing SSR error handling |
 | **Extension Cleanup** | Request-scoped extension state after response | Released after response is sent |
 | **Extension Cleanup** | Client extension resources on dispose | Released when application/runtime is disposed |
 | **Extension Head** | Custom extension contributes head | Supported through `contributeHead` capability without replacing core head manager |
-| **Extension Endpoints** | Custom extension registers endpoint | Supported through `registerEndpoint` capability without replacing core server routing |
+| **Extension Head** | Custom head same-key override | Later custom contribution deterministically replaces earlier contribution with same key |
 | **Basic Fixture** | `fixtures/basic-consumer/` | Basic zero-config app runs with zero SSR/extension glue code |
-| **Advanced Fixture**| `fixtures/advanced-consumer/` | Advanced app tests `publicConfig`, dynamic sitemap, custom extension, multi-app context, custom head |
+| **Advanced Fixture**| `fixtures/advanced-consumer/` | Advanced app tests `publicConfig`, dynamic sitemap, custom analytics extension (state + contributeHead), custom head |
 | **Production**| Full build & start (`builto-landing`) | Production build runs with zero SSR glue code |
 
 ---
@@ -1793,27 +2056,29 @@ Contains **zero**:
 
 ### `fixtures/advanced-consumer/`
 
-Demonstrates custom extension usage:
+Demonstrates universal-safe custom extension usage (N-4):
 
 ```ts
-import { testExtension } from './extensions/test-extension'
+import { analyticsExtension } from './extensions/custom-analytics'
 
 export default defineApplication({
   root: App,
   routes,
 
   extensions: [
-    testExtension(),
+    analyticsExtension({ propertyId: 'UA-123456' }),
   ],
 })
 ```
 
 Proves:
 
-- Extension setup with typed context
+- Extension setup with typed universal context
 - Request-scoped state per extension
+- Managed head contribution via `contributeHead()`
 - SSR participation
-- Client participation if relevant
+- Client participation and cleanup on unmount
+- Zero server-only dependency leakage into browser bundle
 - Works without private imports
 
 > **Do NOT** make the advanced fixture the documentation baseline.
