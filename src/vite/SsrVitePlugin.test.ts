@@ -225,6 +225,12 @@ describe('SSR Vite package identity', () => {
         isPreview: false,
       }
     )
+    expect(
+      plugin.resolveId?.call(
+        {} as never,
+        '/@vue-ssr-lite/client/storefront'
+      )
+    ).toBe('\0virtual:vue-ssr-lite/client/storefront')
     const transform = plugin.transformIndexHtml
     if (!transform || typeof transform === 'function' || !transform.handler) {
       throw new Error('vueSsrLite must expose transformIndexHtml.')
@@ -250,6 +256,8 @@ describe('SSR Vite package identity', () => {
       result && typeof result === 'object' && 'tags' in result
         ? result.tags
         : []
-    expect(JSON.stringify(tags)).toContain('virtual:vue-ssr-lite/client/storefront')
+    expect(JSON.stringify(tags)).toContain('/@vue-ssr-lite/client/storefront')
+    expect(JSON.stringify(tags)).not.toContain('virtual:vue-ssr-lite/client/storefront')
+    expect(JSON.stringify(tags)).not.toContain('children')
   })
 })
