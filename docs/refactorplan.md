@@ -14,9 +14,9 @@
                                  │
                      ┌───────────┴───────────┐
                      │                       │
-                  main.ts                  Pages
+           Universal main.ts               Pages / Components
                      │                       │
-           defineApplication()          useSeo(...)
+           defineApplication()          useSeo(...) [Reactive & Scoped]
                      │                       │
                      └───────────┬───────────┘
                                  │
@@ -25,17 +25,17 @@
                         │  vue-ssr-lite  │
                         │  (Standalone)  │
                         │                │
-                        │ Application    │
-                        │ Router         │
+                        │ Universal App  │
+                        │ Router Engine  │
                         │ SSR Lifecycle  │
-                        │ Hydration      │
-                        │ SEO State      │
-                        │ Head Sync      │
+                        │ Hydration Sync │
+                        │ SEO Store      │
+                        │ Head Reconciler│
                         │ Canonical URLs │
-                        │ /sitemap.xml   │
-                        │ /robots.txt    │
+                        │ Static Sitemap │
+                        │ robots.txt     │
                         │ HTTP Statuses  │
-                        │ Public Origin  │
+                        │ Origin Resolver│
                         │ publicConfig   │
                         │ JSON-LD Engine │
                         │ Server Runtime │
@@ -50,21 +50,24 @@
                           └───────────┘
 ```
 
-### Core Architecture Highlights
+### Core Architecture Invariants
 
-1. **Standalone SSR & SEO Engine**: `vue-ssr-lite` owns the full SSR and SEO lifecycle. It has **no dependency** on `vlite3` or any external UI library.
-2. **No Third SEO Package**: SEO primitives live directly in `vue-ssr-lite`. No `@vue-ssr-lite/seo-core` package.
-3. **No `<SeoProvider>` Required**: Developers call `useSeo()` directly in any component or page. Request-local and client-local SEO state is managed automatically.
-4. **Universal API**: The exact same `useSeo()` call works during SSR (generating `<head>` tags and JSON-LD) and during client-side navigation (updating `document.title` and DOM `<head>`).
-5. **Safe Canonical & Origin Resolution**: Production canonical URLs never blindly trust untrusted `Host` headers. Origin resolution prefers authoritative configuration (`PUBLIC_URL` / `seo.siteUrl`).
-6. **Generic Route Metadata**: `vue-ssr-lite` understands only its own namespaces (`meta.seo` and `meta.ssr`), never application-specific fields like `requiresAuth` or `notFound`.
-7. **Zero Application SSR Glue**: Eliminates custom entrypoints, custom SSR servers, custom hydration glue, and ad-hoc SSR contexts from hosted applications.
+1. **Standalone Core**: `vue-ssr-lite` owns the full SSR, hydration, and SEO lifecycle. It has **no dependency** on `vlite3` or any external UI library.
+2. **No Third SEO Package**: SEO primitives live directly in `vue-ssr-lite`. `@vue-ssr-lite/seo-core` is rejected for architectural minimalism.
+3. **No `<SeoProvider>` Required**: Developers call `useSeo()` directly in components, pages, or layouts. Scoped SEO state is managed automatically per component and request.
+4. **Universal API with Reactive Scoping**: `useSeo()` works identically during SSR (waiting for async page settling) and browser navigation (with automatic component-unmount cleanup).
+5. **Safe Canonical & Origin Resolution**: Production canonical URLs resolve authoritatively from `process.env.PUBLIC_URL`, `defineApplication({ seo: { siteUrl } })`, or server configuration. Raw `Host` headers are never trusted in production.
+6. **Strict Server-Only Boundaries**:
+   - `src/main.ts` is universal: developers **never** write `process.env` in `main.ts`.
+   - Dynamic sitemap queries (databases, private APIs) live in server-only modules (`src/sitemap.ts` or `defineSsrConfig`).
+7. **Generic Route Metadata**: `vue-ssr-lite` understands only its own namespaces (`meta.seo` and `meta.ssr`), with built-in TypeScript definitions.
+8. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
 
 ---
 
 ## 2. Progressive API Hierarchy
 
-The API is structured in three clear levels so developers only encounter complexity when their application genuinely requires it:
+The public API is organized into three distinct levels of disclosure:
 
 ```text
 LEVEL 1 — Normal Application Developer (90% of use cases)
@@ -74,8 +77,9 @@ LEVEL 1 — Normal Application Developer (90% of use cases)
 LEVEL 2 — Applications Requiring Server-to-Client Configuration
 └── usePublicConfig<T>()
 
-LEVEL 3 — Server / Platform Infrastructure Developer
+LEVEL 3 — Server & Platform Infrastructure Developer (Server-Only)
 ├── defineSsrConfig()
+├── defineSitemap()
 ├── useSsrRequestContext()
 ├── setResponseStatus()
 └── Custom server endpoints & hooks
@@ -83,9 +87,9 @@ LEVEL 3 — Server / Platform Infrastructure Developer
 
 ---
 
-## 3. Hosted Application Structure
+## 3. Hosted Application Structure & Universal Boundaries
 
-A hosted application using `vue-ssr-lite` is a completely standard Vue 3 project:
+A hosted application using `vue-ssr-lite` is a completely standard Vue 3 project with a clear boundary between universal app code and optional server extensions:
 
 ```text
 builto-landing/
@@ -93,21 +97,25 @@ builto-landing/
 ├── index.html
 ├── vite.config.ts
 │
-└── src/
-    ├── main.ts
-    ├── App.vue
-    ├── routes.ts
-    │
-    └── pages/
-        ├── Home.vue
-        ├── About.vue
-        ├── Contact.vue
-        └── NotFound.vue
+├── src/
+│   ├── main.ts            <── Pure universal app definition (no process.env)
+│   ├── App.vue
+│   ├── routes.ts
+│   │
+│   ├── pages/
+│   │   ├── Home.vue
+│   │   ├── About.vue
+│   │   ├── Pricing.vue
+│   │   └── NotFound.vue
+│   │
+│   └── sitemap.ts         <── (Optional) Server-only dynamic sitemap provider
+│
+└── ssr.config.ts          <── (Optional) Server-only infrastructure overrides
 ```
 
-### Files Eliminated from Hosted Applications
+### Eliminated Application Plumbing
 
-Hosted applications **no longer need**:
+Hosted applications **no longer maintain**:
 
 ```text
 DELETE:
@@ -119,40 +127,21 @@ DELETE:
 ├── src/modules/Public/seo/PublicSsrSeo.ts
 ├── src/modules/Public/utils/PublicSiteOrigin.ts
 ├── src/server/LandingSeoEndpoints.ts
-└── src/config/LandingPublicRuntime.ts (or reduce to standard app config)
-```
-
-And for most applications:
-
-```text
-ssr.config.ts  ──> UNNECESSARY (use defaults)
+└── src/config/LandingPublicRuntime.ts
 ```
 
 ---
 
-## 4. `main.ts` & `defineApplication()`
+## 4. Universal Application Setup (`main.ts`)
 
-`defineApplication` is the primary entrypoint for declaring application setup, routes, plugins, and global SEO defaults.
+`src/main.ts` is imported in both client and SSR bundles. It contains **no server-only code and no `process.env` references**.
 
-### Minimal `main.ts`
-
-```ts
-import { defineApplication } from 'vue-ssr-lite'
-import App from './App.vue'
-import routes from './routes'
-
-export default defineApplication({
-  root: App,
-  routes,
-})
-```
-
-### `main.ts` with Global SEO Defaults & Plugins
+### Standard `src/main.ts`
 
 ```ts
 import { defineApplication } from 'vue-ssr-lite'
 import App from './App.vue'
-import routes from './routes'
+import { routes } from './routes'
 import { createVLite } from 'vlite3'
 
 export default defineApplication({
@@ -172,204 +161,186 @@ export default defineApplication({
       'Create websites, documents, and organize your workspace.',
 
     image: '/assets/brand/social-card.png',
-
-    // Optional: siteUrl can also be set via PUBLIC_URL env var
-    siteUrl: process.env.PUBLIC_URL,
   },
 })
 ```
 
-> **Note:** All `seo` configurations in `defineApplication` are completely optional. A project without any SEO configuration still renders and functions properly.
+> **Server Resolution of `PUBLIC_URL`**: `vue-ssr-lite` automatically inspects `process.env.PUBLIC_URL` within the **server runtime**. The hosted application does not need to wire environment variables into `main.ts`.
 
 ---
 
-## 5. Universal SEO Composable: `useSeo()`
+## 5. Universal `useSeo()`: Lifecycle, Scoping & Reactivity
 
-`vue-ssr-lite` exports `useSeo()` as a first-class composable that operates seamlessly across both SSR and client-side navigation.
+### 5.1 Scoped Contribution System
 
-### Minimal Page Usage
+`useSeo()` is not a flat global object; it is a **scoped contribution system** with component-level ownership and deterministic hierarchy:
+
+```text
+APPLICATION DEFAULTS (defineApplication.seo)
+            ↓
+ROUTE METADATA (route.meta.seo)
+            ↓
+LAYOUT CONTRIBUTIONS (useSeo in App/Layout)
+            ↓
+PAGE CONTRIBUTIONS (useSeo in active Page)
+            ↓
+NESTED COMPONENT CONTRIBUTIONS (useSeo in Child Component)
+            ↓
+FINAL NORMALIZED SEO SNAPSHOT
+```
+
+#### Lifecycle & Cleanup Rules:
+
+1. **Component Ownership**: Each `useSeo()` call is bound to the active Vue component instance via `getCurrentInstance()`.
+2. **Automatic Cleanup on Unmount**: When a child component or modal unmounts (`onUnmounted`), its SEO contributions are automatically removed, restoring the parent page/layout values.
+3. **Route Navigation Cleanup**: When navigating from Page A to Page B, Page A's contributions are discarded entirely. Page A's properties (e.g. `image: 'a.png'`) will **never leak** into Page B.
+4. **Deterministic Merge Order**: Later mounted child components override ancestor properties for identical keys (e.g., child `title` overrides layout `title`).
+
+### 5.2 Reactivity & Async Data Settling
+
+`useSeo()` accepts reactive inputs and automatically coordinates with the SSR async data-settling lifecycle:
 
 ```vue
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useSeo } from 'vue-ssr-lite'
 
+const props = defineProps<{ slug: string }>()
+const { data: article } = await useAsyncData(`article-${props.slug}`, () => fetchArticle(props.slug))
+
+// Reactive / Getter inputs:
 useSeo({
-  title: 'About',
-  description: 'Learn more about Builto and our mission.',
+  title: computed(() => article.value?.title || 'Article'),
+  description: () => article.value?.excerpt,
+  image: () => article.value?.coverImage,
+  canonical: `/blog/${props.slug}`,
 })
 </script>
-
-<template>
-  <main>
-    <h1>About Builto</h1>
-  </main>
-</template>
 ```
 
-### Automatic Property Propagation (Zero Duplication)
+#### Timing Invariant:
+- During SSR, `vue-ssr-lite` captures the final SEO snapshot **only after** all asynchronous page setup, `Suspense`, and data-settling promises have completed.
+- SSR never serializes intermediate or `undefined` SEO values while async data is in flight.
 
-Developers do not need to duplicate titles, descriptions, and images for Open Graph and Twitter cards. The library derives them automatically:
+### 5.3 Zero-Duplication Property Propagation
+
+Developers do not need to manually repeat metadata for Open Graph and Twitter cards:
 
 ```ts
-// Developer writes:
 useSeo({
   title: 'About',
   description: 'Learn about us.',
   image: '/social/about.png',
 })
-
-// vue-ssr-lite automatically derives:
-// - <title>About | Builto</title>
-// - <meta name="description" content="Learn about us.">
-// - <link rel="canonical" href="https://builto.com/about">
-// - <meta property="og:title" content="About | Builto">
-// - <meta property="og:description" content="Learn about us.">
-// - <meta property="og:image" content="https://builto.com/social/about.png">
-// - <meta name="twitter:title" content="About | Builto">
-// - <meta name="twitter:description" content="Learn about us.">
-// - <meta name="twitter:image" content="https://builto.com/social/about.png">
-// - <meta name="twitter:card" content="summary_large_image">
 ```
 
-### Full `useSeo()` Options
-
-```ts
-useSeo({
-  title: 'Introducing Workspaces',
-  description: 'Collaborate in real-time with team workspaces.',
-  image: '/images/workspaces-preview.png',
-  canonical: '/blog/introducing-workspaces',
-
-  robots: {
-    index: true,
-    follow: true,
-  },
-
-  openGraph: {
-    type: 'article',
-    // Custom overrides if different from base title/image:
-    title: 'Workspaces in Builto',
-  },
-
-  twitter: {
-    card: 'summary_large_image',
-  },
-
-  structuredData: [
-    {
-      '@type': 'Article',
-      headline: 'Introducing Workspaces',
-      image: '/images/workspaces-preview.png',
-    },
-  ],
-})
-```
-
-### SEO Precedence Hierarchy
-
-When multiple sources declare SEO properties, the final state is resolved by strict precedence:
-
-```text
-PAGE useSeo()
-      >
-ROUTE meta.seo
-      >
-APPLICATION defineApplication.seo
-      >
-LIBRARY DEFAULTS
-```
+`vue-ssr-lite` automatically propagates:
+- `<title>About | Builto</title>`
+- `<meta name="description" content="Learn about us.">`
+- `<link rel="canonical" href="https://builto.com/about">`
+- `<meta property="og:title" content="About | Builto">`
+- `<meta property="og:description" content="Learn about us.">`
+- `<meta property="og:image" content="https://builto.com/social/about.png">`
+- `<meta name="twitter:title" content="About | Builto">`
+- `<meta name="twitter:description" content="Learn about us.">`
+- `<meta name="twitter:image" content="https://builto.com/social/about.png">`
+- `<meta name="twitter:card" content="summary_large_image">`
 
 ---
 
-## 6. Structured Data (JSON-LD)
+## 6. Deterministic Head Ownership & Hydration Reconciliation
 
-Structured data represents business meaning and domain knowledge. The application declares the content, while `vue-ssr-lite` handles the technical infrastructure.
+To prevent duplicate tags and avoid conflicts with consumer-owned elements in `index.html`, `vue-ssr-lite` establishes explicit tag identity and ownership.
 
-### Division of Responsibility
+### Managed Tag Keys
 
-| Responsibility | Owner |
-|---|---|
-| Schema content & business meaning | **Application** |
-| Validation & formatting helpers (`defineStructuredData`, schema utilities) | **vue-ssr-lite** |
-| JSON-LD serialization & escaping | **vue-ssr-lite** |
-| `<script type="application/ld+json">` SSR insertion | **vue-ssr-lite** |
-| DOM synchronization on client-side route changes | **vue-ssr-lite** |
-| Schema deduplication | **vue-ssr-lite** |
+| Tag | Deterministic Identity / Selector | Behavior |
+|---|---|---|
+| `<title>` | `title` | Replaces `document.title` on client; replaces `<title>` on SSR |
+| Canonical URL | `link[rel="canonical"]` | Reconciled/updated on navigation |
+| Standard Meta | `meta[name="<key>"]` (e.g. `description`, `robots`, `twitter:*`) | Reconciled by `name` |
+| Open Graph Meta | `meta[property="<key>"]` (e.g. `og:title`, `og:image`) | Reconciled by `property` |
+| JSON-LD Scripts | `script[type="application/ld+json"][data-v-ssr-seo]` | Tagged with `data-v-ssr-seo` attribute; fully managed |
 
-### Usage Example
+### Hydration & Navigation Reconciliation Algorithm
 
-```ts
-import { useSeo } from 'vue-ssr-lite'
-
-useSeo({
-  title: 'About Builto',
-  structuredData: [
-    {
-      '@type': 'Organization',
-      name: 'Builto',
-      url: 'https://builto.com',
-      logo: 'https://builto.com/logo.png',
-    },
-    {
-      '@type': 'WebSite',
-      name: 'Builto',
-      url: 'https://builto.com',
-    },
-  ],
-})
-```
+1. **SSR Generation**: Renders all managed tags into `<head>`, tagging JSON-LD scripts with `data-v-ssr-seo="true"`.
+2. **Client Hydration**: Reads SSR head state; attaches to existing managed tags without recreating DOM nodes.
+3. **Client Navigation**: Computes the diff between previous and next normalized SEO state. Updates, adds, or removes managed tags accordingly.
+4. **Unmanaged Element Safety**: Elements declared in `index.html` (favicons, external CSS, font links, custom third-party scripts) without `vue-ssr-lite` ownership keys are **never modified or removed**.
 
 ---
 
-## 7. Safe Public Origin & Canonical Resolution
+## 7. Safe Public Origin, Canonical URLs & Failure Contracts
 
-Generating canonical URLs in production requires safe, authoritative origin resolution. Raw `Host` headers cannot be blindly trusted in production (preventing cache-poisoning, preview host leakage, or proxy confusion).
+### 7.1 Authoritative Origin Resolution Priority
 
-### Origin Resolution Strategy
+Origin resolution is computed **per application instance**:
 
 ```text
-PRODUCTION RESOLUTION:
+PRODUCTION RESOLUTION PRIORITY:
 1. defineApplication({ seo: { siteUrl: 'https://builto.com' } })
-2. process.env.PUBLIC_URL
-3. Explicitly configured trusted proxy origin (via defineSsrConfig)
-4. Fallback: warn / fail when absolute canonical URLs are required
+2. process.env.PUBLIC_URL (read by SSR runtime)
+3. Server-side custom domain resolver hook in defineSsrConfig
+4. FATAL STARTUP / REQUEST ERROR (Fail-Fast)
 
 DEVELOPMENT RESOLUTION:
-1. Configured siteUrl (if present)
+1. Explicit siteUrl / PUBLIC_URL (if provided)
 2. Current local dev server origin (http://localhost:<port>)
 ```
 
-### Relative Path Expansion
+### 7.2 Strict Production Failure Contract
 
-Developers supply clean relative canonical paths; `vue-ssr-lite` safely combines them with the authoritative origin:
+If an absolute URL is required for canonical links, Open Graph tags, sitemaps, or JSON-LD in production, and no authoritative origin can be resolved:
 
-```ts
-useSeo({
-  canonical: '/pricing',
-})
-```
+> **Production Invariant**: `vue-ssr-lite` **fails immediately** with an explicit, actionable error message:  
+> `[vue-ssr-lite] Production siteUrl is missing. Set process.env.PUBLIC_URL or defineApplication({ seo: { siteUrl } }) to generate authoritative canonical SEO URLs.`  
+> The library **never** silently falls back to `localhost`, internal proxy hosts, or empty strings in production.
 
-Outputs:
+### 7.3 Canonical Path Normalization Policy
 
-```html
-<link rel="canonical" href="https://builto.com/pricing">
-<meta property="og:url" content="https://builto.com/pricing">
-```
+The library applies deterministic URL normalization:
+
+- **Query Parameters**: Stripped by default (e.g. `/about?utm_source=x` becomes `https://builto.com/about`).
+- **Hash Fragments**: Stripped by default (e.g. `/about#team` becomes `https://builto.com/about`).
+- **Trailing Slash Policy**: Normalized to no trailing slash by default (`/about/` becomes `/about`), except root `/`. Configurable via `seo.trailingSlash`.
+- **Absolute Overrides**: If `canonical` begins with `http://` or `https://`, it is used directly without origin expansion.
 
 ---
 
-## 8. Route Metadata & Namespace Rules
+## 8. Route Metadata (`meta.seo` & `meta.ssr`) & TypeScript Typings
 
-`vue-ssr-lite` interacts only with its own dedicated namespaces in Vue Router route definitions: `meta.seo` and `meta.ssr`. It **never** reads application-specific fields like `meta.requiresAuth`, `meta.auth`, or `meta.notFound`.
+### 8.1 First-Class TypeScript Augmentation
 
-### Route Definition Example
+`vue-ssr-lite` provides automatic module augmentation for `vue-router`'s `RouteMeta`:
+
+```ts
+// Built into vue-ssr-lite:
+declare module 'vue-router' {
+  interface RouteMeta {
+    seo?: {
+      title?: string
+      description?: string
+      image?: string
+      index?: boolean
+      follow?: boolean
+      sitemap?: boolean
+    }
+    ssr?: {
+      status?: number
+    }
+  }
+}
+```
+
+### 8.2 Route Definition Example
 
 ```ts
 import { RouteRecordRaw } from 'vue-router'
-import Home from '../pages/Home.vue'
-import About from '../pages/About.vue'
-import Dashboard from '../pages/Dashboard.vue'
-import NotFound from '../pages/NotFound.vue'
+import Home from './pages/Home.vue'
+import About from './pages/About.vue'
+import Dashboard from './pages/Dashboard.vue'
+import NotFound from './pages/NotFound.vue'
 
 export const routes: RouteRecordRaw[] = [
   {
@@ -384,9 +355,8 @@ export const routes: RouteRecordRaw[] = [
     path: '/dashboard',
     component: Dashboard,
     meta: {
-      // Application handles auth conventions; declares SEO intent explicitly:
       seo: {
-        index: false,
+        index: false, // Application sets indexing; vue-ssr-lite handles SEO & sitemap exclusion
       },
     },
   },
@@ -395,88 +365,83 @@ export const routes: RouteRecordRaw[] = [
     component: NotFound,
     meta: {
       ssr: {
-        status: 404,
-      },
-      seo: {
-        index: false,
+        status: 404, // 4xx/5xx automatically defaults seo.index to false!
       },
     },
   },
 ]
 ```
 
-### HTTP Response Status Control
+### 8.3 Safe HTTP 4xx/5xx Defaults
 
-Applications control HTTP response codes using generic HTTP semantics:
-
-1. **Declarative route metadata**:
-   ```ts
-   meta: {
-     ssr: { status: 404 }
-   }
-   ```
-2. **Imperative status composable**:
-   ```ts
-   import { setResponseStatus } from 'vue-ssr-lite'
-
-   setResponseStatus(404)
-   ```
+- Setting `meta.ssr.status = 404` (or calling `setResponseStatus(404)`) automatically implies `meta.seo.index = false` (`noindex`).
+- Developers do not need to duplicate `seo: { index: false }` on error/not-found routes unless overriding explicitly.
 
 ---
 
 ## 9. Sitemap Generation (`/sitemap.xml`)
 
-`vue-ssr-lite` automates the sitemap endpoint and XML generation while relying on the application for dynamic entity discovery.
+### 9.1 Division of Responsibility
 
-### Division of Responsibility
+| Responsibility | Owner | Execution Boundary |
+|---|:---:|:---:|
+| `/sitemap.xml` HTTP endpoint & routing | **vue-ssr-lite** | Server |
+| Static route discovery & URL resolution | **vue-ssr-lite** | Server |
+| XML formatting, entity escaping & headers | **vue-ssr-lite** | Server |
+| Filtering non-indexable routes (`meta.seo.index === false`) | **vue-ssr-lite** | Server |
+| Dynamic entity discovery (e.g. database blog slugs) | **Application** | **Server-Only** |
 
-| Responsibility | Owner |
-|---|---|
-| `/sitemap.xml` HTTP endpoint & routing | **vue-ssr-lite** |
-| XML generation, formatting & entity escaping | **vue-ssr-lite** |
-| Content-Type (`application/xml`) & cache headers | **vue-ssr-lite** |
-| Absolute URL resolution using authoritative `siteUrl` | **vue-ssr-lite** |
-| Static route discovery from router definitions | **vue-ssr-lite** |
-| Filtering out non-indexable routes (`meta.seo.index: false`) | **vue-ssr-lite** |
-| Deduplication & sitemap index support | **vue-ssr-lite** |
-| Dynamic route parameters (e.g. `/blog/:slug`, `/products/:id`) | **Application** |
-| Custom priority & change frequency | **Application** |
+### 9.2 Deterministic Static Route Discovery Rules
 
-### Dynamic Route Entries in `defineApplication`
+`vue-ssr-lite` inspects the Vue Router tree during server startup:
 
-For sites with dynamic database routes:
+#### INCLUDED in Static Sitemap:
+- Concrete, navigable static routes (e.g. `/`, `/about`, `/pricing`).
+- Nested concrete static routes after full path concatenation (e.g. `/docs/getting-started`).
+
+#### EXCLUDED from Static Sitemap:
+- Redirect records (`redirect: ...`).
+- Route aliases (to prevent duplicate indexing).
+- Catch-all / wildcard routes (e.g. `/:pathMatch(.*)*`).
+- Unresolved dynamic routes (e.g. `/blog/:slug`, `/user/:id`).
+- Routes with `meta.seo.index === false`.
+- Routes with explicit `meta.seo.sitemap === false`.
+
+> **Runtime SEO Note**: Page-level `useSeo({ robots: { index: false } })` cannot be known without rendering every dynamic page at build/request time. Sitemap inclusion relies strictly on the static route contract (`meta.seo`) or the dynamic sitemap provider.
+
+### 9.3 Server-Only Dynamic Sitemap Extension
+
+For dynamic content, the application provides an optional server-only sitemap module (`src/sitemap.ts`):
 
 ```ts
-export default defineApplication({
-  root: App,
-  routes,
+// src/sitemap.ts (SERVER-ONLY — Never bundled into client!)
+import { defineSitemap } from 'vue-ssr-lite/server'
+import { db } from './server/db'
 
-  seo: {
-    siteUrl: 'https://builto.com',
-    sitemap: {
-      async entries() {
-        const posts = await fetchBlogSlugs()
-        return posts.map(slug => ({
-          loc: `/blog/${slug}`,
-          lastmod: new Date().toISOString(),
-          changefreq: 'weekly',
-          priority: 0.8,
-        }))
-      },
-    },
-  },
+export default defineSitemap(async () => {
+  const articles = await db.article.findMany({ select: { slug: true, updatedAt: true } })
+
+  return articles.map(article => ({
+    loc: `/blog/${article.slug}`,
+    lastmod: article.updatedAt.toISOString(),
+    changefreq: 'weekly',
+    priority: 0.8,
+  }))
 })
 ```
 
-For static sites without dynamic routes: **Zero sitemap code is required.**
+### 9.4 Caching & Collision Policies
+
+- **Caching**: `/sitemap.xml` is served with default HTTP cache headers (`Cache-Control: public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400`).
+- **Collision Detection**: If a project contains a physical `public/sitemap.xml` file, `vue-ssr-lite` warns and yields to the static file unless explicitly configured.
 
 ---
 
 ## 10. `robots.txt` Endpoint (`/robots.txt`)
 
-`vue-ssr-lite` automatically serves `/robots.txt` with safe, standard defaults:
+### 10.1 Default Generation
 
-### Default Output
+`vue-ssr-lite` automatically serves `/robots.txt`:
 
 ```text
 User-agent: *
@@ -485,18 +450,17 @@ Allow: /
 Sitemap: https://builto.com/sitemap.xml
 ```
 
-### Principles
+### 10.2 Principles & Configuration
 
-- `robots.txt` is **not** an access control or authentication mechanism.
-- `vue-ssr-lite` does **not** automatically scrape route paths to create disallow lists.
-- Private routes are protected by access control and excluded from search engines via `meta.seo.index: false` (`noindex`).
-- Applications may explicitly declare custom disallow rules when desired:
+- `robots.txt` is **not** an authorization system.
+- `vue-ssr-lite` **never** scrapes private routes to publish disallow lists.
+- Private routes are protected via authentication and `meta.seo.index: false` (`noindex`).
+- Applications configure explicit disallow rules via `defineApplication`:
 
 ```ts
 export default defineApplication({
   root: App,
   routes,
-
   seo: {
     robots: {
       disallow: ['/internal-preview/'],
@@ -507,35 +471,66 @@ export default defineApplication({
 
 ---
 
-## 11. Runtime Configuration Transport: `usePublicConfig<T>()`
+## 11. Structured Data (JSON-LD)
 
-Server-resolved configuration values often need to be safely transferred to the browser during SSR hydration (such as API endpoints, public feature flags, and environment identifiers) without maintaining bespoke context boilerplate.
+- **Application Responsibility**: Declares schema content and domain meaning.
+- **Library Responsibility**: Structural validation (object/array verification), JSON-LD serialization, character escaping, script injection, and DOM synchronization.
 
-### Server-to-Client Transport Pipeline
+### Script Breakout Prevention
 
-```text
-SERVER
-process.env / config resolution
-         ↓
-SSR Request Context
-         ↓
-Safe serialization into HTML payload
-         ↓
-BROWSER
-Hydration payload restoration
-         ↓
-usePublicConfig<T>()
-```
-
-### Application Usage
-
-In `main.ts`:
+JSON-LD strings are sanitized against script injection:
+- `</script>` tags within JSON data are escaped to `\u003C/script\u003E`.
 
 ```ts
-export default defineApplication({
-  root: App,
-  routes,
+useSeo({
+  title: 'Builto Workspace',
+  structuredData: [
+    {
+      '@type': 'SoftwareApplication',
+      name: 'Builto',
+      applicationCategory: 'Productivity',
+      offers: {
+        '@type': 'Offer',
+        price: '0',
+      },
+    },
+  ],
+})
+```
 
+---
+
+## 12. Multi-Application & Custom-Domain Support
+
+`vue-ssr-lite` supports multi-tenant and multi-app deployments without global state contamination:
+
+1. **Request & Application Isolation**: SEO state, canonical origin, and sitemaps are scoped strictly per application runtime and per incoming request. No global mutable variables (`currentSeo`, `siteUrl`).
+2. **Custom-Domain Origin Resolver**: Platforms hosting dynamic user domains configure an origin resolver in `ssr.config.ts`:
+
+```ts
+import { defineSsrConfig } from 'vue-ssr-lite'
+
+export default defineSsrConfig({
+  resolveSiteUrl: async (req) => {
+    const host = req.headers['host']
+    const tenant = await lookupTenantByHost(host)
+    return tenant ? `https://${tenant.customDomain}` : 'https://builto.com'
+  },
+})
+```
+
+---
+
+## 13. Runtime Configuration Transport (`usePublicConfig<T>`)
+
+Safe server-to-client configuration transport without ad-hoc application wrappers:
+
+### In `ssr.config.ts` (Server Configuration)
+
+```ts
+import { defineSsrConfig } from 'vue-ssr-lite'
+
+export default defineSsrConfig({
   publicConfig: () => ({
     apiUrl: process.env.PUBLIC_API_URL || 'https://api.builto.com',
     environment: process.env.NODE_ENV,
@@ -543,7 +538,7 @@ export default defineApplication({
 })
 ```
 
-In any component or composable:
+### In Application Components (Universal)
 
 ```vue
 <script setup lang="ts">
@@ -555,107 +550,18 @@ interface AppConfig {
 }
 
 const config = usePublicConfig<AppConfig>()
-console.log('API URL:', config.apiUrl)
 </script>
 ```
 
 ---
 
-## 12. Internal SSR & SEO Pipeline
+## 14. Coexistence with `vlite3`
 
-```text
-SSR REQUEST LIFECYCLE
-Request
-   │
-   ▼
-vue-ssr-lite SsrApplicationRuntime
-   │
-   ├── Resolve application definition & routes
-   ├── Resolve trusted site URL (siteUrl / PUBLIC_URL)
-   ├── Create request & response contexts
-   ├── Initialize request-scoped SEO store
-   ├── Create SSR Vue app & router instance
-   ├── Navigate router to requested URL
-   │
-   ▼
-Vue Component Tree
-   │
-   └── Page setup() calls useSeo(...)
-           │
-           ▼
-     Updates request-scoped SEO store
-           │
-           ▼
-vue-ssr-lite Server Engine
-   │
-   ├── renderToString() executes
-   ├── Finalize SEO state (merge page > route > app > defaults)
-   ├── Generate <title>, <meta>, canonical <link>, OG, Twitter tags
-   ├── Serialize JSON-LD structured data
-   ├── Inject head tags into HTML template
-   ├── Serialize hydration payload (publicConfig, SEO state)
-   └── Return HTTP response with resolved status code
-
-
-CLIENT-SIDE NAVIGATION LIFECYCLE
-Hydration
-   │
-   ├── Vue hydrates server-rendered DOM
-   └── Restore initial SEO state
-   │
-   ▼
-User navigates to new route
-   │
-   ├── Vue Router resolves new page component
-   ├── Page setup() calls useSeo(...)
-   ├── SEO store updates for active route
-   └── DOM Head Synchronizer updates document.title, <meta>, canonical, and JSON-LD scripts
-```
-
----
-
-## 13. Relationship with `vlite3`
-
-`vue-ssr-lite` maintains complete independence from `vlite3`:
-
-```text
-        vue-ssr-lite (Standalone SSR + SEO primitives)
-              ▲
-              │ (optional integration / re-export)
-            vlite3 (UI components & SPA tools)
-```
-
-- `vue-ssr-lite` **never** imports or depends on `vlite3`.
-- `vlite3` may optionally re-export or wrap `useSeo` for convenience in SPA or UI-only environments.
-- Applications using `vue-ssr-lite` import SEO primitives directly:
-  ```ts
-  import { useSeo } from 'vue-ssr-lite'
-  ```
-
----
-
-## 14. When `ssr.config.ts` Is Needed
-
-`ssr.config.ts` is strictly reserved for infrastructure-level exceptions:
-
-```ts
-import { defineSsrConfig } from 'vue-ssr-lite'
-
-export default defineSsrConfig({
-  server: {
-    trustProxy: true,
-    port: 3000,
-  },
-})
-```
-
-`ssr.config.ts` should **never** contain:
-- SEO titles or descriptions
-- Sitemap XML logic
-- Application routes
-- Business logic or API adapters
-
-For standard projects, **no `ssr.config.ts` file is needed.**
+- **For `vue-ssr-lite` Applications**:  
+  Developers use `import { useSeo } from 'vue-ssr-lite'`. `vue-ssr-lite` is the sole authoritative head manager. No `vlite3` `<SeoProvider>` is mounted or used.
+- **For Standalone SPA `vlite3` Applications**:  
+  `vlite3` retains its existing SPA SEO system.
+- **No Competing Head Managers**: If both packages are installed, `vue-ssr-lite` takes precedence in SSR runtime; no secondary head manager is initialized.
 
 ---
 
@@ -666,135 +572,114 @@ For standard projects, **no `ssr.config.ts` file is needed.**
 | `createSSRApp()` / `createApp()` lifecycle | **OWNS** | — | — |
 | Request isolation & context management | **OWNS** | — | — |
 | `renderToString()` & hydration execution | **OWNS** | — | — |
-| Request-scoped & client-side SEO store | **OWNS** | — | — |
+| Scoped & reactive SEO store | **OWNS** | — | — |
 | `useSeo()` implementation | **OWNS** | — | Optional consumer |
-| Head generation & DOM head synchronization | **OWNS** | — | — |
-| Canonical URL assembly & path expansion | **OWNS** | — | — |
-| Safe origin resolution (`PUBLIC_URL` / `siteUrl`) | **OWNS** | — | — |
-| `/sitemap.xml` endpoint & XML serialization | **OWNS** | — | — |
+| Head reconciliation & deduplication | **OWNS** | — | — |
+| Canonical URL assembly & path normalization | **OWNS** | — | — |
+| Authoritative origin resolution (`PUBLIC_URL` / `siteUrl`) | **OWNS** | — | — |
 | Static route discovery for sitemap | **OWNS** | — | — |
-| Dynamic sitemap entries | — | **OWNS** | — |
+| Dynamic sitemap execution & endpoint | **OWNS** | **OWNS** (Data Provider) | — |
 | `/robots.txt` endpoint & standard formatting | **OWNS** | — | — |
-| HTTP response status code setting (404, etc.) | **OWNS** | — | — |
+| HTTP response status codes & 404 defaults | **OWNS** | — | — |
 | `usePublicConfig<T>()` transport & serialization | **OWNS** | — | — |
-| JSON-LD validation, serialization & insertion | **OWNS** | — | — |
-| Structured data content & business schemas | — | **OWNS** | Optional schema helpers |
+| JSON-LD structural validation, escaping & insertion | **OWNS** | — | — |
+| Structured data business schema content | — | **OWNS** | Optional schema helpers |
 | Page titles, descriptions, social images | — | **OWNS** | — |
 | Global site branding & default SEO | — | **OWNS** | — |
 | UI Component library | — | — | **OWNS** |
 
 ---
 
-## 16. Target Implementation in Builto Landing
+## 16. Phased Implementation Plan
 
-### 1. `src/main.ts`
+```text
+PHASE 1: Core SEO Types & Request/Client SEO Store
+├── Define universal SEO interfaces (Title, Meta, OpenGraph, Twitter, StructuredData, Robots)
+├── Implement request-scoped SEO store for SSR
+└── Implement reactive client-scoped SEO store
 
-```ts
-import { defineApplication } from 'vue-ssr-lite'
-import App from './App.vue'
-import { routes } from './routes'
+PHASE 2: useSeo() Lifecycle, Reactivity & Scoped Cleanup
+├── Implement useSeo() composable bound to getCurrentInstance()
+├── Implement automatic onUnmounted() contribution removal
+├── Add support for Ref, ComputedRef, and getter inputs
+└── Integrate with SSR async data settling (Suspense / async setup)
 
-export default defineApplication({
-  root: App,
-  routes,
+PHASE 3: SSR Head Finalization & Client Head Reconciliation
+├── Implement SSR head tag serializer with data-v-ssr-seo identity markers
+├── Implement browser DOM head reconciler with deterministic diffing
+└── Add JSON-LD script breakout protection (\u003C/script\u003E)
 
-  seo: {
-    siteName: 'Builto',
-    title: {
-      default: 'Builto',
-      template: '%s | Builto',
-    },
-    description:
-      'Create websites, documents, and organize your work in one workspace.',
-    image: '/assets/brand/social-card.png',
-  },
-})
-```
+PHASE 4: Authoritative Origin Resolution & Canonical Path Normalization
+├── Implement server-side siteUrl resolution (process.env.PUBLIC_URL fallback)
+├── Implement production fail-fast validator for missing siteUrl
+└── Implement canonical path normalizer (strip queries/hashes, trailing slash policy)
 
-### 2. `src/routes.ts`
+PHASE 5: Route Metadata Contracts (meta.seo, meta.ssr) & HTTP Statuses
+├── Add TypeScript module augmentation for vue-router RouteMeta
+├── Implement status code handler (setResponseStatus and meta.ssr.status)
+└── Connect HTTP 4xx/5xx statuses to automatic noindex defaults
 
-```ts
-import { RouteRecordRaw } from 'vue-router'
-import Home from './pages/Home.vue'
-import About from './pages/About.vue'
-import Pricing from './pages/Pricing.vue'
-import NotFound from './pages/NotFound.vue'
+PHASE 6: Static Sitemap & Robots.txt Infrastructure
+├── Implement static route discovery engine from Vue Router tree
+├── Implement XML sitemap serializer, caching headers & collision checks
+└── Implement /robots.txt endpoint with standard defaults and custom disallow rules
 
-export const routes: RouteRecordRaw[] = [
-  {
-    path: '/',
-    component: Home,
-  },
-  {
-    path: '/about',
-    component: About,
-  },
-  {
-    path: '/pricing',
-    component: Pricing,
-  },
-  {
-    path: '/:pathMatch(.*)*',
-    component: NotFound,
-    meta: {
-      ssr: { status: 404 },
-      seo: { index: false },
-    },
-  },
-]
-```
+PHASE 7: Server-Only Dynamic Sitemap Extension
+├── Implement defineSitemap helper in vue-ssr-lite/server
+└── Connect dynamic sitemap provider to /sitemap.xml endpoint
 
-### 3. `src/pages/About.vue`
+PHASE 8: usePublicConfig<T>() Transport Cleanup
+├── Implement server-to-client configuration serializer
+└── Expose universal usePublicConfig<T>() composable
 
-```vue
-<script setup lang="ts">
-import { useSeo } from 'vue-ssr-lite'
+PHASE 9: vlite3 Coexistence & Package Independence
+├── Verify clean separation: vue-ssr-lite has zero vlite3 dependencies
+└── Ensure single authoritative head manager when vlite3 components are imported
 
-useSeo({
-  title: 'About',
-  description: 'Learn about Builto and our mission to simplify productivity.',
-  canonical: '/about',
-})
-</script>
+PHASE 10: Builto Landing Migration & Cleanup
+├── Update Builto Landing to use new defineApplication() and useSeo()
+└── Delete legacy files (LandingSsrContext, PublicSsrSeo, PublicSiteOrigin, etc.)
 
-<template>
-  <div class="about-page">
-    <h1>About Builto</h1>
-    <p>Builto is an all-in-one workspace designed for creators and teams.</p>
-  </div>
-</template>
-```
-
-### 4. `src/pages/NotFound.vue`
-
-```vue
-<script setup lang="ts">
-import { useSeo } from 'vue-ssr-lite'
-
-useSeo({
-  title: 'Page Not Found',
-})
-</script>
-
-<template>
-  <div class="not-found-page">
-    <h1>404 — Page Not Found</h1>
-    <router-link to="/">Return Home</router-link>
-  </div>
-</template>
+PHASE 11: Comprehensive Test Suite & Production Verification
+└── Execute full verification test matrix across SSR, Client, Sitemap, and Security
 ```
 
 ---
 
-## 17. Summary Checklist for `vue-ssr-lite` Implementation
+## 17. Validation & Verification Test Matrix
 
-- [ ] **Core SSR**: Standalone request-isolated `renderToString` and browser hydration pipeline.
-- [ ] **SEO Store**: Request-scoped (SSR) and reactive (browser) SEO state management.
-- [ ] **`useSeo()` Composable**: Universal head and meta tag management with automatic property propagation (OG/Twitter cards).
-- [ ] **Origin Resolution**: Authoritative origin determination via `PUBLIC_URL` / `seo.siteUrl`, with dev localhost fallback and protection against raw `Host` header poisoning.
-- [ ] **Generic Metadata**: Processing of `meta.seo` and `meta.ssr` namespaces; status code setting via `setResponseStatus` and route metadata.
-- [ ] **Sitemap Endpoint**: Automatic static route discovery, dynamic `sitemap.entries()` hook, and XML serialization at `/sitemap.xml`.
-- [ ] **Robots Endpoint**: Standard `/robots.txt` generation with sitemap reference and optional custom disallow configuration.
-- [ ] **Public Config**: Type-safe server-to-client configuration transport via `usePublicConfig<T>()`.
-- [ ] **Structured Data Engine**: JSON-LD serialization, deduplication, and insertion.
-- [ ] **Zero Framework Coupling**: Independent from `vlite3` without intermediary packages.
+| Area | Test Scenario | Expected Outcome |
+|---|---|---|
+| **SSR** | Concurrent requests with different routes | Request A and Request B do not leak or share SEO state |
+| **SSR** | Asynchronous page data resolution | Final `<head>` contains resolved title, not `undefined` |
+| **SSR** | HTTP 404 Not Found route | Response status is 404; `<meta name="robots" content="noindex, follow">` present |
+| **SSR** | Production canonical resolution | Emits authoritative canonical URL matching `PUBLIC_URL` / `siteUrl` |
+| **SSR** | Production missing `siteUrl` | Fails fast with clear actionable error; never emits `localhost` |
+| **Client** | Route navigation (Page A ➔ Page B) | Page A's SEO is discarded; Page B's SEO applied to DOM |
+| **Client** | Component unmount (Modal with `useSeo`) | Unmounting modal restores underlying page SEO state |
+| **Client** | Hydration tag reconciliation | Reconciles existing SSR tags; zero duplicate `<meta>`/`<link>` tags created |
+| **Client** | Browser Back/Forward navigation | SEO state accurately reflects active history state |
+| **Sitemap** | Static nested routes | Concatenated paths (`/docs/intro`) included in sitemap |
+| **Sitemap** | Route exclusions | Redirects, aliases, catch-alls, and `meta.seo.index: false` excluded |
+| **Sitemap** | Server-only dynamic entries | `src/sitemap.ts` dynamic URLs merged into `/sitemap.xml` |
+| **Robots** | `/robots.txt` endpoint | Returns valid `robots.txt` referencing `/sitemap.xml` |
+| **Security** | Spoofed `Host` header | Request canonical URL remains authoritative; does not reflect spoofed host |
+| **Security** | JSON-LD script breakout | `</script>` tags in JSON-LD escaped to `\u003C/script\u003E` |
+| **Multi-App** | Multi-tenant isolation | App A and App B maintain completely isolated origins and sitemaps |
+| **Production**| Full build & start (`builto-landing`) | Production build runs with zero SSR glue code |
+
+---
+
+## 18. Builto Landing Target End-State & Acceptance Criteria
+
+### Acceptance Criteria Checklist
+
+- [ ] `src/LandingSsrContext.ts` is deleted.
+- [ ] `src/modules/Public/seo/PublicSsrSeo.ts` is deleted.
+- [ ] `src/modules/Public/utils/PublicSiteOrigin.ts` is deleted.
+- [ ] `src/server/LandingSeoEndpoints.ts` is deleted.
+- [ ] `src/config/LandingPublicRuntime.ts` is deleted (or reduced to non-SSR app constants).
+- [ ] `App.vue` contains no `<SeoProvider>` or custom head resolver.
+- [ ] `src/main.ts` contains only `defineApplication({ root: App, routes, seo: { siteName: 'Builto' } })`.
+- [ ] Pages use only `import { useSeo } from 'vue-ssr-lite'`.
+- [ ] SSR HTML, hydration, `/sitemap.xml`, and `/robots.txt` function out of the box.
