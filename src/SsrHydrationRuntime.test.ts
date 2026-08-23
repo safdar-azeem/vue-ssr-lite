@@ -74,7 +74,7 @@ describe('generic hydration lifecycle', () => {
 
     const rendered = await renderSsrApplication({
       id: 'demo-app',
-      rootComponent: Root,
+      root: Root,
       install: ({ app }) => {
         app.use(demo)
       },
@@ -127,7 +127,7 @@ describe('generic hydration lifecycle', () => {
 
       await hydrateSsrApplication({
         id: 'demo-app',
-        rootComponent: Root,
+        root: Root,
         install: ({ app }) => {
           app.use(demo)
         },
