@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent, h, inject, onServerPrefetch, ref } from 'vue'
-import { defineSsrApplication } from './index'
+import { defineApplication } from './index'
 import { SSR_REQUEST_RESOLUTION } from './SsrRequestResolution'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
@@ -25,9 +25,9 @@ const createDeferredStore = (loadDelayMs: number) => {
 
 describe('renderSsrApplication resolution passes', () => {
   it('completes a fully resolvable page in a single pass', async () => {
-    const application = defineSsrApplication({
+    const application = defineApplication({
       id: 'one-pass',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup: () => () => h('main', 'ready'),
       }),
     })
@@ -38,9 +38,9 @@ describe('renderSsrApplication resolution passes', () => {
 
   it('re-renders when a plugin resolves work after the first pass', async () => {
     const store = createDeferredStore(5)
-    const application = defineSsrApplication({
+    const application = defineApplication({
       id: 'resolve-later',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup() {
           const resolution = inject(SSR_REQUEST_RESOLUTION)!
           if (resolution.server && !store.state.loaded) {
@@ -62,9 +62,9 @@ describe('renderSsrApplication resolution passes', () => {
   })
 
   it('is bounded: never exceeds maxResolutionPasses when work never settles', async () => {
-    const application = defineSsrApplication({
+    const application = defineApplication({
       id: 'never-settles',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup() {
           const resolution = inject(SSR_REQUEST_RESOLUTION)!
           if (resolution.server) {
@@ -87,9 +87,9 @@ describe('renderSsrApplication resolution passes', () => {
 
 describe('ssrWatch under server render', () => {
   it('is active during SSR: reacts to state settled in onServerPrefetch', async () => {
-    const application = defineSsrApplication({
+    const application = defineApplication({
       id: 'ssr-watch',
-      rootComponent: defineComponent({
+      root: defineComponent({
         setup() {
           const source = ref(0)
           const captured = ref('initial')
