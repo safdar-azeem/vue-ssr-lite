@@ -313,7 +313,7 @@ export const normalizeSsrConfig = (
       'responseCache',
       'publicConfig',
     ] as const
-    const configRecord = config as Record<string, unknown>
+    const configRecord = config as unknown as Record<string, unknown>
     const mixedKey = singleApplicationKeys.find(
       (key) => configRecord[key] !== undefined
     )
