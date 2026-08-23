@@ -51,12 +51,12 @@ describe('parseSsrCliArguments', () => {
     )
   })
 
-  it('dev still requires ssr.config discovery', async () => {
+  it('dev accepts a convention-based project without ssr.config', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-dev-'))
 
-    await expect(parseSsrCliArguments(['dev', '--root', root])).rejects.toThrow(
-      /could not find an SSR config/
-    )
+    const options = await parseSsrCliArguments(['dev', '--root', root])
+    expect(options.command).toBe('dev')
+    expect(options.config).toBeUndefined()
   })
 
   it('build resolves an existing ssr.config', async () => {
