@@ -3,9 +3,9 @@ import { createSsrApplication } from './SsrApplicationRuntime'
 import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
 import type {
-  SsrApplicationDefinition,
   SsrHydrationState,
   SsrRenderRequest,
+  SsrResolvedApplicationDefinition,
 } from './SsrRuntimeTypes'
 
 export interface SsrHydrateOptions {
@@ -67,7 +67,7 @@ const readSpaDomainState = <TPublicConfig>(): {
 }
 
 export const hydrateSsrApplication = async (
-  definition: SsrApplicationDefinition<any, any, any>,
+  definition: SsrResolvedApplicationDefinition<any, any, any>,
   options: SsrHydrateOptions = {}
 ): Promise<void> => {
   const stateElementId =
@@ -107,7 +107,7 @@ export const hydrateSsrApplication = async (
       await created.router.isReady()
     }
 
-    created.app.mount(options.mountSelector ?? definition.mountSelector ?? '#app')
+    created.app.mount(options.mountSelector ?? '#app')
     document.head
       .querySelectorAll(
         options.removeHeadSelector ?? '[data-vue-ssr-lite-head]'
@@ -126,7 +126,7 @@ export const hydrateSsrApplication = async (
 }
 
 /**
- * Mounts an {@link SsrApplicationDefinition} as a pure client-side SPA.
+ * Mounts a resolved universal application as a pure client-side SPA.
  * Domain context is restored from the server-injected `#vue-ssr-lite-domain`
  * payload so SPA and SSR share the same library-owned resolution.
  */
@@ -135,7 +135,7 @@ export const mountSpaApplication = async <
   TPublicConfig = unknown,
   TExtension = unknown,
 >(
-  definition: SsrApplicationDefinition<
+  definition: SsrResolvedApplicationDefinition<
     TApplicationState,
     TPublicConfig,
     TExtension
@@ -175,7 +175,7 @@ export const mountSpaApplication = async <
     }
     const app = created.app
     const activeCreated = created
-    app.mount(options.mountSelector ?? definition.mountSelector ?? '#app')
+    app.mount(options.mountSelector ?? '#app')
     document.getElementById('vue-ssr-lite-domain')?.remove()
     return {
       app,
