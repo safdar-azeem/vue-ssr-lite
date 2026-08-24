@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
-import { defineApplication } from './index'
+import { defineApplication, useSeo } from './index'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { renderSsrApplication } from './SsrRenderRuntime'
 import { createTestRenderRequest } from './SsrTestFixtures'
@@ -9,7 +9,7 @@ import { createTestRenderRequest } from './SsrTestFixtures'
 const Root = defineComponent({
   setup() {
     const context = useSsrRequestContext<{ value: string }, { label: string }>()
-    context.head.value = { title: context.publicConfig.label }
+    useSeo({ title: context.publicConfig.label })
     return () => h('main', `${context.host}:${context.state.value}`)
   },
 })
@@ -20,9 +20,8 @@ const application = defineApplication({
   root: defineComponent({ setup: () => () => h(RouterView) }),
   routes,
   createInitialState: () => ({ value: '' }),
-  createExtension(context) {
+  install({ context }) {
     context.state.value = context.host
-    return { requestId: context.request.requestId }
   },
 })
 
@@ -42,8 +41,8 @@ describe('SSR request isolation', () => {
     expect(right.hydrationState.application.value).toBe('right.test')
     expect(left.html).toContain('left.test:left.test')
     expect(right.html).toContain('right.test:right.test')
-    expect(left.head?.title).toBe('left.test')
-    expect(right.head?.title).toBe('right.test')
+    expect(left.head.title).toBe('left.test')
+    expect(right.head.title).toBe('right.test')
     expect(left.hydrationState).not.toBe(right.hydrationState)
     expect(left.metrics.requestId).toBe('left.test')
     expect(right.metrics.requestId).toBe('right.test')
