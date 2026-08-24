@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { serializeJsonLd } from '../SsrManagedHead'
 import {
   injectSsrHtml,
   prepareSsrHtmlTemplate,
@@ -14,8 +15,22 @@ describe('SSR HTML runtime', () => {
       html: '<main>Hello</main>',
       teleports: '<div>Teleport</div>',
       head: {
-        title: '<Unsafe>',
-        jsonLd: [{ value: '</script><script>alert(1)</script>' }],
+        tags: [
+          {
+            key: 'title',
+            tag: 'title',
+            attrs: {},
+            textContent: '<Unsafe>',
+          },
+          {
+            key: 'json-ld',
+            tag: 'script',
+            attrs: { type: 'application/ld+json' },
+            textContent: serializeJsonLd([
+              { value: '</script><script>alert(1)</script>' },
+            ]),
+          },
+        ],
       },
       state: {
         version: 1,
@@ -55,7 +70,10 @@ describe('SSR HTML runtime', () => {
       applicationId: 'public',
       html: '<main>Ready</main>',
       teleports: '',
-      head: { htmlAttributes: { lang: 'ur', dir: 'rtl' } },
+      head: {
+        tags: [],
+        htmlAttributes: { lang: 'ur', dir: 'rtl' },
+      },
       state: {
         version: 1,
         applicationId: 'public',
