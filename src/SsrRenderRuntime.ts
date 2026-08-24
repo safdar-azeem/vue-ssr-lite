@@ -2,6 +2,7 @@ import { renderToString } from 'vue/server-renderer'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import { createSsrResolutionController } from './SsrRequestResolution'
 import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
+import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
 import type {
   SsrResolvedApplicationDefinition,
@@ -46,12 +47,10 @@ const reportDiagnostics = (
 export const renderSsrApplication = async <
   TApplicationState extends Record<string, any> = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 >(
   definition: SsrResolvedApplicationDefinition<
     TApplicationState,
-    TPublicConfig,
-    TExtension
+    TPublicConfig
   >,
   request: SsrRenderRequest<TPublicConfig>,
   options: SsrRenderOptions = {}
@@ -71,7 +70,7 @@ export const renderSsrApplication = async <
   let renderedAt = startedAt
   let carried: Record<string, unknown> | undefined
   let created:
-    | SsrCreatedApplication<TApplicationState, TPublicConfig, TExtension>
+    | SsrCreatedApplication<TApplicationState, TPublicConfig>
     | undefined
   let html = ''
   let teleports = ''
@@ -111,9 +110,10 @@ export const renderSsrApplication = async <
         const url = new URL(request.url)
         await created.router.push(`${url.pathname}${url.search}${url.hash}`)
         await created.router.isReady()
-        if (created.router.currentRoute.value.matched.length === 0) {
-          created.context.response.statusCode = 404
-        }
+        resolveResponseStatusForRoute(
+          created.context.response,
+          created.router.currentRoute.value
+        )
       }
       if (pass === 0) routeReadyAt = now()
 
@@ -148,9 +148,7 @@ export const renderSsrApplication = async <
 
     if (!created) throw new Error('SSR render produced no application instance.')
 
-    const head =
-      (await definition.resolveHead?.(created.context)) ??
-      created.context.head.value
+    const head = created.managedHead.collect()
 
     if (diagnosticsEnabled) {
       reportDiagnostics(
@@ -175,6 +173,7 @@ export const renderSsrApplication = async <
       publicConfig: request.publicConfig,
       domain: request.domain,
       application: created.context.state,
+      siteOrigin: created.context.siteOrigin,
       plugins: created.hydration.collect(),
     }
     const stateBytes = byteLength(serializeSsrState(hydrationState))
