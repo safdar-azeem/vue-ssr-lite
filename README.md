@@ -1,85 +1,93 @@
 # vue-ssr-lite
 
-Convention-first SSR for Vue 3 and Vite that scales from one normal Vue app to
-many independent applications in one repository. A website, admin, dashboard,
-shop, or customer portal can each choose SSR or SPA and be selected by domain
-or subdomain—without separate repositories or manual server/browser bootstraps.
-`vue-ssr-lite` owns the unified runtime, host routing, router history,
-hydration, request isolation, and Node lifecycle while your applications remain
-normal Vue applications.
+A lightweight, convention-first Server-Side Rendering (SSR) runtime for Vue 3 and Vite.
 
-## Install
+---
 
-```bash
-yarn add vue-ssr-lite vue-router
-```
-
-or:
+## 📦 Installation
 
 ```bash
 npm install vue-ssr-lite vue-router
 ```
 
-`vue-ssr-lite` is designed to be added to an existing Vue 3 + Vue Router + Vite
-application. Vue, Vue Router, and Vite are shared framework peer dependencies
-supplied by the host; no separate `@vue/server-renderer` installation is
-required. `vue-ssr-lite` owns router creation, history selection, installation,
-SSR route resolution, hydration, and navigation lifecycle, but it deliberately
-uses the host's Vue Router package instance. This singleton contract keeps Vue
-injection context and Vue Router's module-scoped injection keys identical in
-host components and the SSR runtime. Vite `resolve.dedupe` remains an additional
-bundler safeguard, not a substitute for peer dependency ownership.
+---
 
-Requires Node.js 20 or newer, Vue 3.3+, Vue Router 4, and Vite 7.
+## 🚀 Setup
 
-## One repo, one app or many
+### 1. Vite Plugin
 
-Start with the zero-config path when the repository contains one application.
-When a product grows, add `applications` to keep multiple independently routed
-Vue applications in the same codebase:
+Add `vueSsrLite()` to your `vite.config.ts`:
 
-```text
-my-platform/
-├── src/
-│   ├── website/main.ts       → example.com       → SSR
-│   ├── admin/main.ts         → admin.example.com → SPA
-│   ├── shop/main.ts          → shop.example.com  → SSR
-│   └── dashboard/main.ts     → app.example.com   → SPA
-├── index.html
-├── ssr.config.ts
-├── vite.config.ts
-└── package.json
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { vueSsrLite } from 'vue-ssr-lite/vite'
+
+export default defineConfig({
+  plugins: [vue(), vueSsrLite()],
+})
 ```
 
-One unified `vue-ssr-lite` runtime/server selects the application from the
-incoming host; different subdomains do not require separate repositories or
-separate SSR implementations:
+### 2. Package Scripts
 
-```text
-one repository → vue-ssr-lite runtime
-  example.com       → website   → SSR
-  admin.example.com → admin     → SPA
-  shop.example.com  → shop      → SSR
-  app.example.com   → dashboard → SPA
+Add the SSR scripts to your `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "vue-ssr-lite dev",
+    "build": "vue-ssr-lite build",
+    "start": "vue-ssr-lite start"
+  }
+}
 ```
 
-## Zero-config single application
+### 3. HTML Entry
 
-Start with the structure Vite already gives you:
+Keep your standard Vite `index.html` (no changes needed):
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Vue App</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+```
+
+---
+
+## 📁 Project Structure
 
 ```text
 my-vue-app/
 ├── src/
-│   ├── main.ts
-│   ├── App.vue
+│   ├── components/
 │   ├── router/
-│   └── ...
-├── index.html
-├── vite.config.ts
+│   │   └── routes.ts      # Route definitions
+│   ├── views/
+│   ├── App.vue            # Root component
+│   └── main.ts            # Application definition (defineApplication)
+├── index.html             # Standard Vite HTML
+├── vite.config.ts         # Vite configuration with vueSsrLite plugin
+├── ssr.config.ts          # (Optional) Server configuration
 └── package.json
 ```
 
-Rewrite the existing browser bootstrap as a universal application definition:
+---
+
+## ⚙️ Configuration
+
+### 1. Configure `src/main.ts`
+
+Replace `createApp().mount()` with `defineApplication()`:
 
 ```ts
 // src/main.ts
@@ -93,160 +101,126 @@ export default defineApplication({
 })
 ```
 
-The application definition describes the Vue application. The runtime chooses
-`createSSRApp`, request-safe memory history, web history, hydration, and plugin
-installation for the active environment. Do not call `createApp().mount()` in
-this file.
+> **Migrating from `app.use(router)`:** Pass your route records directly to `defineApplication({ routes })`. `vue-ssr-lite` creates the router automatically using memory history on the server and web history in the browser. *(For custom `createRouter()` options, see [Custom Router Factory](#custom-router-factory) below).*
 
-The normal Vite integration is one plugin line:
+> **Plugins:** If your application uses Pinia or other stateful plugins, return them from a factory function so each server request gets an isolated instance:
+> ```ts
+> plugins: () => [
+>   createPinia(),
+> ],
+> ```
 
-```ts
-// vite.config.ts
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-import { vueSsrLite } from 'vue-ssr-lite/vite'
+> **Optional `install()` hook:** Need `app.component()`, `app.directive()`, `app.provide()`, or navigation guards? Add the optional hook:
+> ```ts
+> install({ app, router, server }) {
+>   app.component('MyHeader', MyHeader)
+>   app.provide('apiUrl', 'https://api.example.com')
+> }
+> ```
 
-export default defineConfig({
-  plugins: [vue(), vueSsrLite()],
-})
-```
-
-There is no `ssr.config.ts`, `app.ts`, `entry-client.ts`, `entry-server.ts`,
-`site.html`, duplicate application ID, manual hydration, or explicit domain
-configuration in this path. Add the normal lifecycle scripts:
-
-```json
-{
-  "scripts": {
-    "dev": "vue-ssr-lite dev",
-    "build": "vue-ssr-lite build",
-    "start": "vue-ssr-lite start"
-  }
-}
-```
-
-The defaults are:
-
-| Concern | Convention |
-| --- | --- |
-| Application | `./src/main.ts` |
-| HTML template | `./index.html` |
-| Mount target | `#app` |
-| Render mode | `ssr` |
-| Single-app host | incoming `Host` header (`*`) |
-| Server port | `PORT`, then the library default |
-| Runtime role | `unified` |
-
-## Existing `index.html` stays yours
-
-Keep the existing Vite HTML, including metadata, favicon links, styles,
-analytics, verification tags, and unrelated module scripts:
-
-```html
-<body>
-  <div id="app"></div>
-  <script type="module" src="/src/main.ts"></script>
-  <script type="module" src="/analytics.ts"></script>
-</body>
-```
-
-The plugin replaces only the configured application bootstrap and preserves the
-other module scripts. It adds the generated hydration entry and the internal
-SSR markers without requiring a second HTML file.
-
-## Optional `ssr.config.ts` overrides
-
-Configuration is an override layer. Unspecified values continue to use the
-conventions above.
-
-Custom application entry:
+### 2. (Optional) Server Configuration `ssr.config.ts`
 
 ```ts
+// ssr.config.ts
 import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
-  app: './src/platform/main.ts',
-})
-```
-
-Custom template or mount target:
-
-```ts
-export default defineSsrConfig({
-  template: './website.html',
-  mount: '#website',
-})
-```
-
-Flat advanced single-app options stay flat:
-
-```ts
-export default defineSsrConfig({
   server: {
+    port: 3000,
     trustProxy: true,
   },
   publicConfig: {
-    apiUrl: process.env.API_URL,
-  },
-  cookies: {
-    allow: ['session'],
+    apiUrl: process.env.API_URL || 'https://api.example.com',
   },
 })
 ```
 
-Do not put single-application fields beside `applications`. Mixed configuration
-is rejected early; move the field into the relevant application entry instead.
+---
 
-## Plugins and advanced routers
+## 💡 How to Use
 
-Use a plugin factory for stateful integrations so each SSR request receives a
-fresh Pinia, i18n, Apollo, or other request-sensitive instance:
+### 1. Server Data Fetching
 
-```ts
-export default defineApplication({
-  root: App,
-  routes,
-  plugins: () => [
-    createPinia(),
-    createI18n(),
-    createApollo(),
-  ],
+Use Vue's standard `onServerPrefetch()` hook to resolve asynchronous data before the SSR HTML is rendered. Data that needs to hydrate on the client should be managed by a store or data-fetching integration that supports serialization.
+
+### 2. Reactive SEO & Head Tags (`useSeo`)
+
+```vue
+<!-- src/views/ProductView.vue -->
+<script setup lang="ts">
+import { useSeo } from 'vue-ssr-lite'
+
+useSeo({
+  title: 'Wireless Headphones',
+  description: 'High quality audio product.',
 })
+</script>
 ```
 
-Stateless global-safe plugin arrays remain supported. For mature router setups,
-the library supplies the environment-appropriate history while the application
-keeps ownership of router options. Vue Router remains a direct host dependency
-for both this factory and the simpler `routes` API; it is never supplied as a
-private transitive framework copy by `vue-ssr-lite`:
+> Canonical URLs and social metadata can be derived from application SEO configuration or passed directly to `useSeo()`. Reactive titles (`title: computed(...)`) and Open Graph objects are also supported.
+
+### 3. HTTP Status Codes & 404 Pages (`setResponseStatus`)
+
+```vue
+<!-- src/views/NotFound.vue -->
+<script setup lang="ts">
+import { setResponseStatus, useSeo } from 'vue-ssr-lite'
+
+setResponseStatus(404)
+
+useSeo({
+  title: '404 - Page Not Found',
+})
+</script>
+
+<template>
+  <h1>404 - Page Not Found</h1>
+</template>
+```
+
+### 4. Runtime Helpers
+
+```vue
+<script setup lang="ts">
+import { usePublicConfig, useSiteOrigin } from 'vue-ssr-lite'
+
+const config = usePublicConfig<{ apiUrl: string }>()
+const siteOrigin = useSiteOrigin() // e.g. "https://example.com"
+</script>
+```
+
+---
+
+## 🚀 Advanced Configuration
+
+### Custom Router Factory
+
+If your application requires custom `createRouter()` options (e.g. scroll behavior or other custom createRouter options), use the `router` factory instead of `routes`:
 
 ```ts
+// src/main.ts
+import { defineApplication } from 'vue-ssr-lite'
 import { createRouter } from 'vue-router'
+import App from './App.vue'
+import routes from './router/routes'
 
 export default defineApplication({
   root: App,
-  router: ({ history }) => createRouter({
-    history,
-    routes,
-    scrollBehavior,
-  }),
+  router: ({ history }) =>
+    createRouter({
+      history,
+      routes,
+      scrollBehavior: (to, from, savedPosition) => savedPosition || { top: 0 },
+    }),
 })
 ```
 
-`routes` and `router` are mutually exclusive. Router-less applications do not
-create Vue Router history at all.
+### Multiple Applications (Monorepo)
 
-## Multi-application projects
-
-Multi-app mode is for products where several Vue applications live in the same
-repository. They can share components, packages, types, services, and
-infrastructure while keeping independent roots, routes, rendering modes,
-templates, and host routing. Introduce `applications` only when there are
-actually multiple applications; a single app does not need this configuration.
-Each object key is the canonical application ID; do not repeat it in
-`src/*/main.ts`.
+Run multiple independent applications (SSR or SPA) from one repository, automatically routed by domain or subdomain:
 
 ```ts
+// ssr.config.ts
 import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
@@ -254,82 +228,29 @@ export default defineSsrConfig({
     website: {
       app: './src/website/main.ts',
       host: 'example.com',
+      render: 'ssr',
     },
     admin: {
       app: './src/admin/main.ts',
-      render: 'spa',
       host: 'admin.example.com',
-    },
-    shop: {
-      app: './src/shop/main.ts',
-      host: 'shop.example.com',
-    },
-    dashboard: {
-      app: './src/dashboard/main.ts',
-      render: 'spa',
-      host: 'app.example.com',
+      render: 'spa', // Client-only SPA
     },
   },
 })
 ```
 
-Omitted `render` means SSR, so `website` and `shop` are SSR applications while
-`admin` and `dashboard` are SPAs. Rendering mode belongs to each application;
-one SPA does not change the mode of the others. Each application module
-default-exports `defineApplication(...)`:
+---
 
-```ts
-// src/website/main.ts
-import { defineApplication } from 'vue-ssr-lite'
-import App from './App.vue'
+## 📦 Package Exports
 
-export default defineApplication({
-  root: App,
-})
-```
+| Import | Exports |
+| :--- | :--- |
+| `vue-ssr-lite` | `defineApplication`, `useSeo`, `usePublicConfig`, `useSiteOrigin`, `setResponseStatus`, `defineExtension` |
+| `vue-ssr-lite/vite` | `vueSsrLite` |
+| `vue-ssr-lite/server` | `defineSsrConfig`, `useSsrDomain`, `useSsrRequestContext`, `defineSitemap` |
 
-For application host routing, use exact hosts such as `example.com`,
-subdomains such as `admin.example.com`, wildcard hosts such as
-`*.shop.example.com`, or the advanced `domain` options. Host specificity
-determines the winner; duplicate ownership and ambiguous routing fail during
-startup.
-
-## Advanced capabilities
-
-The normalized runtime still supports roles, domains and subdomains,
-`publicConfig`, cookies, endpoints, response caching, readiness probes,
-diagnostics, metrics, redirects, status codes, and proxy-aware host handling.
-These belong in optional configuration and application code rather than in the
-normal consumer bootstrap.
-
-Request context and domain context are available to advanced integrations:
-
-```ts
-import { useSsrDomain, useSsrRequestContext } from 'vue-ssr-lite/server'
-
-const domain = useSsrDomain()
-const request = useSsrRequestContext()
-```
-
-`publicConfig` is opaque and browser-safe; validate API URLs and integration
-details in the consuming application or plugin.
-
-## Failure messages
-
-Convention discovery fails early with actionable guidance when `src/main.ts`,
-`index.html`, or the configured mount target is missing. The compiler also
-reports invalid application exports, mixed single-/multi-app configuration, and
-unresolved multi-app host routing before the server handles traffic.
-
-## Package entry points
-
-| Import | Purpose |
-| --- | --- |
-| `vue-ssr-lite` | Universal application APIs: `defineApplication`, `defineExtension`, `useSeo`, `usePublicConfig`, `useSiteOrigin`, `setResponseStatus` |
-| `vue-ssr-lite/client` | Internal browser hydration and SPA mounting |
-| `vue-ssr-lite/server` | Server-only configuration and runtime: `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext`, domain context, managed server, compilation, host matching, endpoints |
-| `vue-ssr-lite/vite` | Vite HTML and generated client/server entry integration |
+---
 
 ## License
 
-MIT
+[MIT](LICENSE) © [Safdar Azeem](https://github.com/safdar-azeem)
