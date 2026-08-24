@@ -93,7 +93,8 @@ describe('generic hydration lifecycle', () => {
     // hydration path needs directly.
     const dom = await import('jsdom')
     const { window } = new dom.JSDOM(
-      '<!doctype html><html><body><div id="app"><main>prefetched-value</main></div></body></html>'
+      '<!doctype html><html><body><div id="app"><main>prefetched-value</main></div></body></html>',
+      { url: 'https://ex.test/' }
     )
     const previous = {
       window: globalThis.window,
@@ -111,6 +112,7 @@ describe('generic hydration lifecycle', () => {
         applicationId: 'demo-app',
         publicConfig: {},
         domain: createTestDomain('demo.test'),
+        siteOrigin: 'https://ex.test',
         application: {},
         plugins: { demo: { value: 'prefetched-value' } },
       })
