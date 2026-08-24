@@ -32,6 +32,10 @@ export interface SsrVitePluginOptions {
   ssrNoExternal?: (string | RegExp)[]
 }
 
+// Vue and Vue Router are host-owned peers: that package contract is the
+// singleton guarantee. Dedupe is still useful defense-in-depth for linked
+// workspaces and Vite's client/SSR module graphs, but must not be the ownership
+// mechanism.
 const FRAMEWORK_DEDUPE = [
   'vue',
   'vue-router',
@@ -153,6 +157,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
         },
         ssr: {
+          // Keep the published runtime on its intentional Node package boundary.
+          // Its Vue and Vue Router imports resolve through host-owned peers, so
+          // externalization no longer creates a private framework identity.
           external: ['vue-ssr-lite'],
           noExternal: [...new Set(options.ssrNoExternal ?? [])],
         },
