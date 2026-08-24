@@ -1,12 +1,11 @@
 import { renderToString } from 'vue/server-renderer'
 import { defineComponent, h, inject, type InjectionKey, type Plugin } from 'vue'
 import { describe, expect, it } from 'vitest'
+import { createSsrApplication } from './SsrApplicationRuntime'
 import {
-  createSsrApplication,
-  SSR_REQUEST_CONTEXT as PUBLIC_REQUEST_CONTEXT,
+  SSR_REQUEST_CONTEXT as MODULE_REQUEST_CONTEXT,
   useSsrRequestContext,
-} from './index'
-import { SSR_REQUEST_CONTEXT as MODULE_REQUEST_CONTEXT } from './SsrRequestContext'
+} from './SsrRequestContext'
 import type { SsrRequestContext } from './SsrRuntimeTypes'
 import { createTestRenderRequest } from './SsrTestFixtures'
 
@@ -16,7 +15,7 @@ const REQUEST_CONTEXT_SYMBOL_KEY = 'vue-ssr:request-context'
 // derives the key independently instead of importing the package's value.
 const COMPATIBLE_REQUEST_CONTEXT = Symbol.for(
   REQUEST_CONTEXT_SYMBOL_KEY
-) as InjectionKey<SsrRequestContext<any, any, any>>
+) as InjectionKey<SsrRequestContext<any, any>>
 
 const request = createTestRenderRequest('identity.test', {
   requestId: 'request-context-regression',
@@ -26,15 +25,14 @@ const request = createTestRenderRequest('identity.test', {
 
 describe('SSR request context identity', () => {
   it('uses one globally registered identity across public and compatible module entries', () => {
-    expect(Symbol.keyFor(PUBLIC_REQUEST_CONTEXT)).toBe(
+    expect(Symbol.keyFor(MODULE_REQUEST_CONTEXT)).toBe(
       REQUEST_CONTEXT_SYMBOL_KEY
     )
-    expect(MODULE_REQUEST_CONTEXT).toBe(PUBLIC_REQUEST_CONTEXT)
-    expect(COMPATIBLE_REQUEST_CONTEXT).toBe(PUBLIC_REQUEST_CONTEXT)
+    expect(COMPATIBLE_REQUEST_CONTEXT).toBe(MODULE_REQUEST_CONTEXT)
   })
 
   it('installs the exact request-specific context before root setup renders', async () => {
-    let received: SsrRequestContext<any, any, any> | undefined
+    let received: SsrRequestContext<any, any> | undefined
     const Root = defineComponent({
       setup() {
         received = useSsrRequestContext()
@@ -57,10 +55,10 @@ describe('SSR request context identity', () => {
   })
 
   it('installs generic application plugins after request context and before root setup', async () => {
-    let pluginContext: SsrRequestContext<any, any, any> | undefined
+    let pluginContext: SsrRequestContext<any, any> | undefined
     const contextPlugin: Plugin = {
       install(app) {
-        pluginContext = app.runWithContext(() => inject(PUBLIC_REQUEST_CONTEXT))
+        pluginContext = app.runWithContext(() => inject(MODULE_REQUEST_CONTEXT))
       },
     }
     const Root = defineComponent({
@@ -89,7 +87,7 @@ describe('SSR request context identity', () => {
   })
 
   it('allows a separately evaluated compatible consumer to inject the provided context', async () => {
-    let received: SsrRequestContext<any, any, any> | undefined
+    let received: SsrRequestContext<any, any> | undefined
     const Root = defineComponent({
       setup() {
         received = inject(COMPATIBLE_REQUEST_CONTEXT)
