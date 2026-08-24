@@ -1,4 +1,4 @@
-import { createApp, createSSRApp, ref } from 'vue'
+import { createApp, createSSRApp } from 'vue'
 import {
   createMemoryHistory,
   createRouter,
@@ -6,10 +6,22 @@ import {
   type Router,
 } from 'vue-router'
 import {
+  createExtensionRuntime,
+  SSR_EXTENSION_RUNTIME,
+} from './core/extensions/ExtensionRuntime'
+import { resolveBuiltInExtensions } from './extensions/resolveBuiltInExtensions'
+import { isPrivateSeoMode, isSeoEnabled } from './extensions/seo/types'
+import {
+  isSsrProduction,
+  resolveCanonicalOrigin,
+} from './SsrCanonicalOrigin'
+import {
   installSsrDomainContext,
   SSR_DOMAIN_CONTEXT,
 } from './SsrDomainRuntime'
+import { createManagedHeadController } from './SsrManagedHead'
 import { SSR_REQUEST_CONTEXT } from './SsrRequestContext'
+import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import {
   createSsrHydrationController,
   SSR_HYDRATION_CONTEXT,
@@ -26,6 +38,25 @@ import type {
   SsrRequestContext,
   SsrResolvedApplicationDefinition,
 } from './SsrRuntimeTypes'
+
+const resolveApplicationSiteOrigin = (
+  definition: SsrResolvedApplicationDefinition<any, any>,
+  request: SsrRenderRequest<any>,
+  production: boolean
+): string => {
+  const requireProductionOrigin =
+    production &&
+    isSeoEnabled(definition.seo) &&
+    !isPrivateSeoMode(definition.seo)
+  return resolveCanonicalOrigin({
+    siteUrl: definition.seo?.siteUrl,
+    requestOrigin: request.siteOrigin,
+    fallbackOrigin: new URL(request.url).origin,
+    production,
+    requireProductionOrigin,
+    allowHttpOrigin: definition.seo?.allowHttpOrigin,
+  })
+}
 
 export interface SsrCreateApplicationOptions<
   TApplicationState,
@@ -54,15 +85,13 @@ export interface SsrCreateApplicationOptions<
 export const createSsrApplication = async <
   TApplicationState extends Record<string, any> = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 >(
   definition: SsrResolvedApplicationDefinition<
     TApplicationState,
-    TPublicConfig,
-    TExtension
+    TPublicConfig
   >,
   options: SsrCreateApplicationOptions<TApplicationState, TPublicConfig>
-): Promise<SsrCreatedApplication<TApplicationState, TPublicConfig, TExtension>> => {
+): Promise<SsrCreatedApplication<TApplicationState, TPublicConfig>> => {
   if (!definition?.id || !definition.root) {
     throw new Error(
       'A resolved application requires an internal id and a root component.'
@@ -115,6 +144,11 @@ export const createSsrApplication = async <
     headers: {},
     redirect: null,
   }
+  const production = isSsrProduction()
+  const siteOrigin =
+    options.hydrationState?.siteOrigin ??
+    resolveApplicationSiteOrigin(definition, options.request, production)
+  const managedHead = createManagedHeadController(options.server)
 
   // The hydration controller owns generic plugin state contribution and
   // restoration. On the browser it carries the plugin state serialized during
@@ -140,33 +174,49 @@ export const createSsrApplication = async <
     disposeHydration()
   }
 
-  const baseContext = {
+  const context: SsrRequestContext<TApplicationState, TPublicConfig> = {
     applicationId: definition.id,
     request: options.request,
     url: new URL(options.request.url),
     host: options.request.host,
     domain: options.request.domain,
     publicConfig: options.request.publicConfig,
+    siteOrigin,
     state,
-    head: ref(null),
     response,
     hydration,
     resolution,
   }
-  const extension = definition.createExtension
-    ? await definition.createExtension(baseContext as any)
-    : (undefined as TExtension)
-  const context: SsrRequestContext<
-    TApplicationState,
-    TPublicConfig,
-    TExtension
-  > = { ...baseContext, extension }
+  const extensionRuntime = createExtensionRuntime(
+    resolveBuiltInExtensions(definition),
+    definition.extensions ?? [],
+    {
+      applicationId: definition.id,
+      server: options.server,
+      production,
+      getRoute: () => router?.currentRoute.value ?? null,
+      getSiteOrigin: () => siteOrigin,
+      getResponseStatus: () => context.response.statusCode,
+      managedHead,
+    }
+  )
+  Object.assign(context, {
+    managedHead,
+    [SSR_EXTENSION_RUNTIME]: extensionRuntime,
+  })
 
   try {
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
-    if (router) app.use(router)
+    if (router) {
+      app.use(router)
+      router.afterEach((to, _from, failure) => {
+        if (failure) return
+        resolveResponseStatusForRoute(context.response, to)
+        if (!options.server) managedHead.invalidate()
+      })
+    }
     app.provide(SSR_DOMAIN_CONTEXT, options.request.domain)
     // Provide the generic hydration and resolution contracts BEFORE the
     // application installs its own plugins, so a plugin's `install()` can
@@ -180,6 +230,11 @@ export const createSsrApplication = async <
         ? definition.plugins()
         : definition.plugins ?? []
     for (const plugin of plugins) app.use(plugin)
+    extensionRuntime.setup()
+    hydration.onDispose(() => {
+      extensionRuntime.dispose()
+      managedHead.dispose()
+    })
     await definition.install?.({
       app,
       router,
@@ -189,8 +244,10 @@ export const createSsrApplication = async <
       server: options.server,
     })
 
-    return { app, router, context, hydration, resolution }
+    return { app, router, context, hydration, resolution, managedHead }
   } catch (error) {
+    extensionRuntime.dispose()
+    managedHead.dispose()
     hydration.dispose()
     throw error
   }
