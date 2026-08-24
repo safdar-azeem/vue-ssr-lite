@@ -13,7 +13,18 @@ import type {
   SsrDomainMode,
   SsrRenderMode,
 } from './SsrConfigTypes'
+import { createSeoEndpoints } from './extensions/seo/SeoEndpoints'
+import { isPrivateSeoMode, isSeoEnabled } from './extensions/seo/types'
 import { defineSsrConfig } from './SsrConfigRuntime'
+import {
+  readPublicUrl,
+  resolveServerSiteOrigin,
+} from './server/SsrSiteOriginRuntime'
+import {
+  importSitemapProvider,
+  loadSitemapProvider,
+  resolveSitemapConfigPath,
+} from './server/SsrSitemapConfig'
 import { normalizeSsrHost, stripSsrHostPort } from './SsrHostnameRuntime'
 import type {
   SsrEndpointDefinition,
@@ -54,7 +65,7 @@ export interface SsrCompiledApplication {
   template: string
   hosts: string[]
   roles?: string[]
-  application?: SsrResolvedApplicationDefinition<any, any, any>
+  application?: SsrResolvedApplicationDefinition<any, any>
   mountSelector: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
@@ -62,6 +73,9 @@ export interface SsrCompiledApplication {
   cookieAllowlist: string[]
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
+  publicConfigFactory?: () =>
+    | Record<string, unknown>
+    | Promise<Record<string, unknown>>
   applicationModule?: SsrApplicationModuleRef
   domain: {
     development: string
@@ -80,6 +94,8 @@ export interface SsrCompiledConfig {
   server: SsrServerOptions<Record<string, unknown>>
   readiness?: SsrReadinessProbe[]
   development: boolean
+  resolveSiteUrl?: SsrConfig['resolveSiteUrl']
+  sitemapProvider?: import('./extensions/seo/sitemap').SitemapProvider
 }
 
 export interface SsrViteApplicationEntry {
@@ -108,7 +124,7 @@ export interface SsrNormalizedApplicationConfig {
   endpoints?: SsrApplicationConfig['endpoints']
   cacheControl?: string
   responseCache?: SsrApplicationConfig['responseCache']
-  publicConfig?: Record<string, unknown>
+  publicConfig?: SsrApplicationConfig['publicConfig']
 }
 
 /** Runtime-only shape for already-loaded legacy/programmatic modules. */
@@ -131,6 +147,7 @@ export interface SsrNormalizedConfig {
   defaultApplicationId?: string
   server?: SsrConfig['server']
   readiness?: SsrConfig['readiness']
+  resolveSiteUrl?: SsrConfig['resolveSiteUrl']
 }
 
 export interface NormalizeSsrConfigOptions {
@@ -346,6 +363,7 @@ export const normalizeSsrConfig = (
     defaultApplicationId: config.defaultApplicationId,
     server: config.server,
     readiness: config.readiness,
+    resolveSiteUrl: config.resolveSiteUrl,
   }
 }
 
@@ -489,11 +507,17 @@ const absoluteImportPath = (root: string, filePath: string): string =>
 export const generateSsrRuntimeModule = (
   root: string,
   configPath: string | undefined,
-  entries: SsrViteApplicationEntry[]
+  entries: SsrViteApplicationEntry[],
+  sitemapPath?: string
 ): string => {
   const importLines: string[] = configPath
     ? [`import __ssrUserConfig from ${JSON.stringify(absoluteImportPath(root, configPath))}`]
     : []
+  if (sitemapPath) {
+    importLines.push(
+      `import __ssrSitemap from ${JSON.stringify(absoluteImportPath(root, sitemapPath))}`
+    )
+  }
   const bindLines: string[] = []
   let firstSsrAlias: string | undefined
   entries
@@ -518,6 +542,9 @@ export const generateSsrRuntimeModule = (
     configPath
       ? '  const exported = __ssrUserConfig?.default ?? __ssrUserConfig\n  const config = typeof exported === "function" ? await exported() : exported'
       : '  const config = {}',
+    sitemapPath
+      ? '  config.sitemap = __ssrSitemap?.default ?? __ssrSitemap'
+      : '',
     '  if (config?.applications) {',
     '    const applications = { ...config.applications }',
     ...bindLines,
@@ -571,7 +598,7 @@ const parseCookieList = (value: string | readonly string[] | undefined): string[
 
 const isApplicationDefinition = (
   value: unknown
-): value is SsrResolvedApplicationDefinition<any, any, any> =>
+): value is SsrResolvedApplicationDefinition<any, any> =>
   Boolean(value && typeof value === 'object' && (value as any).root)
 
 const pickModuleExport = (
@@ -592,7 +619,7 @@ const resolveApplicationSource = async (
   source: SsrApplicationSource,
   applicationId: string,
   options: CompileSsrConfigOptions
-): Promise<SsrResolvedApplicationDefinition<any, any, any>> => {
+): Promise<SsrResolvedApplicationDefinition<any, any>> => {
   let loader: SsrApplicationLoader = source as SsrApplicationLoader
   if (isSsrApplicationModuleRef(source)) {
     const root = options.root || process.cwd()
@@ -627,6 +654,16 @@ export const compileSsrConfig = async (
     root: options.root,
     development,
   })
+  const loadedRecord = raw as SsrConfig & { sitemap?: unknown }
+  const sitemapPath = options.root
+    ? await resolveSitemapConfigPath(options.root)
+    : undefined
+  const sitemapProvider =
+    (await loadSitemapProvider(loadedRecord?.sitemap)) ??
+    (sitemapPath
+      ? await importSitemapProvider(sitemapPath, options.importModule)
+      : undefined)
+  const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord?.resolveSiteUrl
   const applications: SsrCompiledApplication[] = []
   for (const app of Object.values(config.applications)) {
     const applicationModule = isSsrApplicationModuleRef(app.application)
@@ -638,7 +675,9 @@ export const compileSsrConfig = async (
         : undefined
     const developmentDomain = String(app.domain.development || '')
     const productionDomain = String(app.domain.production || '')
-    applications.push({
+    const publicConfigFactory =
+      typeof app.publicConfig === 'function' ? app.publicConfig : undefined
+    const compiled: SsrCompiledApplication = {
       id: app.id,
       kind: app.render,
       template: app.template,
@@ -651,7 +690,10 @@ export const compileSsrConfig = async (
       endpoints: app.endpoints ? [...app.endpoints] : [],
       cookieAllowlist: parseCookieList(app.cookies?.allow),
       cookieDenylist: parseCookieList(app.cookies?.deny),
-      publicConfig: { ...(app.publicConfig || {}) },
+      publicConfig: publicConfigFactory
+        ? {}
+        : { ...((app.publicConfig as Record<string, unknown>) || {}) },
+      publicConfigFactory,
       applicationModule,
       domain: {
         development: developmentDomain
@@ -665,7 +707,32 @@ export const compileSsrConfig = async (
         customDomains: Boolean(app.domain.customDomains),
         params: app.domain.params,
       },
-    })
+    }
+    if (application) {
+      compiled.endpoints.push(
+        ...(await createSeoEndpoints({
+          applicationId: app.id,
+          routes: application.routes,
+          seo: application.seo,
+          root: options.root || process.cwd(),
+          sitemapProvider,
+          existingEndpoints: compiled.endpoints,
+          resolveSiteUrl: (request) =>
+            resolveServerSiteOrigin({
+              siteUrl: application.seo?.siteUrl,
+              publicUrl: readPublicUrl(),
+              resolveSiteUrl,
+              request,
+              production: !development,
+              requireProductionOrigin:
+                isSeoEnabled(application.seo) &&
+                !isPrivateSeoMode(application.seo),
+              allowHttpOrigin: application.seo?.allowHttpOrigin,
+            }),
+        }))
+      )
+    }
+    applications.push(compiled)
   }
   validateSsrHostEntries(applications)
   if (
@@ -682,6 +749,8 @@ export const compileSsrConfig = async (
     defaultApplicationId: config.defaultApplicationId,
     development,
     readiness: config.readiness,
+    resolveSiteUrl,
+    sitemapProvider,
     server: {
       root: config.server?.root ?? options.root,
       host: config.server?.host,
