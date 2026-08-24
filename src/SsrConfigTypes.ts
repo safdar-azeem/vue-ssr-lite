@@ -2,12 +2,17 @@ import type { SsrApplicationDefinition } from './SsrRuntimeTypes'
 import type {
   SsrEndpointDefinition,
   SsrErrorRenderContext,
+  SsrHttpRequest,
   SsrHttpResponse,
   SsrLogger,
   SsrReadinessProbe,
   SsrRenderMetrics,
   SsrResponseCacheStrategy,
 } from './SsrRuntimeTypes'
+
+export type SsrPublicConfigSource =
+  | Record<string, unknown>
+  | (() => Record<string, unknown> | Promise<Record<string, unknown>>)
 
 /** How an application owns its apex hostname and subdomains. */
 export type SsrDomainMode = 'root' | 'subdomains' | 'root-and-subdomains'
@@ -49,10 +54,10 @@ export interface SsrApplicationCookiesConfig {
 }
 
 export type SsrApplicationLoader =
-  | SsrApplicationDefinition<any, any, any>
+  | SsrApplicationDefinition<any, any>
   | (() =>
-      | SsrApplicationDefinition<any, any, any>
-      | Promise<SsrApplicationDefinition<any, any, any>>)
+      | SsrApplicationDefinition<any, any>
+      | Promise<SsrApplicationDefinition<any, any>>)
 
 /**
  * Path-based application reference. Prefer this in `ssr.config` so Vite can
@@ -96,7 +101,7 @@ export interface SsrApplicationConfig {
    * Opaque public configuration delivered to the selected application.
    * Transport-only — the library does not interpret GraphQL, REST, etc.
    */
-  publicConfig?: Record<string, unknown>
+  publicConfig?: SsrPublicConfigSource
 }
 
 export interface SsrConfigServerOptions {
@@ -131,6 +136,13 @@ export interface SsrConfigShared {
   /** Used only when no application host pattern matches. */
   defaultApplicationId?: string
   readiness?: SsrReadinessProbe[]
+  /**
+   * Server-only custom origin resolution for multi-tenant platforms.
+   * Never trust a raw Host header unless this function validates it.
+   */
+  resolveSiteUrl?: (
+    request: SsrHttpRequest<any>
+  ) => string | undefined | Promise<string | undefined>
 }
 
 /** Flat convention overrides for one application. */
