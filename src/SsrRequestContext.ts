@@ -10,18 +10,19 @@ import type { SsrRequestContext } from './SsrRuntimeTypes'
  */
 export const SSR_REQUEST_CONTEXT = Symbol.for(
   'vue-ssr:request-context'
-) as InjectionKey<SsrRequestContext<any, any, any>>
+) as InjectionKey<SsrRequestContext<any, any>>
 
 export const useSsrRequestContext = <
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
->(): SsrRequestContext<TApplicationState, TPublicConfig, TExtension> => {
+>(): SsrRequestContext<TApplicationState, TPublicConfig> => {
   const context = inject(SSR_REQUEST_CONTEXT)
   if (!context) throw new Error('vue-ssr-lite request context is not installed.')
-  return context as SsrRequestContext<
-    TApplicationState,
-    TPublicConfig,
-    TExtension
-  >
+  return context as SsrRequestContext<TApplicationState, TPublicConfig>
 }
+
+/**
+ * Advanced universal helper for application-owned absolute URLs.
+ * Technical canonical/Open Graph origin resolution remains Core-owned.
+ */
+export const useSiteOrigin = (): string => useSsrRequestContext().siteOrigin
