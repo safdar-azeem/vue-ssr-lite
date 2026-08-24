@@ -1,10 +1,13 @@
 import {
+  serializeManagedHead,
+  type ManagedHeadSnapshot,
+} from '../SsrManagedHead'
+import {
   escapeSsrHtml,
   getSsrStateElementId,
-  renderSsrHead,
   serializeSsrState,
 } from '../SsrSerialization'
-import type { SsrHeadPayload, SsrHydrationState } from '../SsrRuntimeTypes'
+import type { SsrHydrationState } from '../SsrRuntimeTypes'
 
 export const SSR_HEAD_MARKER = '<!--vue-ssr-lite:head-->'
 export const SSR_TELEPORT_MARKER = '<!--vue-ssr-lite:teleports-->'
@@ -46,9 +49,39 @@ export const prepareSsrHtmlTemplate = (
   return html
 }
 
+const stripConflictingStaticTags = (
+  html: string,
+  snapshot: ManagedHeadSnapshot
+): string => {
+  const keys = new Set(snapshot.tags.map((tag) => tag.key))
+  let result = html
+  if (keys.has('title')) {
+    result = result.replace(/<title\b(?![^>]*data-vue-ssr-lite-head)[^>]*>[\s\S]*?<\/title>/i, '')
+  }
+  if (keys.has('description')) {
+    result = result.replace(
+      /<meta\b(?![^>]*data-vue-ssr-lite-head)[^>]*\bname=["']description["'][^>]*>/i,
+      ''
+    )
+  }
+  if (keys.has('robots')) {
+    result = result.replace(
+      /<meta\b(?![^>]*data-vue-ssr-lite-head)[^>]*\bname=["']robots["'][^>]*>/i,
+      ''
+    )
+  }
+  if (keys.has('canonical')) {
+    result = result.replace(
+      /<link\b(?![^>]*data-vue-ssr-lite-head)[^>]*\brel=["']canonical["'][^>]*>/i,
+      ''
+    )
+  }
+  return result
+}
+
 const applyHtmlAttributes = (
   html: string,
-  attributes: SsrHeadPayload['htmlAttributes']
+  attributes: ManagedHeadSnapshot['htmlAttributes']
 ): string => {
   if (!attributes) return html
   return html.replace(/<html\b([^>]*)>/i, (_match, existing: string) => {
@@ -72,7 +105,7 @@ export interface SsrHtmlInjection {
   applicationId: string
   html: string
   teleports: string
-  head: SsrHeadPayload | null
+  head: ManagedHeadSnapshot | null
   state: SsrHydrationState<any, any>
 }
 
@@ -92,16 +125,15 @@ export const injectSsrHtml = (
   }
   const stateId = getSsrStateElementId(injection.applicationId)
   const stateScript = `<script id="${escapeSsrHtml(stateId)}" type="application/json">${serializeSsrState(injection.state)}</script>`
-  const documentTemplate = injection.head?.title
-    ? template.replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, '')
-    : template
+  const snapshot = injection.head ?? { tags: [] }
+  const documentTemplate = stripConflictingStaticTags(template, snapshot)
   return applyHtmlAttributes(
     documentTemplate
-      .replace(SSR_HEAD_MARKER, renderSsrHead(injection.head))
+      .replace(SSR_HEAD_MARKER, serializeManagedHead(snapshot))
       .replace(SSR_TELEPORT_MARKER, injection.teleports)
       .replace(SSR_HTML_MARKER, injection.html)
       .replace(SSR_STATE_MARKER, stateScript),
-    injection.head?.htmlAttributes
+    snapshot.htmlAttributes
   )
 }
 
