@@ -6,8 +6,15 @@ import {
   compileSsrConfig,
   type SsrCompiledConfig,
 } from '../SsrConfigCompileRuntime'
+import { isPrivateSeoMode, isSeoEnabled } from '../extensions/seo/types'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
+import { resolvePublicConfigValue } from '../SsrPublicConfig'
 import { renderSsrApplication } from '../SsrRenderRuntime'
+import {
+  assertProductionSeoOriginConfigured,
+  readPublicUrl,
+  resolveServerSiteOrigin,
+} from './SsrSiteOriginRuntime'
 import type {
   SsrHeaders,
   SsrEndpointTools,
@@ -108,6 +115,18 @@ const resolveRuntime = async (
         `SSR application "${application.id}" requires an ssr application definition.`
       )
     }
+    if (
+      options.production &&
+      application.application &&
+      isSeoEnabled(application.application.seo) &&
+      !isPrivateSeoMode(application.application.seo)
+    ) {
+      assertProductionSeoOriginConfigured({
+        siteUrl: application.application.seo?.siteUrl,
+        resolveSiteUrl: definition.resolveSiteUrl,
+        allowHttpOrigin: application.application.seo?.allowHttpOrigin,
+      })
+    }
   }
   return definition
 }
@@ -116,7 +135,7 @@ const injectSpaDomainState = (
   template: string,
   applicationId: string,
   domain: ReturnType<typeof resolveSsrDomainContext>,
-  publicConfig: Record<string, unknown>
+  publicConfig: unknown
 ): string => {
   const payload = serializeSsrState({
     version: 1,
@@ -442,6 +461,9 @@ export const createSsrManagedServer = async (
         entry.cookieAllowlist,
         entry.cookieDenylist
       )
+      const publicConfig = await resolvePublicConfigValue(
+        entry.publicConfigFactory ?? entry.publicConfig
+      )
       const renderRequest: SsrHttpRequest<any> = {
         requestId:
           String(request.headers['x-request-id'] || '').trim() ||
@@ -455,13 +477,24 @@ export const createSsrManagedServer = async (
         method: request.method || 'GET',
         headers: requestHeaders(request),
         cookie,
-        publicConfig: entry.publicConfig,
+        publicConfig,
         domain,
         signal: controller.signal,
         pathname,
         search: requestUrl.search,
         entryId: entry.id,
       }
+      renderRequest.siteOrigin = await resolveServerSiteOrigin({
+        siteUrl: entry.application?.seo?.siteUrl,
+        publicUrl: readPublicUrl(),
+        resolveSiteUrl: definition.resolveSiteUrl,
+        request: renderRequest,
+        production: options.production,
+        requireProductionOrigin:
+          isSeoEnabled(entry.application?.seo) &&
+          !isPrivateSeoMode(entry.application?.seo),
+        allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
+      })
       activeRenderRequest = renderRequest
       const endpointTools: SsrEndpointTools = {
         signal: controller.signal,
@@ -548,7 +581,7 @@ export const createSsrManagedServer = async (
             template,
             entry.id,
             domain,
-            entry.publicConfig
+            publicConfig
           ),
           headers: {
             'content-type': 'text/html; charset=utf-8',
