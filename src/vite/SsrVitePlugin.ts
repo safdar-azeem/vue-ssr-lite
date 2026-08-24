@@ -12,6 +12,7 @@ import {
   type SsrViteApplicationEntry,
   type SsrViteEntries,
 } from '../SsrConfigCompileRuntime'
+import { resolveSitemapConfigPath } from '../server/SsrSitemapConfig'
 import { prepareSsrHtmlTemplate } from '../server/SsrHtmlRuntime'
 
 export type { SsrViteApplicationEntry }
@@ -65,7 +66,7 @@ const MODULE_SRC_SCRIPT_RE =
 const isSsrConfigFile = (filePath: string, configPath?: string): boolean => {
   const normalized = normalizePath(filePath)
   if (configPath && normalized === normalizePath(configPath)) return true
-  return /\/ssr\.config\.(ts|mts|js|mjs)$/.test(normalized)
+  return /\/(?:ssr|sitemap)\.config\.(ts|mts|js|mjs)$/.test(normalized)
 }
 
 export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
@@ -200,7 +201,12 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         const resolved = await ensureEntries()
         const absoluteConfig =
           configPath ?? (await resolveSsrConfigPath(root, options.config))
-        return generateSsrRuntimeModule(root, absoluteConfig, resolved.applications)
+        return generateSsrRuntimeModule(
+          root,
+          absoluteConfig,
+          resolved.applications,
+          await resolveSitemapConfigPath(root)
+        )
       }
       if (!id.startsWith(RESOLVED_CLIENT_PREFIX)) return
       const applicationId = id.slice(RESOLVED_CLIENT_PREFIX.length)
