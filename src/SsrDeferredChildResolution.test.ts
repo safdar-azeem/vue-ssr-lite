@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   defineComponent,
   h,
+  inject,
   onServerPrefetch,
   reactive,
   computed,
   ref,
+  type InjectionKey,
 } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
 import { defineApplication } from './index'
@@ -51,11 +53,14 @@ const createSource = (options: { failFor?: string } = {}) => {
   }
 }
 
+type TestSource = ReturnType<typeof createSource>
+const SOURCE: InjectionKey<TestSource> = Symbol('test-source')
+
 const Child = defineComponent({
   props: { id: { type: String, required: true } },
   setup(props) {
     const context = useSsrRequestContext<AppState>()
-    const source = (context.extension as any).source as ReturnType<typeof createSource>
+    const source = inject(SOURCE)!
 
     // A previous pass's resolved value is carried forward and read synchronously
     // here (stands in for an API client's warm request cache).
@@ -107,7 +112,7 @@ const Page = defineComponent({
 const Shell = defineComponent({
   setup() {
     const context = useSsrRequestContext<AppState>()
-    const source = (context.extension as any).source as ReturnType<typeof createSource>
+    const source = inject(SOURCE)!
     const ready = computed(() => context.state.ids.length > 0)
     onServerPrefetch(async () => {
       context.state.ids = await source.fetchRoot()
@@ -118,13 +123,15 @@ const Shell = defineComponent({
 
 const routes: RouteRecordRaw[] = [{ path: '/:x(.*)*', component: Page }]
 
-const buildApplication = (source: ReturnType<typeof createSource>) =>
-  defineApplication<AppState, unknown, { source: typeof source }>({
+const buildApplication = (source: TestSource) =>
+  defineApplication<AppState>({
     id: 'parent-child',
     root: Shell,
     routes,
     createInitialState: () => ({ ids: [], store: reactive(new Map()) }),
-    createExtension: () => ({ source }),
+    install({ app }) {
+      app.provide(SOURCE, source)
+    },
   })
 
 const request = (host: string) => createTestRenderRequest(host)
@@ -184,13 +191,12 @@ describe('deferred parent → child SSR resolution (no application orchestration
   })
 
   it('completes a page with no deferred children in a single pass', async () => {
-    const application = defineApplication<AppState, unknown, { source: any }>({
+    const application = defineApplication<AppState>({
       id: 'no-children',
       root: defineComponent({
         setup: () => () => h('main', 'static content'),
       }),
       createInitialState: () => ({ ids: [], store: reactive(new Map()) }),
-      createExtension: () => ({ source: createSource() }),
     })
     const rendered = await renderSsrApplication(application, request('static.test'), {
       diagnostics: false,
