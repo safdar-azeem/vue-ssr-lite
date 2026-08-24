@@ -1,3 +1,5 @@
+import type { ExtensionDefinition } from './core/extensions/ExtensionDefinition'
+import type { SeoApplicationConfig } from './extensions/seo/types'
 import type { App, Component, Plugin } from 'vue'
 import type {
   Router,
@@ -16,32 +18,6 @@ import type {
 
 export type SsrHeaderValue = string | string[] | undefined
 export type SsrHeaders = Record<string, SsrHeaderValue>
-
-export interface SsrHeadPayload {
-  title?: string | null
-  description?: string | null
-  keywords?: string | readonly string[] | null
-  robots?: string | null
-  canonicalUrl?: string | null
-  favicon?: string | null
-  ogTitle?: string | null
-  ogDescription?: string | null
-  ogImage?: string | null
-  ogImageAlt?: string | null
-  ogUrl?: string | null
-  ogType?: string | null
-  ogSiteName?: string | null
-  ogLocale?: string | null
-  twitterCard?: string | null
-  twitterTitle?: string | null
-  twitterDescription?: string | null
-  twitterImage?: string | null
-  twitterImageAlt?: string | null
-  twitterSite?: string | null
-  twitterCreator?: string | null
-  jsonLd?: readonly unknown[] | null
-  htmlAttributes?: Record<string, string | null | undefined>
-}
 
 export interface SsrResponseState {
   statusCode: number
@@ -78,6 +54,8 @@ export interface SsrRenderRequest<TPublicConfig = unknown> {
   signal: AbortSignal
   /** Library-resolved domain context for the selected application. */
   domain: import('./SsrConfigTypes').SsrDomainContext
+  /** Authoritative public origin for this request, when already resolved. */
+  siteOrigin?: string
 }
 
 export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = unknown> {
@@ -86,6 +64,8 @@ export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = 
   publicConfig: TPublicConfig
   domain: import('./SsrConfigTypes').SsrDomainContext
   application: TApplicationState
+  /** Authoritative public origin resolved during SSR. */
+  siteOrigin?: string
   /**
    * Serializable state contributed by installed application plugins, keyed by
    * an opaque plugin identifier. `vue-ssr-lite` never inspects the values.
@@ -96,7 +76,6 @@ export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = 
 export interface SsrRequestContext<
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 > {
   /** Stable identity of the application selected for this request. */
   applicationId: string
@@ -106,8 +85,9 @@ export interface SsrRequestContext<
   /** Library-resolved domain context (also available via `useSsrDomain()`). */
   domain: import('./SsrConfigTypes').SsrDomainContext
   publicConfig: TPublicConfig
+  /** Authoritative public origin for canonical URLs and structured data. */
+  siteOrigin: string
   state: TApplicationState
-  head: { value: SsrHeadPayload | null }
   response: SsrResponseState
   /** Generic hydration state contract for installed application plugins. */
   hydration: SsrHydrationContext
@@ -117,17 +97,12 @@ export interface SsrRequestContext<
    * changes the tree. Present in every mode; a no-op outside the server render.
    */
   resolution: SsrRequestResolution
-  extension: TExtension
 }
 
-export interface SsrApplicationSetup<
-  TApplicationState,
-  TPublicConfig,
-  TExtension,
-> {
+export interface SsrApplicationSetup<TApplicationState, TPublicConfig> {
   app: App
   router: Router | null
-  context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
+  context: SsrRequestContext<TApplicationState, TPublicConfig>
   /** Generic hydration state contract for installed application plugins. */
   hydration: SsrHydrationContext
   /** Generic server-render resolution contract for installed plugins. */
@@ -138,8 +113,9 @@ export interface SsrApplicationSetup<
 export interface SsrApplicationDefinition<
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 > {
+  /** Optional identity used by tests and compile-time resolution. */
+  id?: string
   /** The universal root component used for both SSR and browser execution. */
   root: Component
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
@@ -163,21 +139,19 @@ export interface SsrApplicationDefinition<
    * A static list is suitable only for stateless/global-safe plugins.
    */
   plugins?: readonly Plugin[] | (() => readonly Plugin[])
+  /** Declarative built-in SEO configuration. Omitted means SEO is enabled. */
+  seo?: SeoApplicationConfig
+  /**
+   * Universal-safe custom runtime extensions. Built-in SEO is auto-attached
+   * and must not be registered here.
+   */
+  extensions?: readonly ExtensionDefinition[]
   createInitialState?: () => TApplicationState
-  createExtension?: (
-    context: Omit<
-      SsrRequestContext<TApplicationState, TPublicConfig, TExtension>,
-      'extension'
-    >
-  ) => TExtension | Promise<TExtension>
   install?: (
-    setup: SsrApplicationSetup<TApplicationState, TPublicConfig, TExtension>
+    setup: SsrApplicationSetup<TApplicationState, TPublicConfig>
   ) => void | Promise<void>
-  resolveHead?: (
-    context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
-  ) => SsrHeadPayload | null | Promise<SsrHeadPayload | null>
   cleanup?: (
-    context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
+    context: SsrRequestContext<TApplicationState, TPublicConfig>
   ) => void | Promise<void>
 }
 
@@ -185,25 +159,21 @@ export interface SsrApplicationDefinition<
 export type SsrResolvedApplicationDefinition<
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
-> = SsrApplicationDefinition<
-  TApplicationState,
-  TPublicConfig,
-  TExtension
-> & { id: string }
+> = SsrApplicationDefinition<TApplicationState, TPublicConfig> & { id: string }
 
 export interface SsrCreatedApplication<
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 > {
   app: App
   router: Router | null
-  context: SsrRequestContext<TApplicationState, TPublicConfig, TExtension>
+  context: SsrRequestContext<TApplicationState, TPublicConfig>
   /** Per-request hydration controller owning plugin state and disposal. */
   hydration: SsrHydrationController
   /** Per-request resolution controller, shared across render passes. */
   resolution: SsrResolutionController
+  /** Core managed-head collector for this application instance. */
+  managedHead: import('./SsrManagedHead').ManagedHeadController
 }
 
 export interface SsrRenderResult<
@@ -212,7 +182,7 @@ export interface SsrRenderResult<
 > {
   html: string
   teleports: string
-  head: SsrHeadPayload | null
+  head: import('./SsrManagedHead').ManagedHeadSnapshot
   response: SsrResponseState
   hydrationState: SsrHydrationState<TApplicationState, TPublicConfig>
   metrics: SsrRenderMetrics
