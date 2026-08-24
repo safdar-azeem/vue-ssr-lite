@@ -2,6 +2,7 @@ import type { App } from 'vue'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
+import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import type {
   SsrHydrationState,
   SsrRenderRequest,
@@ -67,7 +68,7 @@ const readSpaDomainState = <TPublicConfig>(): {
 }
 
 export const hydrateSsrApplication = async (
-  definition: SsrResolvedApplicationDefinition<any, any, any>,
+  definition: SsrResolvedApplicationDefinition<any, any>,
   options: SsrHydrateOptions = {}
 ): Promise<void> => {
   const stateElementId =
@@ -86,13 +87,16 @@ export const hydrateSsrApplication = async (
     throw new Error('SSR hydration state is missing domain context.')
   }
   const controller = new AbortController()
-  const request = browserRequest(
-    hydrationState.publicConfig,
-    hydrationState.domain,
-    window.location.href,
-    'browser',
-    controller.signal
-  )
+  const request = {
+    ...browserRequest(
+      hydrationState.publicConfig,
+      hydrationState.domain,
+      window.location.href,
+      'browser',
+      controller.signal
+    ),
+    siteOrigin: hydrationState.siteOrigin,
+  }
   let created: Awaited<ReturnType<typeof createSsrApplication>> | undefined
   try {
     created = await createSsrApplication(definition, {
@@ -105,14 +109,14 @@ export const hydrateSsrApplication = async (
         `${window.location.pathname}${window.location.search}${window.location.hash}`
       )
       await created.router.isReady()
+      resolveResponseStatusForRoute(
+        created.context.response,
+        created.router.currentRoute.value
+      )
     }
 
     created.app.mount(options.mountSelector ?? '#app')
-    document.head
-      .querySelectorAll(
-        options.removeHeadSelector ?? '[data-vue-ssr-lite-head]'
-      )
-      .forEach((element) => element.remove())
+    created.managedHead.hydrate(document.head)
     stateElement.remove()
   } catch (error) {
     controller.abort()
@@ -133,12 +137,10 @@ export const hydrateSsrApplication = async (
 export const mountSpaApplication = async <
   TApplicationState extends Record<string, any> = Record<string, unknown>,
   TPublicConfig = unknown,
-  TExtension = unknown,
 >(
   definition: SsrResolvedApplicationDefinition<
     TApplicationState,
-    TPublicConfig,
-    TExtension
+    TPublicConfig
   >,
   options: SsrSpaMountOptions<TPublicConfig> = {}
 ): Promise<SsrMountedApplication> => {
@@ -172,10 +174,15 @@ export const mountSpaApplication = async <
           `${window.location.pathname}${window.location.search}${window.location.hash}`
       )
       await created.router.isReady()
+      resolveResponseStatusForRoute(
+        created.context.response,
+        created.router.currentRoute.value
+      )
     }
     const app = created.app
     const activeCreated = created
     app.mount(options.mountSelector ?? '#app')
+    activeCreated.managedHead.hydrate(document.head)
     document.getElementById('vue-ssr-lite-domain')?.remove()
     return {
       app,
