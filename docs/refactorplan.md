@@ -124,7 +124,7 @@ PERSONA D — PLATFORM & INFRASTRUCTURE ENGINEER
 | Category | Exports | File Boundary |
 |---|---|---|
 | **Normal (Level 1)** | `defineApplication`, `useSeo` | Universal (`src/`) |
-| **Advanced Application (Level 2)** | `usePublicConfig`, `setResponseStatus` | Universal (`src/`) |
+| **Advanced Application (Level 2)** | `usePublicConfig`, `setResponseStatus`, `useSiteOrigin` | Universal (`src/`) |
 | **Server Configuration (Level 3)** | `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext` | Server-Only (`*.config.ts`, `server/`) |
 | **Extension Authoring (Level 4)** | `defineExtension` | Universal (`src/`) |
 
@@ -1501,13 +1501,13 @@ import { useSeo } from 'vue-ssr-lite'
 const props = defineProps<{ slug: string }>()
 const article = ref<{ title: string; excerpt: string } | null>(null)
 
-// Plain Vue async setup:
-article.value = await fetchArticle(props.slug)
-
 useSeo({
   title: computed(() => article.value?.title || 'Article'),
   description: () => article.value?.excerpt,
 })
+
+// Plain Vue async setup after synchronous SEO registration:
+article.value = await fetchArticle(props.slug)
 </script>
 ```
 
@@ -1577,7 +1577,7 @@ DEVELOPMENT RESOLUTION:
 #### Origin Normalization & Validation:
 - `PUBLIC_URL` / `siteUrl` must be a valid origin: `http(s)://hostname[:port]`.
 - Paths (e.g. `/foo`), query parameters (`?x=1`), and hashes (`#abc`) are rejected or stripped.
-- Production requires `https://` unless explicitly configured for local/unusual environments.
+- Production requires `https://` unless `seo.allowHttpOrigin` is explicitly set for an intentional local or unusual environment.
 
 ### 10.2 Actionable Production Error Message
 
