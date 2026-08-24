@@ -85,6 +85,7 @@
 9. **Technical SEO Scope**: `vue-ssr-lite` guarantees technical correctness and search engine crawlability (HTML tags, status codes, canonicals, sitemaps, robots). It does not attempt content ranking, keyword density analysis, or search-console automation.
 10. **Breaking Cleanup Allowed**: No legacy SSR bridges or temporary dual-layer adapters are carried forward. Clean, unified contracts only.
 11. **Internal Extension Architecture**: Optional feature domains are implemented as internal extensions coordinated by a small, typed extension runtime. The extension mechanism is invisible to normal developers unless they intentionally create a custom extension. `vue-ssr-lite` is NOT a generic plugin framework — the extension system is only a controlled extensibility layer around the existing stable SSR core.
+12. **Host-Owned Framework Singletons**: Vue, Vue Router, and Vite are peer dependencies supplied by the host. `vue-ssr-lite` owns router creation, history selection, installation, SSR resolution, hydration, and navigation lifecycle while using the host's Vue and Vue Router module instances. `resolve.dedupe` is bundler defense-in-depth; it is not a substitute for the peer ownership contract.
 
 ---
 
@@ -1860,7 +1861,7 @@ Safe server-to-client configuration transport without application context boiler
 In `ssr.config.ts` (Level 2 Server Configuration):
 
 ```ts
-import { defineSsrConfig } from 'vue-ssr-lite'
+import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
   publicConfig: () => ({
@@ -1892,7 +1893,7 @@ const config = usePublicConfig<AppConfig>()
 For platform engineers needing custom server origin resolution or custom infrastructure:
 
 ```ts
-import { defineSsrConfig } from 'vue-ssr-lite'
+import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
   server: {
