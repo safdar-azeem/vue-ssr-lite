@@ -11,25 +11,26 @@ normal Vue applications.
 ## Install
 
 ```bash
-yarn add vue-ssr-lite
+yarn add vue-ssr-lite vue-router
 ```
 
 or:
 
 ```bash
-npm install vue-ssr-lite
+npm install vue-ssr-lite vue-router
 ```
 
-`vue-ssr-lite` is designed to be added to an existing Vue 3 + Vite
-application. It uses the application's existing Vue and Vite installation; no
-separate `@vue/server-renderer` installation is required. `vue-router` is
-provided by `vue-ssr-lite` for the simple `routes` API because the runtime
-creates that router. If application code directly imports Vue Router APIs for
-the advanced router factory below, keep `vue-router` as a direct dependency of
-the host application (existing routed applications should keep their current
-dependency).
+`vue-ssr-lite` is designed to be added to an existing Vue 3 + Vue Router + Vite
+application. Vue, Vue Router, and Vite are shared framework peer dependencies
+supplied by the host; no separate `@vue/server-renderer` installation is
+required. `vue-ssr-lite` owns router creation, history selection, installation,
+SSR route resolution, hydration, and navigation lifecycle, but it deliberately
+uses the host's Vue Router package instance. This singleton contract keeps Vue
+injection context and Vue Router's module-scoped injection keys identical in
+host components and the SSR runtime. Vite `resolve.dedupe` remains an additional
+bundler safeguard, not a substitute for peer dependency ownership.
 
-Requires Node.js 20 or newer.
+Requires Node.js 20 or newer, Vue 3.3+, Vue Router 4, and Vite 7.
 
 ## One repo, one app or many
 
@@ -161,7 +162,7 @@ conventions above.
 Custom application entry:
 
 ```ts
-import { defineSsrConfig } from 'vue-ssr-lite'
+import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
   app: './src/platform/main.ts',
@@ -215,10 +216,9 @@ export default defineApplication({
 
 Stateless global-safe plugin arrays remain supported. For mature router setups,
 the library supplies the environment-appropriate history while the application
-keeps ownership of router options. If this factory directly imports
-`createRouter` or other Vue Router APIs, the host application must declare
-`vue-router` as a direct dependency; do not rely on another package's
-transitive dependency under strict/non-hoisting package managers:
+keeps ownership of router options. Vue Router remains a direct host dependency
+for both this factory and the simpler `routes` API; it is never supplied as a
+private transitive framework copy by `vue-ssr-lite`:
 
 ```ts
 import { createRouter } from 'vue-router'
@@ -247,7 +247,7 @@ Each object key is the canonical application ID; do not repeat it in
 `src/*/main.ts`.
 
 ```ts
-import { defineSsrConfig } from 'vue-ssr-lite'
+import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
   applications: {
@@ -305,7 +305,7 @@ normal consumer bootstrap.
 Request context and domain context are available to advanced integrations:
 
 ```ts
-import { useSsrDomain, useSsrRequestContext } from 'vue-ssr-lite'
+import { useSsrDomain, useSsrRequestContext } from 'vue-ssr-lite/server'
 
 const domain = useSsrDomain()
 const request = useSsrRequestContext()
@@ -325,9 +325,9 @@ unresolved multi-app host routing before the server handles traffic.
 
 | Import | Purpose |
 | --- | --- |
-| `vue-ssr-lite` | `defineApplication`, `defineSsrConfig`, request/domain context |
+| `vue-ssr-lite` | Universal application APIs: `defineApplication`, `defineExtension`, `useSeo`, `usePublicConfig`, `useSiteOrigin`, `setResponseStatus` |
 | `vue-ssr-lite/client` | Internal browser hydration and SPA mounting |
-| `vue-ssr-lite/server` | Managed server, compilation, host matching, endpoints |
+| `vue-ssr-lite/server` | Server-only configuration and runtime: `defineSsrConfig`, `defineSitemap`, `useSsrRequestContext`, domain context, managed server, compilation, host matching, endpoints |
 | `vue-ssr-lite/vite` | Vite HTML and generated client/server entry integration |
 
 ## License
