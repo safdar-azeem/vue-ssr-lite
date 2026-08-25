@@ -3,9 +3,11 @@ import type {
   HtmlTagDescriptor,
   ViteDevServer,
 } from 'vite'
-import { isCSSRequest, parseAstAsync } from 'vite'
+import { isCSSRequest, normalizePath, parseAstAsync } from 'vite'
+import { relative } from 'node:path'
 import {
   SSR_DEVELOPMENT_STYLESHEET_ATTRIBUTE,
+  type SsrRenderedApplicationAsset,
   type SsrApplicationStylesheet,
 } from '../SsrApplicationAssetRuntime'
 
@@ -55,6 +57,18 @@ const normalizeBasePath = (base: string): string => {
   } catch {
     return '/'
   }
+}
+
+const applyViteBase = (value: string, base: string): string => {
+  const basePath = normalizeBasePath(base)
+  if (
+    basePath === '/' ||
+    !value.startsWith('/') ||
+    value.startsWith(basePath)
+  ) {
+    return value
+  }
+  return `${basePath.slice(0, -1)}${value}`
 }
 
 const normalizeLocalPath = (
@@ -250,6 +264,86 @@ export const resolveApplicationStyleDependencies = async (
   }
   await collectStyles(entryModule)
   return [...styles.values()]
+}
+
+const renderedModuleUrls = (
+  server: ViteDevServer,
+  moduleId: string
+): string[] => {
+  const normalized = normalizePath(moduleId).replace(/^\0+/, '')
+  const queryIndex = normalized.indexOf('?')
+  const pathname = queryIndex < 0 ? normalized : normalized.slice(0, queryIndex)
+  const query = queryIndex < 0 ? '' : normalized.slice(queryIndex)
+  const relativePath = normalizePath(relative(server.config.root, pathname))
+  return [...new Set([
+    normalized,
+    ...(relativePath && !relativePath.startsWith('../')
+      ? [`/${relativePath}${query}`]
+      : []),
+  ])]
+}
+
+/** Resolve only CSS reachable from modules Vue reported in this request. */
+export const resolveRenderedStyleDependencies = async (
+  server: ViteDevServer,
+  applicationId: string,
+  moduleIds: readonly string[]
+): Promise<SsrRenderedApplicationAsset[]> => {
+  const environment = server.environments.client
+  const roots: EnvironmentModuleNode[] = []
+  for (const moduleId of moduleIds) {
+    let module = environment.moduleGraph.getModuleById(moduleId)
+    for (const url of renderedModuleUrls(server, moduleId)) {
+      if (module) break
+      module = await environment.moduleGraph.getModuleByUrl(url)
+      if (!module?.transformResult) {
+        try {
+          await environment.transformRequest(url)
+        } catch {
+          continue
+        }
+        module = await environment.moduleGraph.getModuleByUrl(url)
+      }
+    }
+    if (!module) {
+      throw new Error(
+        `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's client module graph for application ${JSON.stringify(applicationId)}.`
+      )
+    }
+    if (!module.transformResult) {
+      await environment.transformRequest(module.url)
+    }
+    await transformEagerModuleGraph(server, module)
+    roots.push(module)
+  }
+  await environment.waitForRequestsIdle()
+
+  const assets = new Map<string, SsrRenderedApplicationAsset>()
+  const visited = new Set<EnvironmentModuleNode>()
+  const collect = async (module: EnvironmentModuleNode): Promise<void> => {
+    if (visited.has(module)) return
+    visited.add(module)
+    const stylesheet = toApplicationStylesheet(applicationId, module)
+    if (stylesheet) {
+      const href = applyViteBase(stylesheet.href, server.config.base)
+      const identity = normalizeViteAssetUrl(href, {
+        base: server.config.base,
+      })
+      if (identity && !assets.has(identity)) {
+        assets.set(identity, {
+          ...stylesheet,
+          href,
+          rel: 'stylesheet',
+          temporary: true,
+        })
+      }
+    }
+    for (const dependency of await readEagerViteImports(server, module)) {
+      await collect(dependency)
+    }
+  }
+  for (const root of roots) await collect(root)
+  return [...assets.values()]
 }
 
 interface HtmlStartTag {
