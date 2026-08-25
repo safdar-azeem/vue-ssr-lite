@@ -15,21 +15,15 @@ describe('native Vue Teleport SSR integration', () => {
             h('div', { id: 'modal-one' }, 'First modal'),
             h('div', { id: 'modal-two' }, 'Second modal'),
           ]),
-          h(Teleport, { to: '#modals' },
-            h('div', { id: 'modal-three' }, 'Third modal')
-          ),
-          h(Teleport, { to: '#toasts' },
-            h('div', { id: 'toast-one' }, 'Toast')
-          ),
+          h(Teleport, { to: '#modals' }, h('div', { id: 'modal-three' }, 'Third modal')),
+          h(Teleport, { to: '#toasts' }, h('div', { id: 'toast-one' }, 'Toast')),
         ]),
     })
 
     const ssrContext: Record<string, unknown> = {}
     const rendered = await renderToString(createSSRApp(Root), ssrContext)
     const teleports = ssrContext.teleports as Record<string, string>
-    expect(Object.keys(teleports)).toEqual(
-      expect.arrayContaining(['#modals', '#toasts'])
-    )
+    expect(Object.keys(teleports)).toEqual(expect.arrayContaining(['#modals', '#toasts']))
 
     const template = prepareSsrHtmlTemplate(
       '<!doctype html><html><head></head><body><div id="app"></div><div id="modals"></div><div id="toasts"></div></body></html>'
