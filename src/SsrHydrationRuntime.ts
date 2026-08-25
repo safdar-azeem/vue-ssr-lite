@@ -51,7 +51,7 @@ export const SSR_HYDRATION_CONTEXT = Symbol.for(
 export interface SsrHydrationController extends SsrHydrationContext {
   /** Server: run every contributor and return the serializable state map. */
   collect(): Record<string, unknown> | undefined
-  /** Run and clear every registered dispose callback. */
+  /** Idempotently run and clear every registered dispose callback. */
   dispose(): void
 }
 
@@ -70,19 +70,28 @@ export const createSsrHydrationController = (
   const contributors = new Map<string, () => unknown>()
   const disposers: Array<() => void> = []
   const restoredState = restored ?? null
+  let disposed = false
 
   return {
     server,
     read: <T = unknown>(key: string): T | undefined =>
       restoredState ? (restoredState[key] as T | undefined) : undefined,
     contribute: (key, dehydrate) => {
-      if (server) contributors.set(key, dehydrate)
+      if (server && !disposed) contributors.set(key, dehydrate)
     },
     onDispose: (dispose) => {
-      disposers.push(dispose)
+      if (!disposed) {
+        disposers.push(dispose)
+        return
+      }
+      try {
+        dispose()
+      } catch (error) {
+        reportDisposeError(error)
+      }
     },
     collect: () => {
-      if (contributors.size === 0) return undefined
+      if (disposed || contributors.size === 0) return undefined
       const state: Record<string, unknown> = {}
       for (const [key, dehydrate] of contributors) {
         state[key] = dehydrate()
@@ -90,6 +99,9 @@ export const createSsrHydrationController = (
       return state
     },
     dispose: () => {
+      if (disposed) return
+      disposed = true
+      contributors.clear()
       while (disposers.length > 0) {
         const dispose = disposers.pop()
         try {
