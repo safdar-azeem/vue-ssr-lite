@@ -5,7 +5,11 @@ import type {
   SsrDomainMode,
   SsrDomainParamDefinition,
 } from './SsrConfigTypes'
-import { normalizeSsrHostname } from './SsrHostnameRuntime'
+import {
+  normalizeSsrHost,
+  normalizeSsrHostname,
+  readSsrHostPort,
+} from './SsrHostnameRuntime'
 import { useSsrRequestContext } from './SsrRequestContext'
 
 export const SSR_DOMAIN_CONTEXT = Symbol.for(
@@ -55,8 +59,10 @@ const resolveDomainParams = (
 export const resolveSsrDomainContext = (
   host: string,
   application: SsrDomainApplicationRef,
-  development: boolean
+  development: boolean,
+  protocol: 'http' | 'https' = development ? 'http' : 'https'
 ): SsrDomainContext => {
+  const authority = normalizeSsrHost(host)
   const hostname = normalizeSsrHostname(host)
   const productionBase = normalizeSsrHostname(application.domain.production)
   const developmentBase = normalizeSsrHostname(application.domain.development)
@@ -88,6 +94,9 @@ export const resolveSsrDomainContext = (
 
   return {
     entry: application.id,
+    authority,
+    protocol,
+    port: readSsrHostPort(authority),
     hostname,
     baseDomain: activeBase,
     subdomain,
@@ -150,6 +159,21 @@ const buildPathWithQueryHash = (
   return `${normalizedPath}${search ? `?${search}` : ''}${hashPart}`
 }
 
+const normalizeUrlPort = (value: string | number | undefined): string => {
+  if (value == null || value === '') return ''
+  const raw = String(value).replace(/^:/, '')
+  const parsed = Number(raw)
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 65535
+  ) {
+    throw new Error('createDomainUrl port must be an integer between 1 and 65535.')
+  }
+  return `:${raw}`
+}
+
 /** Build an absolute URL for a domain family (supports nested subdomains). */
 export const createDomainUrl = (options: SsrCreateDomainUrlOptions): string => {
   const base = normalizeSsrHostname(options.baseDomain)
@@ -160,18 +184,15 @@ export const createDomainUrl = (options: SsrCreateDomainUrlOptions): string => {
     options.development ??
     (base === 'localhost' || base.endsWith('.localhost'))
   const protocol = options.protocol || (development ? 'http' : 'https')
-  const port =
-    options.port == null || options.port === ''
-      ? ''
-      : `:${String(options.port).replace(/^:/, '')}`
-  const withPort =
-    development || base === 'localhost' || base.endsWith('.localhost')
-      ? port
-      : ''
+  const withPort = normalizeUrlPort(options.port)
   const suffix = buildPathWithQueryHash(options.path, options.query, options.hash)
   const subdomain = options.subdomain ? sanitizeSubdomain(options.subdomain) : ''
+  const displayBase = base.includes(':') ? `[${base}]` : base
   if (!subdomain) {
-    return `${protocol}://${base}${withPort}${suffix}`
+    return `${protocol}://${displayBase}${withPort}${suffix}`
+  }
+  if (base.includes(':')) {
+    throw new Error('createDomainUrl cannot add a subdomain to an IPv6 host.')
   }
   return `${protocol}://${subdomain}.${base}${withPort}${suffix}`
 }
@@ -214,10 +235,8 @@ const toDomainApi = (domain: SsrDomainContext): SsrDomainApi => ({
       baseDomain: domain.baseDomain,
       subdomain,
       path,
-      port:
-        options.port ??
-        (typeof window !== 'undefined' ? window.location.port : ''),
-      protocol: options.protocol,
+      port: options.port ?? domain.port,
+      protocol: options.protocol ?? domain.protocol,
       development: domain.development,
     }),
   createUrl: (options) =>
@@ -225,9 +244,8 @@ const toDomainApi = (domain: SsrDomainContext): SsrDomainApi => ({
       ...options,
       baseDomain: domain.baseDomain,
       development: domain.development,
-      port:
-        options.port ??
-        (typeof window !== 'undefined' ? window.location.port : ''),
+      port: options.port ?? domain.port,
+      protocol: options.protocol ?? domain.protocol,
     }),
 })
 
