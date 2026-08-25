@@ -437,5 +437,12 @@ describe('defineSsrConfig application domains', () => {
     expect(ssrClient).toContain('hydrateSsrApplication')
     expect(ssrClient).toContain('id: "storefront"')
     expect(ssrClient).toContain('from "/app/src/ShopSsrApplication.ts"')
+
+    expect(
+      generateSsrClientModule('/app', {
+        ...entries.applications[1],
+        definition: '@/ShopSsrApplication.ts',
+      })
+    ).toContain('from "@/ShopSsrApplication.ts"')
   })
 })
