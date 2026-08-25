@@ -60,6 +60,52 @@ describe('SSR HTML runtime', () => {
     expect(html).not.toContain('</script><script>alert(1)</script>')
   })
 
+  it('preserves and deduplicates Vite CDN request assets', () => {
+    const template = prepareSsrHtmlTemplate(
+      '<html><head><link rel="stylesheet" href="https://cdn.example.com/app/page.css"></head><body><div id="app"></div></body></html>'
+    )
+    const html = injectSsrHtml(template, {
+      applicationId: 'public',
+      html: '<main>CDN</main>',
+      teleports: {},
+      head: { tags: [] },
+      state: {
+        version: 1,
+        applicationId: 'public',
+        publicConfig: {},
+        domain: {
+          entry: 'public',
+          authority: 'public.test',
+          protocol: 'https',
+          port: '',
+          hostname: 'public.test',
+          baseDomain: 'public.test',
+          subdomain: null,
+          isCustomDomain: false,
+          development: false,
+          params: {},
+        },
+        application: {},
+      },
+      assets: [
+        {
+          applicationId: 'public',
+          rel: 'stylesheet',
+          href: 'https://cdn.example.com/app/page.css',
+        },
+        {
+          applicationId: 'public',
+          rel: 'modulepreload',
+          href: 'https://cdn.example.com/app/page.js',
+        },
+      ],
+    })
+    expect(html.match(/cdn\.example\.com\/app\/page\.css/g)).toHaveLength(1)
+    expect(html).toContain(
+      '<link rel="modulepreload" href="https://cdn.example.com/app/page.js" crossorigin>'
+    )
+  })
+
   it('rejects templates without the declared mount element', () => {
     expect(() => prepareSsrHtmlTemplate('<html><head></head><body></body></html>'))
       .toThrow('missing mount element')
