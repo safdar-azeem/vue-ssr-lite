@@ -67,6 +67,7 @@ import {
   resolveSsrResponseCacheKey,
 } from './SsrResponseCacheRuntime'
 import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
+import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 
 export interface SsrManagedServerOptions {
   production: boolean
@@ -240,11 +241,7 @@ const resolveRuntime = async (
     development: !options.production,
     root: options.root,
     importModule: options.vite
-      ? async (specifier) =>
-          (await options.vite!.ssrLoadModule(specifier)) as Record<
-            string,
-            unknown
-          >
+      ? (specifier) => importSsrViteModule(options.vite!, specifier)
       : undefined,
   })
   for (const application of definition.applications) {
@@ -1070,11 +1067,6 @@ export const createSsrManagedServer = async (
       }
       return sendResponse(request, response, result)
     } catch (error) {
-      try {
-        options.vite?.ssrFixStacktrace(error as Error)
-      } catch {
-        // Development stack rewriting is diagnostic-only.
-      }
       const definition = activeDefinition
       const cancelled = error instanceof SsrRequestCancelledError
       if (cancelled) {
