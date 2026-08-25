@@ -87,7 +87,10 @@ describe('managed SSR server lifecycle', () => {
       mtimeMs: 1_000,
     }
     const response = () =>
-      ({ writeHead: vi.fn(), end: vi.fn() }) as unknown as import('node:http').ServerResponse
+      ({
+        writeHead: vi.fn(),
+        end: vi.fn(),
+      }) as unknown as import('node:http').ServerResponse
     const openFile = vi.fn()
 
     const headResponse = response()
@@ -319,15 +322,12 @@ describe('managed SSR server lifecycle', () => {
     const timeout = await fetch(`http://127.0.0.1:${port}/timeout`, {
       headers: { accept: 'text/html' },
     })
-    const hangingRenderer = await fetch(
-      `http://127.0.0.1:${port}/timeout-hanging-renderer`,
-      { headers: { accept: 'text/html' } }
-    )
+    const hangingRenderer = await fetch(`http://127.0.0.1:${port}/timeout-hanging-renderer`, {
+      headers: { accept: 'text/html' },
+    })
 
     expect(redirect.status).toBe(307)
-    expect(redirect.headers.get('location')).toBe(
-      `http://127.0.0.1:${port}/target`
-    )
+    expect(redirect.headers.get('location')).toBe(`http://127.0.0.1:${port}/target`)
     expect(timeout.status).toBe(418)
     expect(await timeout.text()).toBe('timeout handled')
     expect(timeoutRenderKind).toBe('timeout')
@@ -348,6 +348,9 @@ describe('managed SSR server lifecycle', () => {
       },
     })
     let slow = true
+    let factoryObservedAbort = false
+    let activeFactories = 0
+    const cacheSet = vi.fn()
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -363,11 +366,35 @@ describe('managed SSR server lifecycle', () => {
               application: { id: 'deadline', root: Root },
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
-              publicConfig: async () => {
-                if (slow) {
-                  await new Promise((resolveWait) => setTimeout(resolveWait, 40))
+              cacheControl: 'public, max-age=60',
+              responseCache: {
+                store: {
+                  get: () => null,
+                  set: cacheSet,
+                  invalidate: () => 0,
+                },
+                ttlMs: 60_000,
+              },
+              publicConfig: async ({ signal }) => {
+                activeFactories += 1
+                try {
+                  if (slow) {
+                    await new Promise<void>((resolveWait) => {
+                      const onAbort = () => {
+                        factoryObservedAbort = true
+                        resolveWait()
+                      }
+                      if (signal.aborted) onAbort()
+                      else
+                        signal.addEventListener('abort', onAbort, {
+                          once: true,
+                        })
+                    })
+                  }
+                  return {}
+                } finally {
+                  activeFactories -= 1
                 }
-                return {}
               },
             },
           },
@@ -380,6 +407,11 @@ describe('managed SSR server lifecycle', () => {
       headers: { accept: 'text/html' },
     })
     expect(timedOut.status).toBe(504)
+    await timedOut.text()
+    await new Promise((resolveWait) => setTimeout(resolveWait, 0))
+    expect(factoryObservedAbort).toBe(true)
+    expect(activeFactories).toBe(0)
+    expect(cacheSet).not.toHaveBeenCalled()
 
     slow = false
     const successful = await fetch(`http://127.0.0.1:${port}/`, {
@@ -457,10 +489,9 @@ describe('managed SSR server lifecycle', () => {
       const response = await fetch(`http://127.0.0.1:${port}/`, {
         headers: { accept: 'text/html' },
       })
-      const explicitTemplate = await fetch(
-        `http://127.0.0.1:${port}/index.html`,
-        { headers: { accept: 'text/html' } }
-      )
+      const explicitTemplate = await fetch(`http://127.0.0.1:${port}/index.html`, {
+        headers: { accept: 'text/html' },
+      })
       expect(response.status).toBe(200)
       expect(await response.text()).toContain('vue-ssr-lite-domain')
       expect(explicitTemplate.status).toBe(200)
@@ -485,10 +516,7 @@ describe('managed SSR server lifecycle', () => {
     let requestNumber = 0
     const Root = defineComponent({
       setup() {
-        const context = useSsrRequestContext<
-          Record<string, never>,
-          { marker: string }
-        >()
+        const context = useSsrRequestContext<Record<string, never>, { marker: string }>()
         const marker = `${context.publicConfig.marker}:${context.domain.hostname}`
         useSeo({ meta: [{ name: 'request-marker', content: marker }] })
         return () => h('main', marker)
@@ -552,7 +580,6 @@ describe('managed SSR server lifecycle', () => {
       join(clientRoot, 'index.html'),
       '<!doctype html><html><body><div id="app"></div></body></html>'
     )
-    let requestNumber = 0
     managed = await createSsrManagedServer({
       production: true,
       root,
@@ -565,7 +592,7 @@ describe('managed SSR server lifecycle', () => {
               application: { module: './SpaApp.ts' },
               template: 'index.html',
               domain: { production: 'example.com', customDomains: true },
-              publicConfig: () => ({ marker: ++requestNumber }),
+              publicConfig: ({ host, pathname }) => ({ host, pathname }),
             },
           },
         } as any),
@@ -573,18 +600,305 @@ describe('managed SSR server lifecycle', () => {
     })
     await managed.listen()
     const origin = `http://127.0.0.1:${managed.address().port}`
-    const navigate = (host: string) =>
-      fetch(`${origin}/`, {
+    const navigate = (host: string, pathname: string) =>
+      fetch(`${origin}${pathname}`, {
         headers: { accept: 'text/html', 'x-forwarded-host': host },
       }).then((response) => response.text())
 
-    const first = await navigate('a.test')
-    const second = await navigate('b.test')
-    expect(first).toContain('"marker":1')
+    const first = await navigate('a.test', '/alpha')
+    const second = await navigate('b.test', '/beta')
+    expect(first).toContain('"host":"a.test"')
+    expect(first).toContain('"pathname":"/alpha"')
     expect(first).toContain('"hostname":"a.test"')
-    expect(second).toContain('"marker":2')
+    expect(second).toContain('"host":"b.test"')
+    expect(second).toContain('"pathname":"/beta"')
     expect(second).toContain('"hostname":"b.test"')
-    expect(second).not.toContain('"marker":1')
+    expect(second).not.toContain('"host":"a.test"')
+  })
+
+  it('passes normalized request facts to isolated multi-app factories once per request', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await Promise.all([
+      writeFile(
+        join(root, 'alpha.html'),
+        '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+      ),
+      writeFile(
+        join(root, 'beta.html'),
+        '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+      ),
+    ])
+    const received: Record<string, Array<Record<string, unknown>>> = {
+      alpha: [],
+      beta: [],
+    }
+    const invocations = { alpha: 0, beta: 0 }
+    const Root = defineComponent({
+      setup() {
+        const context = useSsrRequestContext()
+        if (context.resolution.pass === 1) {
+          context.resolution.requestAdditionalPass()
+        }
+        return () => h('pre', JSON.stringify(context.publicConfig))
+      },
+    })
+    const factory =
+      (applicationId: 'alpha' | 'beta') =>
+      async (request: import('../SsrRuntimeTypes').SsrPublicConfigRequest) => {
+        invocations[applicationId] += 1
+        expect(Object.isFrozen(request)).toBe(true)
+        expect(Object.isFrozen(request.headers)).toBe(true)
+        expect(Object.isFrozen(request.domain)).toBe(true)
+        expect(Object.isFrozen(request.domain.params)).toBe(true)
+        received[applicationId].push({
+          requestId: request.requestId,
+          url: request.url,
+          host: request.host,
+          protocol: request.protocol,
+          method: request.method,
+          headers: request.headers,
+          cookie: request.cookie,
+          signal: request.signal,
+          domain: request.domain,
+          pathname: request.pathname,
+          search: request.search,
+          entryId: request.entryId,
+        })
+        await new Promise((resolveWait) =>
+          setTimeout(resolveWait, applicationId === 'alpha' ? 5 : 1)
+        )
+        return {
+          requestId: request.requestId,
+          applicationId,
+          host: request.host,
+          pathname: request.pathname,
+          search: request.search,
+          locale: request.headers['accept-language'],
+          tenant: request.domain.params.tenant,
+          cookie: request.cookie,
+          hostile:
+            applicationId === 'alpha' ? '</script><script>alert(1)</script>\u2028\u2029' : 'safe',
+        }
+      }
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: {
+            port: 0,
+            trustProxy: true,
+            maxResolutionPasses: 2,
+          },
+          applications: {
+            alpha: {
+              application: { id: 'alpha', root: Root },
+              template: 'alpha.html',
+              host: '*.alpha.test',
+              domain: {
+                development: 'alpha.test',
+                params: { tenant: { source: 'last-subdomain-label' } },
+              },
+              cookies: { allow: ['locale'] },
+              publicConfig: factory('alpha'),
+            },
+            beta: {
+              application: { id: 'beta', root: Root },
+              template: 'beta.html',
+              host: '*.beta.test',
+              domain: {
+                development: 'beta.test',
+                params: { tenant: { source: 'last-subdomain-label' } },
+              },
+              cookies: { allow: ['locale'] },
+              publicConfig: factory('beta'),
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const navigate = (host: string, path: string, locale: string, requestId: string) =>
+      fetch(`${origin}${path}`, {
+        headers: {
+          accept: 'text/html',
+          'accept-language': locale,
+          cookie: `locale=${locale}; session=private`,
+          'x-forwarded-host': host,
+          'x-forwarded-proto': 'https',
+          'x-request-id': requestId,
+        },
+      }).then((response) => response.text())
+
+    const [alpha, beta] = await Promise.all([
+      navigate('one.alpha.test', '/alpha?preview=1', 'en', 'request-alpha'),
+      navigate('two.beta.test', '/beta?preview=2', 'ar', 'request-beta'),
+    ])
+
+    expect(alpha).toContain('&quot;applicationId&quot;:&quot;alpha&quot;')
+    expect(alpha).toContain('&quot;host&quot;:&quot;one.alpha.test&quot;')
+    expect(alpha).toContain('"applicationId":"alpha"')
+    expect(alpha).toContain('"locale":"en"')
+    expect(alpha).toContain('"tenant":"one"')
+    expect(alpha).toContain('"cookie":"locale=en"')
+    expect(alpha).not.toContain('"applicationId":"beta"')
+    expect(alpha).not.toContain('</script><script>alert(1)</script>')
+    expect(alpha).toContain('\\u003c/script>')
+    expect(alpha).toContain('\\u2028\\u2029')
+    expect(beta).toContain('"applicationId":"beta"')
+    expect(beta).toContain('"locale":"ar"')
+    expect(beta).toContain('"tenant":"two"')
+    expect(beta).not.toContain('"applicationId":"alpha"')
+    expect(invocations).toEqual({ alpha: 1, beta: 1 })
+
+    expect(received.alpha[0]).toMatchObject({
+      requestId: 'request-alpha',
+      url: 'https://one.alpha.test/alpha?preview=1',
+      host: 'one.alpha.test',
+      protocol: 'https',
+      method: 'GET',
+      cookie: 'locale=en',
+      pathname: '/alpha',
+      search: '?preview=1',
+      entryId: 'alpha',
+    })
+    expect(received.alpha[0]?.headers).toMatchObject({
+      'accept-language': 'en',
+      'x-request-id': 'request-alpha',
+    })
+    expect(received.alpha[0]?.domain).toMatchObject({
+      entry: 'alpha',
+      hostname: 'one.alpha.test',
+      params: { tenant: 'one' },
+    })
+    expect(received.alpha[0]?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('keys rendered responses by resolved public config while sharing identical output', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    const store = createSsrMemoryResponseCache()
+    let factoryInvocations = 0
+    let renders = 0
+    const Root = defineComponent({
+      setup() {
+        const context = useSsrRequestContext()
+        const rendered = ++renders
+        return () => h('main', `${context.publicConfig.locale}:render:${rendered}`)
+      },
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          applications: {
+            cached: {
+              application: { id: 'cached', root: Root },
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+              cacheControl: 'public, max-age=60',
+              responseCache: {
+                store,
+                ttlMs: 60_000,
+                vary: () => 'publication:v1',
+              },
+              publicConfig: ({ headers }) => {
+                factoryInvocations += 1
+                return { locale: headers['accept-language'] || 'en' }
+              },
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const navigate = (locale: string, irrelevant: string) =>
+      fetch(`${origin}/cached`, {
+        headers: {
+          accept: 'text/html',
+          'accept-language': locale,
+          'x-irrelevant': irrelevant,
+        },
+      })
+
+    const english = await navigate('en', 'one')
+    const englishBody = await english.text()
+    const arabic = await navigate('ar', 'one')
+    const arabicBody = await arabic.text()
+    const englishHit = await navigate('en', 'two')
+    const englishHitBody = await englishHit.text()
+    const arabicHit = await navigate('ar', 'two')
+    const arabicHitBody = await arabicHit.text()
+
+    expect(englishBody).toContain('en:render:1')
+    expect(arabicBody).toContain('ar:render:2')
+    expect(englishHitBody).toContain('en:render:1')
+    expect(arabicHitBody).toContain('ar:render:2')
+    expect(englishHit.headers.get('server-timing')).toBe('cache;desc="hit"')
+    expect(arabicHit.headers.get('server-timing')).toBe('cache;desc="hit"')
+    expect(factoryInvocations).toBe(4)
+    expect(renders).toBe(2)
+  })
+
+  it.each([
+    ['NaN instead of null', { value: Number.NaN }],
+    ['undefined property instead of omission', { flag: undefined }],
+  ])('rejects cache-colliding public config %s before cache lookup', async (_label, value) => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    const cacheGet = vi.fn()
+    const cacheSet = vi.fn()
+    const cacheVary = vi.fn(() => 'stable')
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          applications: {
+            invalid: {
+              application: {
+                id: 'invalid',
+                root: defineComponent(() => () => h('main', 'unreachable')),
+              },
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+              cacheControl: 'public, max-age=60',
+              responseCache: {
+                store: {
+                  get: cacheGet,
+                  set: cacheSet,
+                  invalidate: () => 0,
+                },
+                ttlMs: 60_000,
+                vary: cacheVary,
+              },
+              publicConfig: () => value,
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+
+    const response = await fetch(`http://127.0.0.1:${managed.address().port}/`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(response.status).toBe(500)
+    await response.text()
+    expect(cacheVary).not.toHaveBeenCalled()
+    expect(cacheGet).not.toHaveBeenCalled()
+    expect(cacheSet).not.toHaveBeenCalled()
   })
 
   it('reloads development templates on every request', async () => {
@@ -634,10 +948,9 @@ describe('managed SSR server lifecycle', () => {
     )
     managed = await createManaged()
     await managed.listen()
-    const serverA = await fetch(
-      `http://127.0.0.1:${managed.address().port}/`,
-      { headers: { accept: 'text/html' } }
-    )
+    const serverA = await fetch(`http://127.0.0.1:${managed.address().port}/`, {
+      headers: { accept: 'text/html' },
+    })
     expect(await serverA.text()).toContain('>server-a</div>')
     await managed.close()
     managed = undefined
@@ -648,10 +961,9 @@ describe('managed SSR server lifecycle', () => {
     )
     managed = await createManaged()
     await managed.listen()
-    const serverB = await fetch(
-      `http://127.0.0.1:${managed.address().port}/`,
-      { headers: { accept: 'text/html' } }
-    )
+    const serverB = await fetch(`http://127.0.0.1:${managed.address().port}/`, {
+      headers: { accept: 'text/html' },
+    })
     expect(await serverB.text()).toContain('>server-b</div>')
   })
 
@@ -680,10 +992,7 @@ describe('managed SSR server lifecycle', () => {
     )
     await writeFile(
       join(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH),
-      serializeSsrProductionAssetMetadata([
-        'assets/app-DG71SDF2.js',
-        'assets/nested/site.css',
-      ])
+      serializeSsrProductionAssetMetadata(['assets/app-DG71SDF2.js', 'assets/nested/site.css'])
     )
 
     managed = await createSsrManagedServer({
@@ -705,24 +1014,16 @@ describe('managed SSR server lifecycle', () => {
     const etag = get.headers.get('etag')!
     const lastModified = get.headers.get('last-modified')!
     expect(get.status).toBe(200)
-    expect(get.headers.get('content-type')).toBe(
-      'text/javascript; charset=utf-8'
-    )
-    expect(get.headers.get('content-length')).toBe(
-      String(Buffer.byteLength(javascript))
-    )
-    expect(get.headers.get('cache-control')).toBe(
-      'public, max-age=31536000, immutable'
-    )
+    expect(get.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(get.headers.get('content-length')).toBe(String(Buffer.byteLength(javascript)))
+    expect(get.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
     expect(etag).toMatch(/^W\/"[a-f\d]+-[a-f\d]+"$/)
     expect(Number.isNaN(Date.parse(lastModified))).toBe(false)
     expect(await get.text()).toBe(javascript)
 
     const head = await fetch(assetUrl, { method: 'HEAD' })
     expect(head.status).toBe(200)
-    expect(head.headers.get('content-length')).toBe(
-      String(Buffer.byteLength(javascript))
-    )
+    expect(head.headers.get('content-length')).toBe(String(Buffer.byteLength(javascript)))
     expect(head.headers.get('etag')).toBe(etag)
     expect((await head.arrayBuffer()).byteLength).toBe(0)
 
@@ -759,14 +1060,7 @@ describe('managed SSR server lifecycle', () => {
     expect(ignoredRange.headers.has('accept-ranges')).toBe(false)
     expect(await ignoredRange.text()).toBe(javascript)
 
-    const [
-      css,
-      mutable,
-      empty,
-      directory,
-      post,
-      missing,
-    ] = await Promise.all([
+    const [css, mutable, empty, directory, post, missing] = await Promise.all([
       fetch(`${origin}/products/assets/nested/site.css`),
       fetch(`${origin}/products/assets/robots-generated.txt`),
       fetch(`${origin}/products/assets/empty.bin`),
@@ -777,25 +1071,17 @@ describe('managed SSR server lifecycle', () => {
       fetch(`${origin}/products/assets/missing.js`),
     ])
     expect(css.headers.get('content-type')).toBe('text/css; charset=utf-8')
-    expect(mutable.headers.get('cache-control')).toBe(
-      'public, max-age=3600'
-    )
+    expect(mutable.headers.get('cache-control')).toBe('public, max-age=3600')
     expect(empty.status).toBe(200)
     expect(empty.headers.get('content-length')).toBe('0')
     expect(directory.status).toBe(404)
     expect(post.status).toBe(404)
     expect(missing.status).toBe(404)
     await expect(
-      requestRawPathStatus(
-        port,
-        '/products/%2e%2e/assets/app-DG71SDF2.js'
-      )
+      requestRawPathStatus(port, '/products/%2e%2e/assets/app-DG71SDF2.js')
     ).resolves.toBe(404)
     await expect(
-      requestRawPathStatus(
-        port,
-        '/products/assets/%5c..%5capp-DG71SDF2.js'
-      )
+      requestRawPathStatus(port, '/products/assets/%5c..%5capp-DG71SDF2.js')
     ).resolves.toBe(404)
 
     const protectedTemplate = await fetch(`${origin}/products/index.html`, {
@@ -828,9 +1114,7 @@ describe('managed SSR server lifecycle', () => {
     const bodies = await Promise.all(
       Array.from({ length: 3 }, async () => {
         const response = await fetch(assetUrl)
-        expect(response.headers.get('content-length')).toBe(
-          String(largeAsset.byteLength)
-        )
+        expect(response.headers.get('content-length')).toBe(String(largeAsset.byteLength))
         return Buffer.from(await response.arrayBuffer())
       })
     )
@@ -1042,11 +1326,7 @@ describe('managed SSR server lifecycle', () => {
       setup() {
         const request = useSsrRequestContext().request
         renders += 1
-        return () =>
-          h(
-            'main',
-            `render:${renders};forwarded-cookie:${request.cookie || 'none'}`
-          )
+        return () => h('main', `render:${renders};forwarded-cookie:${request.cookie || 'none'}`)
       },
     })
     const responseStore = createSsrMemoryResponseCache()
@@ -1084,9 +1364,7 @@ describe('managed SSR server lifecycle', () => {
     expect(cached.headers.get('server-timing')).toBe('cache;desc="hit"')
 
     const cookie = await navigate({ cookie: 'session=private' })
-    expect(await cookie.text()).toContain(
-      'render:2;forwarded-cookie:none'
-    )
+    expect(await cookie.text()).toContain('render:2;forwarded-cookie:none')
     const authorization = await navigate({ authorization: 'Bearer private' })
     expect(await authorization.text()).toContain('render:3')
     const proxyAuthorization = await navigate({
