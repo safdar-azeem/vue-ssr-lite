@@ -3,8 +3,10 @@ import type {
   HtmlTagDescriptor,
   ViteDevServer,
 } from 'vite'
-import { isCSSRequest, normalizePath, parseAstAsync } from 'vite'
+import { isCSSRequest, normalizePath } from 'vite'
+import { parse } from 'es-module-lexer'
 import { relative } from 'node:path'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   SSR_DEVELOPMENT_STYLESHEET_ATTRIBUTE,
   type SsrRenderedApplicationAsset,
@@ -116,8 +118,8 @@ export const normalizeViteAssetUrl = (
 
 /**
  * Vite's public module graph intentionally combines eager and dynamic edges.
- * Read eager edges from Vite's transformed browser JavaScript with Vite's
- * public Rollup parser, then map those imports back to public graph nodes.
+ * Read eager edges from Vite's transformed browser JavaScript with a dedicated
+ * module lexer, then map those imports back to public graph nodes.
  * This adapter is the sole dependency-classification compatibility boundary.
  */
 const readEagerViteImportsFromCode = async (
@@ -130,22 +132,20 @@ const readEagerViteImportsFromCode = async (
       `vue-ssr-lite cannot inspect eager imports for untransformed Vite module ${module.url}.`
     )
   }
-  let program: Awaited<ReturnType<typeof parseAstAsync>>
+  let imports: Awaited<ReturnType<typeof parse>>[0]
   try {
-    program = await parseAstAsync(code)
+    const parsed = await parse(code)
+    imports = parsed[0]
   } catch (error) {
     throw new Error(
       `vue-ssr-lite could not inspect eager imports for Vite module ${module.url}: ${error instanceof Error ? error.message : String(error)}`
     )
   }
   const eagerIdentities: string[] = []
-  for (const statement of program.body) {
-    const source =
-      statement.type === 'ImportDeclaration' ||
-      statement.type === 'ExportAllDeclaration' ||
-      statement.type === 'ExportNamedDeclaration'
-        ? statement.source?.value
-        : undefined
+  for (const imported of imports) {
+    // `d === -1` covers static import/export-from declarations, including
+    // source-phase imports. Dynamic import and import.meta stay excluded.
+    const source = imported.d === -1 ? imported.n : undefined
     if (typeof source !== 'string') continue
     const identity = normalizeViteAssetUrl(source, {
       base: server.config.base,
@@ -191,14 +191,73 @@ export const readEagerViteImports = async (
 ): Promise<EnvironmentModuleNode[]> =>
   readEagerViteImportsFromCode(server, module, module.transformResult?.code)
 
+interface SsrViteAssetGraphAnalysis {
+  transformedCode: Map<EnvironmentModuleNode, string>
+  eagerDependencies: Map<
+    EnvironmentModuleNode,
+    readonly EnvironmentModuleNode[]
+  >
+}
+
+interface SsrViteAssetResolutionContext {
+  analyses: WeakMap<
+    ViteDevServer,
+    Map<string, SsrViteAssetGraphAnalysis>
+  >
+}
+
+const assetResolutionContext =
+  new AsyncLocalStorage<SsrViteAssetResolutionContext>()
+
+/** Keep graph analysis request-local while sharing it between template and
+ * rendered-style discovery for the same application. */
+export const runWithSsrViteAssetResolutionContext = <T>(
+  work: () => T
+): T => assetResolutionContext.run({ analyses: new WeakMap() }, work)
+
+const resolveSsrViteAssetGraphAnalysis = (
+  server: ViteDevServer,
+  applicationId: string
+): SsrViteAssetGraphAnalysis => {
+  const context = assetResolutionContext.getStore()
+  if (!context) {
+    return {
+      transformedCode: new Map(),
+      eagerDependencies: new Map(),
+    }
+  }
+  let applications = context.analyses.get(server)
+  if (!applications) {
+    applications = new Map()
+    context.analyses.set(server, applications)
+  }
+  let analysis = applications.get(applicationId)
+  if (!analysis) {
+    analysis = {
+      transformedCode: new Map(),
+      eagerDependencies: new Map(),
+    }
+    applications.set(applicationId, analysis)
+  }
+  return analysis
+}
+
 const transformEagerModuleGraph = async (
   server: ViteDevServer,
   entryModule: EnvironmentModuleNode,
-  transformedCode = new Map<EnvironmentModuleNode, string>()
-): Promise<Map<EnvironmentModuleNode, string>> => {
+  transformedCode = new Map<EnvironmentModuleNode, string>(),
+  eagerDependencies = new Map<
+    EnvironmentModuleNode,
+    readonly EnvironmentModuleNode[]
+  >()
+): Promise<void> => {
   const environment = server.environments.client
   const visited = new Set<EnvironmentModuleNode>([entryModule])
-  const visit = async (module: EnvironmentModuleNode): Promise<void> => {
+  const resolveDependencies = async (
+    module: EnvironmentModuleNode
+  ): Promise<readonly EnvironmentModuleNode[]> => {
+    const cached = eagerDependencies.get(module)
+    if (cached) return cached
     // Dependency optimization can invalidate a graph node while its request is
     // completing. The returned transform is still the usable result for this
     // traversal, even when Vite intentionally leaves transformResult unset.
@@ -207,9 +266,14 @@ const transformEagerModuleGraph = async (
       code = (await environment.transformRequest(module.url))?.code
     }
     if (code != null) transformedCode.set(module, code)
-    const dependencies = (
-      await readEagerViteImportsFromCode(server, module, code)
-    ).filter((dependency) => !visited.has(dependency))
+    const dependencies = await readEagerViteImportsFromCode(server, module, code)
+    eagerDependencies.set(module, dependencies)
+    return dependencies
+  }
+  const visit = async (module: EnvironmentModuleNode): Promise<void> => {
+    const dependencies = (await resolveDependencies(module)).filter(
+      (dependency) => !visited.has(dependency)
+    )
     await Promise.all(
       dependencies.map(async (dependency) => {
         visited.add(dependency)
@@ -218,7 +282,6 @@ const transformEagerModuleGraph = async (
     )
   }
   await visit(entryModule)
-  return transformedCode
 }
 
 const toApplicationStylesheet = (
@@ -247,20 +310,23 @@ export const resolveApplicationStyleDependencies = async (
       `vue-ssr-lite could not transform the browser entry for application "${applicationId}" at ${browserEntryUrl}.`
     )
   }
-  await environment.waitForRequestsIdle()
   const entryModule = await environment.moduleGraph.getModuleByUrl(browserEntryUrl)
   if (!entryModule) {
     throw new Error(
       `vue-ssr-lite could not find application "${applicationId}" in Vite's client module graph after transforming ${browserEntryUrl}.`
     )
   }
-  const transformedCode = await transformEagerModuleGraph(
+  // `transformRequest` completes the entry's module-graph update. The eager
+  // traversal then awaits every missing dependency transform it discovers, so
+  // a global wait for unrelated client-environment requests is unnecessary.
+  const analysis = resolveSsrViteAssetGraphAnalysis(server, applicationId)
+  analysis.transformedCode.set(entryModule, transformed.code)
+  await transformEagerModuleGraph(
     server,
     entryModule,
-    new Map([[entryModule, transformed.code]])
+    analysis.transformedCode,
+    analysis.eagerDependencies
   )
-  await environment.waitForRequestsIdle()
-
   const styles = new Map<string, SsrApplicationStylesheet>()
   const visited = new Set<EnvironmentModuleNode>()
   // Preserve Vite's eager import order so the initial stylesheet cascade
@@ -275,11 +341,7 @@ export const resolveApplicationStyleDependencies = async (
     if (stylesheet && identity && !styles.has(identity)) {
       styles.set(identity, stylesheet)
     }
-    for (const dependency of await readEagerViteImportsFromCode(
-      server,
-      module,
-      transformedCode.get(module) ?? module.transformResult?.code
-    )) {
+    for (const dependency of analysis.eagerDependencies.get(module) ?? []) {
       await collectStyles(dependency)
     }
   }
@@ -312,7 +374,7 @@ export const resolveRenderedStyleDependencies = async (
 ): Promise<SsrRenderedApplicationAsset[]> => {
   const environment = server.environments.client
   const roots: EnvironmentModuleNode[] = []
-  const transformedCode = new Map<EnvironmentModuleNode, string>()
+  const analysis = resolveSsrViteAssetGraphAnalysis(server, applicationId)
   for (const moduleId of moduleIds) {
     let module = environment.moduleGraph.getModuleById(moduleId)
     for (const url of renderedModuleUrls(server, moduleId)) {
@@ -334,13 +396,16 @@ export const resolveRenderedStyleDependencies = async (
     }
     if (!module.transformResult) {
       const transformed = await environment.transformRequest(module.url)
-      if (transformed) transformedCode.set(module, transformed.code)
+      if (transformed) analysis.transformedCode.set(module, transformed.code)
     }
-    await transformEagerModuleGraph(server, module, transformedCode)
+    await transformEagerModuleGraph(
+      server,
+      module,
+      analysis.transformedCode,
+      analysis.eagerDependencies
+    )
     roots.push(module)
   }
-  await environment.waitForRequestsIdle()
-
   const assets = new Map<string, SsrRenderedApplicationAsset>()
   const visited = new Set<EnvironmentModuleNode>()
   const collect = async (module: EnvironmentModuleNode): Promise<void> => {
@@ -361,11 +426,7 @@ export const resolveRenderedStyleDependencies = async (
         })
       }
     }
-    for (const dependency of await readEagerViteImportsFromCode(
-      server,
-      module,
-      transformedCode.get(module) ?? module.transformResult?.code
-    )) {
+    for (const dependency of analysis.eagerDependencies.get(module) ?? []) {
       await collect(dependency)
     }
   }
