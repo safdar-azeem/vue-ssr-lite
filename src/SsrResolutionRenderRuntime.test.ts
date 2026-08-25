@@ -47,8 +47,7 @@ describe('renderSsrApplication resolution passes', () => {
             resolution.track(store.load())
             resolution.requestAdditionalPass()
           }
-          return () =>
-            h('main', store.state.loaded ? store.state.value : 'LOADING')
+          return () => h('main', store.state.loaded ? store.state.value : 'LOADING')
         },
       }),
     })
