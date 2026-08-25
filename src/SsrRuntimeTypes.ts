@@ -183,6 +183,8 @@ export interface SsrRenderResult<
   html: string
   /** Vue-native target-to-markup Teleport result. */
   teleports: Record<string, string>
+  /** Module ids reported by Vue for the final accepted SSR render pass. */
+  renderedModules: readonly string[]
   head: import('./SsrManagedHead').ManagedHeadSnapshot
   response: SsrResponseState
   hydrationState: SsrHydrationState<TApplicationState, TPublicConfig>
