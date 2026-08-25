@@ -119,10 +119,20 @@ export const resolveSsrResponseCacheKey = async (
   request: SsrHttpRequest<any>,
   strategy: SsrResponseCacheStrategy<any> | undefined
 ): Promise<string | null> => {
+  const hasCredentialHeader = Object.entries(request.headers).some(
+    ([name, value]) =>
+      ['cookie', 'authorization', 'proxy-authorization'].includes(
+        name.toLowerCase()
+      ) &&
+      (Array.isArray(value)
+        ? value.some((item) => item.trim().length > 0)
+        : String(value ?? '').trim().length > 0)
+  )
   if (
     !strategy ||
     request.method !== 'GET' ||
     request.cookie ||
+    hasCredentialHeader ||
     !Number.isFinite(strategy.ttlMs) ||
     strategy.ttlMs <= 0
   ) {
