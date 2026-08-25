@@ -8,9 +8,9 @@ import type { SsrRequestContext } from './SsrRuntimeTypes'
  * `vue-ssr-lite` through different module graphs. The global symbol registry
  * keeps the provider and consumer identities equal across those evaluations.
  */
-export const SSR_REQUEST_CONTEXT = Symbol.for(
-  'vue-ssr:request-context'
-) as InjectionKey<SsrRequestContext<any, any>>
+export const SSR_REQUEST_CONTEXT = Symbol.for('vue-ssr:request-context') as InjectionKey<
+  SsrRequestContext<any, any>
+>
 
 export const useSsrRequestContext = <
   TApplicationState = Record<string, unknown>,
