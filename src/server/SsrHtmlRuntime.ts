@@ -104,9 +104,94 @@ const applyHtmlAttributes = (
 export interface SsrHtmlInjection {
   applicationId: string
   html: string
-  teleports: string
+  /** Vue-native target-to-markup Teleport result. */
+  teleports: Readonly<Record<string, string>>
   head: ManagedHeadSnapshot | null
   state: SsrHydrationState<any, any>
+}
+
+const injectTeleportTarget = (
+  template: string,
+  target: string,
+  markup: string
+): string => {
+  if (target === 'body') {
+    return template.replace(SSR_TELEPORT_MARKER, () => markup)
+  }
+  if (target === 'head') {
+    return template.replace(
+      SSR_HEAD_MARKER,
+      () => `${markup}${SSR_HEAD_MARKER}`
+    )
+  }
+  if (!/^#[A-Za-z][A-Za-z0-9_-]*$/.test(target)) {
+    throw new Error(
+      `Vue Teleport target "${target}" is unsupported by the SSR template injector. Use body, head, or a dedicated element with a simple id selector (for example #modals).`
+    )
+  }
+
+  const id = target.slice(1)
+  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const targetOpenPattern = new RegExp(
+    `<[A-Za-z][\\w-]*\\b[^>]*\\bid=["']${escapedId}["'][^>]*>`,
+    'gi'
+  )
+  if ([...template.matchAll(targetOpenPattern)].length > 1) {
+    throw new Error(
+      `Vue Teleport target "${target}" appears more than once in the SSR HTML template. Teleport target ids must be unique.`
+    )
+  }
+  const targetPattern = new RegExp(
+    `(<([A-Za-z][\\w-]*)\\b[^>]*\\bid=["']${escapedId}["'][^>]*>)([\\s\\S]*?)(<\\/\\2>)`,
+    'i'
+  )
+  const match = targetPattern.exec(template)
+  if (!match) {
+    throw new Error(
+      `Vue Teleport target "${target}" is missing from the SSR HTML template. Add a dedicated ${target} container outside the application mount.`
+    )
+  }
+  if (match[3].includes(SSR_HTML_MARKER)) {
+    throw new Error(
+      `Vue Teleport target "${target}" cannot be the SSR application mount. Add a separate target container outside the mount.`
+    )
+  }
+  // The injector deliberately does not attempt to parse arbitrary HTML. A
+  // non-empty dedicated target could contain nested elements whose closing
+  // tags make a regex-based insertion ambiguous. Require target containers to
+  // be empty (apart from formatting whitespace) so Teleports are appended at
+  // the actual container level rather than silently corrupting the document.
+  if (match[3].trim()) {
+    throw new Error(
+      `Vue Teleport target "${target}" must be an empty dedicated container. Remove existing child markup from ${target} or use a separate target outside the application mount.`
+    )
+  }
+  return template.replace(
+    targetPattern,
+    (_match, opening: string, _tag: string, contents: string, closing: string) =>
+      `${opening}${contents}${markup}${closing}`
+  )
+}
+
+const injectSsrTeleports = (
+  template: string,
+  teleports: Readonly<Record<string, string>>
+): string => {
+  let html = template
+  const entries = Object.entries(teleports)
+  for (const [target, markup] of entries.filter(
+    ([target]) => target !== 'body' && target !== 'head'
+  )) {
+    if (!markup) continue
+    html = injectTeleportTarget(html, target, markup)
+  }
+  for (const target of ['head', 'body'] as const) {
+    const markup = teleports[target]
+    if (markup) html = injectTeleportTarget(html, target, markup)
+  }
+  // `body` is represented by the package marker; remove it when Vue produced
+  // no body Teleport while preserving every other target above.
+  return html.replace(SSR_TELEPORT_MARKER, '')
 }
 
 export const injectSsrHtml = (
@@ -127,10 +212,13 @@ export const injectSsrHtml = (
   const stateScript = `<script id="${escapeSsrHtml(stateId)}" type="application/json">${serializeSsrState(injection.state)}</script>`
   const snapshot = injection.head ?? { tags: [] }
   const documentTemplate = stripConflictingStaticTags(template, snapshot)
+  const withTeleports = injectSsrTeleports(
+    documentTemplate,
+    injection.teleports
+  )
   return applyHtmlAttributes(
-    documentTemplate
+    withTeleports
       .replace(SSR_HEAD_MARKER, serializeManagedHead(snapshot))
-      .replace(SSR_TELEPORT_MARKER, injection.teleports)
       .replace(SSR_HTML_MARKER, injection.html)
       .replace(SSR_STATE_MARKER, stateScript),
     snapshot.htmlAttributes
