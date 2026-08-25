@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { open, readFile, stat } from 'node:fs/promises'
+import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type { ViteDevServer } from 'vite'
@@ -66,6 +66,7 @@ import {
   isSsrResponseCacheable,
   resolveSsrResponseCacheKey,
 } from './SsrResponseCacheRuntime'
+import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
 
 export interface SsrManagedServerOptions {
   production: boolean
@@ -514,6 +515,16 @@ export const createSsrManagedServer = async (
     ssrManifest = parseSsrViteManifest(source, manifestPath)
   }
 
+  // Production build artifacts are immutable for a managed-server lifetime.
+  // Replacing the server invalidates this server-local store after deployment.
+  const productionTemplates = options.production
+    ? createSsrProductionTemplateStore({
+        load: (templatePath) => readFile(templatePath, 'utf8'),
+        prepare: prepareSsrHtmlTemplate,
+      })
+    : undefined
+  const productionTemplatePaths = new Map<string, string>()
+
   // Dev reloads the Vite SSR runtime on every request so HMR is picked up.
   // Coalesce concurrent loads (HMR storms) and keep the last good compile if a
   // reload throws mid-invalidation — otherwise one failed eval takes the site down.
@@ -540,22 +551,53 @@ export const createSsrManagedServer = async (
     return loadingDefinition
   }
 
+  const resolveTemplatePath = (
+    definition: SsrCompiledConfig,
+    templateName: string
+  ) =>
+    resolve(
+      options.production ? clientRoot : definition.server.root,
+      templateName
+    )
+
   const loadTemplate = async (
     definition: SsrCompiledConfig,
     templateName: string,
     requestUrl: string,
     signal?: AbortSignal
   ) => {
-    const runtimeRoot = definition.server.root
-    const template = await readFile(
-      resolve(options.production ? clientRoot : runtimeRoot, templateName),
-      { encoding: 'utf8', signal }
-    )
-    if (options.production || !options.vite) return template
+    const templatePath = resolveTemplatePath(definition, templateName)
+    if (productionTemplates) {
+      return productionTemplates.load(
+        productionTemplatePaths.get(templatePath) ?? templatePath
+      )
+    }
+    const template = await readFile(templatePath, { encoding: 'utf8', signal })
+    if (!options.vite) return template
     const templateUrl = `/${templateName
       .replaceAll('\\', '/')
       .replace(/^\/+/, '')}`
     return options.vite.transformIndexHtml(templateUrl, template, requestUrl)
+  }
+
+  const loadPreparedSsrTemplate = async (
+    definition: SsrCompiledConfig,
+    templateName: string,
+    mountSelector: string,
+    requestUrl: string,
+    signal?: AbortSignal
+  ) => {
+    if (productionTemplates) {
+      const templatePath = resolveTemplatePath(definition, templateName)
+      return productionTemplates.prepare(
+        productionTemplatePaths.get(templatePath) ?? templatePath,
+        mountSelector
+      )
+    }
+    return prepareSsrHtmlTemplate(
+      await loadTemplate(definition, templateName, requestUrl, signal),
+      mountSelector
+    )
   }
 
   const assertReady = async (definition: SsrCompiledConfig) => {
@@ -590,17 +632,21 @@ export const createSsrManagedServer = async (
       !initialRuntime.server.role ||
       application.roles.includes(initialRuntime.server.role)
   )
-  await Promise.all(
-    initialEnabledApplications.map(async (application) => {
-      const runtimeRoot = initialRuntime.server.root
-      const information = await stat(
-        resolve(
-          options.production ? clientRoot : runtimeRoot,
-          application.template
-        )
+  const initialTemplatePaths = [
+    ...new Set(
+      initialEnabledApplications.map((application) =>
+        resolveTemplatePath(initialRuntime, application.template)
       )
+    ),
+  ]
+  await Promise.all(
+    initialTemplatePaths.map(async (templatePath) => {
+      const information = await stat(templatePath)
       if (!information.isFile()) {
-        throw new Error(`Missing client entry: ${application.template}`)
+        throw new Error(`Missing client entry: ${templatePath}`)
+      }
+      if (options.production) {
+        productionTemplatePaths.set(templatePath, await realpath(templatePath))
       }
     })
   )
@@ -883,15 +929,15 @@ export const createSsrManagedServer = async (
         }
       }
 
-      let template = await scope.run(() =>
-        loadTemplate(
-          definition,
-          entry.template,
-          request.url || '/',
-          scope.signal
-        )
-      )
       if (entry.kind === 'spa') {
+        const template = await scope.run(() =>
+          loadTemplate(
+            definition,
+            entry.template,
+            request.url || '/',
+            scope.signal
+          )
+        )
         return sendResponse(request, response, {
           statusCode: 200,
           body: injectSpaDomainState(
@@ -910,9 +956,14 @@ export const createSsrManagedServer = async (
       }
 
       const application = entry.application!
-      template = prepareSsrHtmlTemplate(
-        template,
-        entry.mountSelector
+      const template = await scope.run(() =>
+        loadPreparedSsrTemplate(
+          definition,
+          entry.template,
+          entry.mountSelector,
+          request.url || '/',
+          scope.signal
+        )
       )
       const remainingRequestMs = scope.remainingMs()
       const configuredResolutionMs =
