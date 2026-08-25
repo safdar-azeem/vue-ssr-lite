@@ -47,7 +47,10 @@ import {
   resolveRenderedApplicationAssets,
   type SsrViteManifest,
 } from '../SsrRenderedAssetRuntime'
-import { resolveRenderedStyleDependencies } from '../vite/SsrViteAssetRuntime'
+import {
+  resolveRenderedStyleDependencies,
+  runWithSsrViteAssetResolutionContext,
+} from '../vite/SsrViteAssetRuntime'
 import {
   filterSsrCookieHeader,
   resolveSsrForwardedHost,
@@ -602,7 +605,10 @@ export const createSsrManagedServer = async (
     })
   )
 
-  const nodeServer = createServer(async (request, response) => {
+  const handleRequest = async (
+    request: IncomingMessage,
+    response: ServerResponse
+  ) => {
     const startedAt = Date.now()
     let pathname = '/'
     let rawAssetPathname = '/'
@@ -1104,7 +1110,15 @@ export const createSsrManagedServer = async (
       response.off('close', cancelClosedResponse)
       scope.dispose()
     }
-  })
+  }
+
+  const nodeServer = createServer((request, response) =>
+    options.vite
+      ? runWithSsrViteAssetResolutionContext(() =>
+          handleRequest(request, response)
+        )
+      : handleRequest(request, response)
+  )
 
   return {
     nodeServer,
