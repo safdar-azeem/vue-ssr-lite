@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { serializeSsrState } from '../SsrSerialization'
 import type {
   SsrHttpRequest,
   SsrHttpResponse,
@@ -20,9 +22,7 @@ interface SsrMemoryResponseCacheEntry {
 }
 
 const byteLength = (body: SsrHttpResponse['body']): number =>
-  typeof body === 'string'
-    ? new TextEncoder().encode(body).byteLength
-    : body?.byteLength ?? 0
+  typeof body === 'string' ? new TextEncoder().encode(body).byteLength : (body?.byteLength ?? 0)
 
 const cloneResponse = (response: SsrHttpResponse): SsrHttpResponse => ({
   statusCode: response.statusCode,
@@ -77,11 +77,7 @@ export const createSsrMemoryResponseCache = (
       entries.set(key, entry)
       return cloneResponse(entry.response)
     },
-    set(
-      key: string,
-      response: SsrHttpResponse,
-      writeOptions: SsrResponseCacheWriteOptions
-    ) {
+    set(key: string, response: SsrHttpResponse, writeOptions: SsrResponseCacheWriteOptions) {
       if (writeOptions.signal?.aborted) return
       const ttlMs = Number(writeOptions.ttlMs)
       if (!Number.isFinite(ttlMs) || ttlMs <= 0) return
@@ -121,9 +117,7 @@ export const resolveSsrResponseCacheKey = async (
 ): Promise<string | null> => {
   const hasCredentialHeader = Object.entries(request.headers).some(
     ([name, value]) =>
-      ['cookie', 'authorization', 'proxy-authorization'].includes(
-        name.toLowerCase()
-      ) &&
+      ['cookie', 'authorization', 'proxy-authorization'].includes(name.toLowerCase()) &&
       (Array.isArray(value)
         ? value.some((item) => item.trim().length > 0)
         : String(value ?? '').trim().length > 0)
@@ -140,13 +134,17 @@ export const resolveSsrResponseCacheKey = async (
   }
   const variation = strategy.vary ? await strategy.vary(request) : ''
   if (variation == null) return null
+  const publicConfigVariation = createHash('sha256')
+    .update(serializeSsrState(request.publicConfig))
+    .digest('base64url')
   return JSON.stringify([
-    'vue-ssr-lite:v1',
+    'vue-ssr-lite:v2',
     entryId,
     request.protocol,
     request.host,
     request.pathname,
     request.search,
+    publicConfigVariation,
     variation,
   ])
 }
