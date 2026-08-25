@@ -181,7 +181,8 @@ export interface SsrRenderResult<
   TPublicConfig = unknown,
 > {
   html: string
-  teleports: string
+  /** Vue-native target-to-markup Teleport result. */
+  teleports: Record<string, string>
   head: import('./SsrManagedHead').ManagedHeadSnapshot
   response: SsrResponseState
   hydrationState: SsrHydrationState<TApplicationState, TPublicConfig>
@@ -206,6 +207,13 @@ export interface SsrHttpResponse {
 export interface SsrResponseCacheWriteOptions {
   ttlMs: number
   tags?: readonly string[]
+  /** Aborts when the request producing this write is no longer active. */
+  signal?: AbortSignal
+}
+
+export interface SsrResponseCacheReadOptions {
+  /** Aborts when the request performing this read is no longer active. */
+  signal?: AbortSignal
 }
 
 export interface SsrResponseCacheInvalidation {
@@ -215,7 +223,8 @@ export interface SsrResponseCacheInvalidation {
 
 export interface SsrResponseCache {
   get: (
-    key: string
+    key: string,
+    options?: SsrResponseCacheReadOptions
   ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
   set: (
     key: string,
@@ -269,10 +278,22 @@ export interface SsrReadinessProbe {
 }
 
 export interface SsrLogger {
-  debug?: (event: string, details?: Record<string, unknown>) => void
-  info?: (event: string, details?: Record<string, unknown>) => void
-  warn?: (event: string, details?: Record<string, unknown>) => void
-  error?: (event: string, details?: Record<string, unknown>) => void
+  debug?: (
+    event: string,
+    details?: Record<string, unknown>
+  ) => void | Promise<void>
+  info?: (
+    event: string,
+    details?: Record<string, unknown>
+  ) => void | Promise<void>
+  warn?: (
+    event: string,
+    details?: Record<string, unknown>
+  ) => void | Promise<void>
+  error?: (
+    event: string,
+    details?: Record<string, unknown>
+  ) => void | Promise<void>
 }
 
 export interface SsrErrorRenderContext<TPublicConfig = unknown> {
@@ -290,6 +311,7 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
   role?: string
   trustProxy?: boolean
   clientOutDir?: string
+  /** One deadline for the complete application request. Defaults to 15 seconds. */
   requestTimeoutMs?: number
   shutdownTimeoutMs?: number
   cookieAllowlist?: string[]
@@ -318,7 +340,7 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
    */
   diagnostics?: boolean
   logger?: SsrLogger
-  onMetrics?: (metrics: SsrRenderMetrics) => void
+  onMetrics?: (metrics: SsrRenderMetrics) => void | Promise<void>
   renderError?: (
     context: SsrErrorRenderContext<TPublicConfig>
   ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
