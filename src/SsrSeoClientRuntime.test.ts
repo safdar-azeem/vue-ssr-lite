@@ -1,21 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import {
-  KeepAlive,
-  computed,
-  defineComponent,
-  h,
-  nextTick,
-  ref,
-} from 'vue'
+import { KeepAlive, computed, defineComponent, h, nextTick, ref } from 'vue'
 import { RouterView, type Router } from 'vue-router'
 import { defineApplication } from './index'
 import { useSeo } from './extensions/seo/useSeo'
 import { createSsrApplication } from './SsrApplicationRuntime'
-import {
-  resolveResponseStatusForRoute,
-  setResponseStatus,
-} from './SsrResponseStatus'
+import { resolveResponseStatusForRoute, setResponseStatus } from './SsrResponseStatus'
 import { createTestRenderRequest } from './SsrTestFixtures'
 
 const flushHead = async () => {
@@ -39,10 +29,7 @@ const waitForPath = async (router: Router, path: string) => {
   })
 }
 
-const mountClient = async (
-  definition: Parameters<typeof createSsrApplication>[0],
-  path = '/'
-) => {
+const mountClient = async (definition: Parameters<typeof createSsrApplication>[0], path = '/') => {
   window.history.replaceState({}, '', path)
   document.head.innerHTML = ''
   document.body.innerHTML = '<div id="app"></div>'
@@ -57,10 +44,7 @@ const mountClient = async (
   if (created.router) {
     await created.router.push(path)
     await created.router.isReady()
-    resolveResponseStatusForRoute(
-      created.context.response,
-      created.router.currentRoute.value
-    )
+    resolveResponseStatusForRoute(created.context.response, created.router.currentRoute.value)
   }
   created.app.mount('#app')
   created.managedHead.hydrate(document.head)
@@ -114,14 +98,14 @@ describe('reactive useSeo() in the browser', () => {
       ],
       seo: { siteUrl: 'https://ex.test' },
     })
-    expect(
-      document.querySelector('meta[name="description"]')?.getAttribute('content')
-    ).toBe('Ada profile')
+    expect(document.querySelector('meta[name="description"]')?.getAttribute('content')).toBe(
+      'Ada profile'
+    )
     name.value = 'Grace'
     await flushHead()
-    expect(
-      document.querySelector('meta[name="description"]')?.getAttribute('content')
-    ).toBe('Grace profile')
+    expect(document.querySelector('meta[name="description"]')?.getAttribute('content')).toBe(
+      'Grace profile'
+    )
     created.hydration.dispose()
     created.app.unmount()
   })
@@ -191,8 +175,7 @@ describe('reactive useSeo() in the browser', () => {
     const created = await mountClient({
       id: 'seo-keepalive',
       root: defineComponent({
-        setup: () => () =>
-          h(KeepAlive, null, { default: () => h(RouterView) }),
+        setup: () => () => h(KeepAlive, null, { default: () => h(RouterView) }),
       }),
       routes: [
         {
@@ -237,8 +220,7 @@ describe('reactive useSeo() in the browser', () => {
 })
 
 describe('browser response status across navigation', () => {
-  const robots = () =>
-    document.querySelector('meta[name="robots"]')?.getAttribute('content') ?? ''
+  const robots = () => document.querySelector('meta[name="robots"]')?.getAttribute('content') ?? ''
 
   it('resets meta.seo.status 404 to 200 on a normal route', async () => {
     const created = await mountClient(
