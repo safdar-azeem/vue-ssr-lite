@@ -14,10 +14,10 @@ import type {
   SsrRenderMode,
 } from './SsrConfigTypes'
 import { createSeoEndpoints } from './extensions/seo/SeoEndpoints'
-import { isPrivateSeoMode, isSeoEnabled } from './extensions/seo/types'
 import { defineSsrConfig } from './SsrConfigRuntime'
 import {
   readPublicUrl,
+  requiresProductionSeoOrigin,
   resolveServerSiteOrigin,
 } from './server/SsrSiteOriginRuntime'
 import {
@@ -91,11 +91,40 @@ export interface SsrCompiledConfig {
   name: string
   applications: SsrCompiledApplication[]
   defaultApplicationId?: string
-  server: SsrServerOptions<Record<string, unknown>>
+  server: SsrResolvedServerOptions
   readiness?: SsrReadinessProbe[]
   development: boolean
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
   sitemapProvider?: import('./extensions/seo/sitemap').SitemapProvider
+}
+
+export type SsrResolvedServerOptions = Omit<
+  SsrServerOptions<Record<string, unknown>>,
+  | 'root'
+  | 'host'
+  | 'role'
+  | 'trustProxy'
+  | 'clientOutDir'
+  | 'requestTimeoutMs'
+  | 'shutdownTimeoutMs'
+  | 'healthPath'
+  | 'readinessPath'
+  | 'maxResolutionPasses'
+  | 'resolutionDeadlineMs'
+  | 'diagnostics'
+> & {
+  root: string
+  host: string
+  role: string
+  trustProxy: boolean
+  clientOutDir: string
+  requestTimeoutMs: number
+  shutdownTimeoutMs: number
+  healthPath: string
+  readinessPath: string
+  maxResolutionPasses: number
+  resolutionDeadlineMs: number
+  diagnostics: boolean
 }
 
 export interface SsrViteApplicationEntry {
@@ -446,7 +475,7 @@ export const loadSsrConfigFile = async (
     write: false,
     platform: 'node',
     format: 'esm',
-    target: 'node20',
+    target: 'node22',
     packages: 'external',
     logLevel: 'silent',
   })
@@ -640,6 +669,61 @@ const resolveApplicationSource = async (
   return { ...resolved, id: applicationId }
 }
 
+const normalizeNonNegativeDuration = (
+  value: number | undefined,
+  fallback: number,
+  label: string
+): number => {
+  const resolved = value ?? fallback
+  if (!Number.isFinite(resolved) || resolved < 0) {
+    throw new Error(`${label} must be a finite non-negative number.`)
+  }
+  return resolved
+}
+
+const normalizeCompiledServerOptions = (
+  config: SsrNormalizedConfig,
+  options: CompileSsrConfigOptions,
+  development: boolean
+): SsrResolvedServerOptions => {
+  const requestTimeoutMs = normalizeNonNegativeDuration(
+    config.server?.requestTimeoutMs,
+    15_000,
+    'server.requestTimeoutMs'
+  )
+  const configuredPasses = config.server?.maxResolutionPasses ?? 4
+  if (!Number.isFinite(configuredPasses)) {
+    throw new Error('server.maxResolutionPasses must be a finite number.')
+  }
+  return {
+    root: config.server?.root || options.root || process.cwd(),
+    host: config.server?.host || '0.0.0.0',
+    port: config.server?.port,
+    role: config.runtime || 'unified',
+    trustProxy: config.server?.trustProxy ?? false,
+    clientOutDir: config.server?.clientOutDir || 'dist/client',
+    requestTimeoutMs,
+    shutdownTimeoutMs: normalizeNonNegativeDuration(
+      config.server?.shutdownTimeoutMs,
+      10_000,
+      'server.shutdownTimeoutMs'
+    ),
+    healthPath: config.server?.healthPath || '/healthz',
+    readinessPath: config.server?.readinessPath || '/readyz',
+    maxResolutionPasses: Math.max(1, Math.floor(configuredPasses)),
+    resolutionDeadlineMs: normalizeNonNegativeDuration(
+      config.server?.resolutionDeadlineMs,
+      requestTimeoutMs,
+      'server.resolutionDeadlineMs'
+    ),
+    diagnostics: config.server?.diagnostics ?? development,
+    logger: config.server?.logger,
+    onMetrics: config.server?.onMetrics,
+    renderError: config.server?.renderError,
+    publicConfig: {},
+  }
+}
+
 export const compileSsrConfig = async (
   loaded: unknown,
   options: CompileSsrConfigOptions = {}
@@ -724,9 +808,10 @@ export const compileSsrConfig = async (
               resolveSiteUrl,
               request,
               production: !development,
-              requireProductionOrigin:
-                isSeoEnabled(application.seo) &&
-                !isPrivateSeoMode(application.seo),
+              requireProductionOrigin: requiresProductionSeoOrigin(
+                app.render,
+                application.seo
+              ),
               allowHttpOrigin: application.seo?.allowHttpOrigin,
             }),
         }))
@@ -751,24 +836,6 @@ export const compileSsrConfig = async (
     readiness: config.readiness,
     resolveSiteUrl,
     sitemapProvider,
-    server: {
-      root: config.server?.root ?? options.root,
-      host: config.server?.host,
-      port: config.server?.port,
-      role: config.runtime ?? 'unified',
-      trustProxy: config.server?.trustProxy,
-      clientOutDir: config.server?.clientOutDir,
-      requestTimeoutMs: config.server?.requestTimeoutMs,
-      shutdownTimeoutMs: config.server?.shutdownTimeoutMs,
-      healthPath: config.server?.healthPath,
-      readinessPath: config.server?.readinessPath,
-      maxResolutionPasses: config.server?.maxResolutionPasses,
-      resolutionDeadlineMs: config.server?.resolutionDeadlineMs,
-      diagnostics: config.server?.diagnostics,
-      logger: config.server?.logger,
-      onMetrics: config.server?.onMetrics,
-      renderError: config.server?.renderError,
-      publicConfig: {},
-    },
+    server: normalizeCompiledServerOptions(config, options, development),
   }
 }
