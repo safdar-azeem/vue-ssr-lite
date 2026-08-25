@@ -15,6 +15,10 @@ import {
 import { resolveSitemapConfigPath } from '../server/SsrSitemapConfig'
 import { prepareSsrHtmlTemplate } from '../server/SsrHtmlRuntime'
 import {
+  serializeSsrProductionAssetMetadata,
+  SSR_PRODUCTION_ASSET_METADATA_PATH,
+} from '../SsrAssetMetadata'
+import {
   createSsrStylesheetLinkTags,
   resolveApplicationStyleDependencies,
 } from './SsrViteAssetRuntime'
@@ -236,6 +240,29 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       )
       if (!entry) return
       return generateSsrClientModule(root, entry)
+    },
+    generateBundle(_outputOptions, bundle) {
+      if (this.environment.config.consumer !== 'client') return
+      const immutable: string[] = []
+      for (const output of Object.values(bundle)) {
+        // Rollup exposes the pre-substitution placeholder filename for chunks.
+        // It differs from the final filename only when Rollup actually replaced
+        // a content-hash placeholder. Explicit fileName chunks have identical
+        // preliminary/final names, even when their literal text looks hashed.
+        // OutputAsset has no equivalent public provenance signal, so assets are
+        // deliberately conservative rather than inferred from their names.
+        if (
+          output.type === 'chunk' &&
+          output.preliminaryFileName !== output.fileName
+        ) {
+          immutable.push(output.fileName)
+        }
+      }
+      this.emitFile({
+        type: 'asset',
+        fileName: SSR_PRODUCTION_ASSET_METADATA_PATH,
+        source: serializeSsrProductionAssetMetadata(immutable),
+      })
     },
     transformIndexHtml: {
       order: 'pre',
