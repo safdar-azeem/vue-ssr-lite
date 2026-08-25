@@ -1,20 +1,9 @@
 import type { ExtensionDefinition } from './core/extensions/ExtensionDefinition'
 import type { SeoApplicationConfig } from './extensions/seo/types'
 import type { App, Component, Plugin } from 'vue'
-import type {
-  Router,
-  RouterHistory,
-  RouteRecordRaw,
-  RouterScrollBehavior,
-} from 'vue-router'
-import type {
-  SsrHydrationContext,
-  SsrHydrationController,
-} from './SsrHydrationRuntime'
-import type {
-  SsrRequestResolution,
-  SsrResolutionController,
-} from './SsrRequestResolution'
+import type { Router, RouterHistory, RouteRecordRaw, RouterScrollBehavior } from 'vue-router'
+import type { SsrHydrationContext, SsrHydrationController } from './SsrHydrationRuntime'
+import type { SsrRequestResolution, SsrResolutionController } from './SsrRequestResolution'
 
 export type SsrHeaderValue = string | string[] | undefined
 export type SsrHeaders = Record<string, SsrHeaderValue>
@@ -123,10 +112,7 @@ export interface SsrApplicationDefinition<
    * Advanced request-safe router factory. vue-ssr-lite supplies memory history
    * on the server and web history in the browser.
    */
-  router?: (options: {
-    history: RouterHistory
-    server: boolean
-  }) => Router
+  router?: (options: { history: RouterHistory; server: boolean }) => Router
   /**
    * Optional router scroll behaviour. When omitted, a sensible default is used
    * (restore saved position, scroll to hash, otherwise top). Provide one to keep
@@ -147,12 +133,8 @@ export interface SsrApplicationDefinition<
    */
   extensions?: readonly ExtensionDefinition[]
   createInitialState?: () => TApplicationState
-  install?: (
-    setup: SsrApplicationSetup<TApplicationState, TPublicConfig>
-  ) => void | Promise<void>
-  cleanup?: (
-    context: SsrRequestContext<TApplicationState, TPublicConfig>
-  ) => void | Promise<void>
+  install?: (setup: SsrApplicationSetup<TApplicationState, TPublicConfig>) => void | Promise<void>
+  cleanup?: (context: SsrRequestContext<TApplicationState, TPublicConfig>) => void | Promise<void>
 }
 
 /** Internal application definition after configuration assigns its identity. */
@@ -176,10 +158,7 @@ export interface SsrCreatedApplication<
   managedHead: import('./SsrManagedHead').ManagedHeadController
 }
 
-export interface SsrRenderResult<
-  TApplicationState = unknown,
-  TPublicConfig = unknown,
-> {
+export interface SsrRenderResult<TApplicationState = unknown, TPublicConfig = unknown> {
   html: string
   /** Vue-native target-to-markup Teleport result. */
   teleports: Record<string, string>
@@ -193,8 +172,7 @@ export interface SsrRenderResult<
 
 export type SsrEntryKind = 'ssr' | 'spa'
 
-export interface SsrHttpRequest<TPublicConfig = unknown>
-  extends SsrRenderRequest<TPublicConfig> {
+export interface SsrHttpRequest<TPublicConfig = unknown> extends SsrRenderRequest<TPublicConfig> {
   pathname: string
   search: string
   entryId: string
@@ -233,9 +211,7 @@ export interface SsrResponseCache {
     response: SsrHttpResponse,
     options: SsrResponseCacheWriteOptions
   ) => void | Promise<void>
-  invalidate: (
-    selector?: SsrResponseCacheInvalidation
-  ) => number | Promise<number>
+  invalidate: (selector?: SsrResponseCacheInvalidation) => number | Promise<number>
 }
 
 export interface SsrResponseCacheStrategy<TPublicConfig = unknown> {
@@ -247,16 +223,9 @@ export interface SsrResponseCacheStrategy<TPublicConfig = unknown> {
    * the cache. Requests with non-empty Cookie, Authorization, or
    * Proxy-Authorization headers are always bypassed.
    */
-  vary?: (
-    request: SsrHttpRequest<TPublicConfig>
-  ) => string | null | Promise<string | null>
-  tags?: (
-    request: SsrHttpRequest<TPublicConfig>
-  ) => readonly string[] | Promise<readonly string[]>
-  shouldCache?: (
-    response: SsrHttpResponse,
-    request: SsrHttpRequest<TPublicConfig>
-  ) => boolean
+  vary?: (request: SsrHttpRequest<TPublicConfig>) => string | null | Promise<string | null>
+  tags?: (request: SsrHttpRequest<TPublicConfig>) => readonly string[] | Promise<readonly string[]>
+  shouldCache?: (response: SsrHttpResponse, request: SsrHttpRequest<TPublicConfig>) => boolean
 }
 
 export interface SsrEndpointDefinition<TPublicConfig = unknown> {
@@ -281,22 +250,10 @@ export interface SsrReadinessProbe {
 }
 
 export interface SsrLogger {
-  debug?: (
-    event: string,
-    details?: Record<string, unknown>
-  ) => void | Promise<void>
-  info?: (
-    event: string,
-    details?: Record<string, unknown>
-  ) => void | Promise<void>
-  warn?: (
-    event: string,
-    details?: Record<string, unknown>
-  ) => void | Promise<void>
-  error?: (
-    event: string,
-    details?: Record<string, unknown>
-  ) => void | Promise<void>
+  debug?: (event: string, details?: Record<string, unknown>) => void | Promise<void>
+  info?: (event: string, details?: Record<string, unknown>) => void | Promise<void>
+  warn?: (event: string, details?: Record<string, unknown>) => void | Promise<void>
+  error?: (event: string, details?: Record<string, unknown>) => void | Promise<void>
 }
 
 export interface SsrErrorRenderContext<TPublicConfig = unknown> {
