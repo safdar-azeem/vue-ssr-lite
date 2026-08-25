@@ -24,6 +24,11 @@ export const normalizeSsrHost = (host: SsrHeaderValue): string => {
     return ''
   }
   try {
+    const explicitPort = raw.startsWith('[')
+      ? raw.match(/\]:(\d+)$/)?.[1]
+      : raw.split(':').length === 2
+        ? raw.match(/:(\d+)$/)?.[1]
+        : undefined
     const authority =
       raw.includes(':') && raw.split(':').length > 2 && !raw.startsWith('[')
         ? `[${raw}]`
@@ -44,7 +49,14 @@ export const normalizeSsrHost = (host: SsrHeaderValue): string => {
       hostname.includes(':') && !hostname.startsWith('[')
         ? `[${hostname}]`
         : hostname
-    return `${displayHost}${parsed.port ? `:${parsed.port}` : ''}`
+    const port = explicitPort == null ? parsed.port : String(Number(explicitPort))
+    if (
+      port &&
+      (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)
+    ) {
+      return ''
+    }
+    return `${displayHost}${port ? `:${port}` : ''}`
   } catch {
     return ''
   }
@@ -67,6 +79,20 @@ export const stripSsrHostPort = (host: SsrHeaderValue): string => {
  */
 export const normalizeSsrHostname = (host: SsrHeaderValue): string =>
   stripSsrHostPort(host)
+
+/** Port from a normalized authority, or an empty string when omitted. */
+export const readSsrHostPort = (host: SsrHeaderValue): string => {
+  const normalized = normalizeSsrHost(host)
+  if (!normalized) return ''
+  if (normalized.startsWith('[')) {
+    const end = normalized.indexOf(']')
+    return end >= 0 && normalized[end + 1] === ':'
+      ? normalized.slice(end + 2)
+      : ''
+  }
+  const match = normalized.match(/:(\d+)$/)
+  return match?.[1] ?? ''
+}
 
 export const normalizeSsrHostPattern = (pattern: string): string => {
   const value = pattern.trim().toLowerCase()
