@@ -51,6 +51,9 @@ const dummyRequest = (
   signal: new AbortController().signal,
   domain: {
     entry: applicationId,
+    authority: 'vue-ssr-lite.test',
+    protocol: 'https',
+    port: '',
     hostname: 'vue-ssr-lite.test',
     baseDomain: 'vue-ssr-lite.test',
     subdomain: null,
