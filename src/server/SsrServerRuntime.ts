@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFile, stat } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import type { ViteDevServer } from 'vite'
 import {
   compileSsrConfig,
@@ -27,7 +28,19 @@ import type {
   SsrHttpResponse,
 } from '../SsrRuntimeTypes'
 import { serializeSsrState } from '../SsrSerialization'
-import { resolveSsrProductionAsset } from './SsrAssetRuntime'
+import {
+  parseSsrProductionAssetMetadata,
+  SSR_PRODUCTION_ASSET_METADATA_PATH,
+} from '../SsrAssetMetadata'
+import {
+  isExpectedUnavailableAssetError,
+  isSsrProductionAssetNotModified,
+  parseSsrClientAssetManifest,
+  resolveSsrProductionAsset,
+  resolveSsrImmutableAssetPaths,
+  updateSsrProductionAssetMetadata,
+  type SsrResolvedProductionAsset,
+} from './SsrAssetRuntime'
 import {
   assertSupportedSsrViteBase,
   parseSsrViteManifest,
@@ -307,6 +320,89 @@ const sendResponse = (
   endResponse(request, response, result.body ?? '')
 }
 
+const productionAssetHeaders = (asset: SsrResolvedProductionAsset) => ({
+  'content-type': asset.contentType,
+  'content-length': String(asset.size),
+  'cache-control': asset.cacheControl,
+  etag: asset.etag,
+  'last-modified': asset.lastModified,
+})
+
+const isUnavailableAssetError = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR'
+}
+
+/**
+ * Execute static-file HTTP semantics directly against ServerResponse. This is
+ * intentionally separate from SsrHttpResponse so streams never acquire cache
+ * or custom-endpoint ownership semantics.
+ */
+export const writeSsrProductionAsset = async (
+  request: IncomingMessage,
+  response: ServerResponse,
+  resolvedAsset: SsrResolvedProductionAsset,
+  signal: AbortSignal,
+  openFile: typeof open = open
+): Promise<boolean> => {
+  let asset = resolvedAsset
+  if (isSsrProductionAssetNotModified(asset, request.headers)) {
+    response.writeHead(304, productionAssetHeaders(asset))
+    response.end()
+    return true
+  }
+  if (request.method === 'HEAD') {
+    response.writeHead(200, productionAssetHeaders(asset))
+    response.end()
+    return true
+  }
+
+  signal.throwIfAborted()
+  let file
+  try {
+    // Open before committing headers so a deletion between resolution and body
+    // delivery can still fall through to the controlled not-found path.
+    file = await openFile(asset.filePath, 'r')
+    const information = await file.stat()
+    if (!information.isFile()) {
+      await file.close()
+      return false
+    }
+    asset = updateSsrProductionAssetMetadata(asset, information)
+  } catch (error) {
+    await file?.close().catch(() => undefined)
+    if (isUnavailableAssetError(error)) return false
+    throw error
+  }
+
+  if (signal.aborted) {
+    await file.close()
+    signal.throwIfAborted()
+  }
+  // Metadata may have changed between resolver stat and open. Re-evaluate the
+  // validator against the opened representation before sending any headers.
+  if (isSsrProductionAssetNotModified(asset, request.headers)) {
+    await file.close()
+    response.writeHead(304, productionAssetHeaders(asset))
+    response.end()
+    return true
+  }
+
+  let source: ReturnType<typeof file.createReadStream> | undefined
+  try {
+    response.writeHead(200, productionAssetHeaders(asset))
+    source = file.createReadStream()
+    // pipeline owns source/destination error propagation, backpressure, and
+    // AbortSignal teardown. FileHandle.createReadStream closes its descriptor.
+    await pipeline(source, response, { signal })
+  } catch (error) {
+    if (source) source.destroy()
+    else await file.close().catch(() => undefined)
+    throw error
+  }
+  return true
+}
+
 const sendJson = (
   request: IncomingMessage,
   response: ServerResponse,
@@ -362,6 +458,46 @@ export const createSsrManagedServer = async (
   const viteBase = hasEnabledSsrApplications
     ? assertSupportedSsrViteBase(initialRuntime.viteBase)
     : initialRuntime.viteBase || '/'
+  let immutableAssetPaths: ReadonlySet<string> = new Set()
+  if (options.production) {
+    const clientManifestPath = resolve(clientRoot, '.vite/manifest.json')
+    const assetMetadataPath = resolve(
+      clientRoot,
+      SSR_PRODUCTION_ASSET_METADATA_PATH
+    )
+    let manifestAssets: ReadonlySet<string> = new Set()
+    let revisionedAssets: ReadonlySet<string> = new Set()
+    try {
+      manifestAssets = parseSsrClientAssetManifest(
+        await readFile(clientManifestPath, 'utf8'),
+        clientManifestPath
+      )
+    } catch (error) {
+      if (!isExpectedUnavailableAssetError(error)) {
+        throw new Error(
+          `vue-ssr-lite could not load Vite's client manifest at ${clientManifestPath}. ${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+      // A manually assembled client directory remains servable, but without
+      // authoritative build metadata every file gets conservative caching.
+    }
+    try {
+      revisionedAssets = parseSsrProductionAssetMetadata(
+        await readFile(assetMetadataPath, 'utf8'),
+        assetMetadataPath
+      )
+    } catch (error) {
+      if (!isExpectedUnavailableAssetError(error)) {
+        throw new Error(
+          `vue-ssr-lite could not load asset cache metadata at ${assetMetadataPath}. ${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+    }
+    immutableAssetPaths = resolveSsrImmutableAssetPaths(
+      manifestAssets,
+      revisionedAssets
+    )
+  }
   if (hasEnabledSsrApplications) {
     const manifestPath = resolve(clientRoot, '.vite/ssr-manifest.json')
     let source: string
@@ -469,6 +605,7 @@ export const createSsrManagedServer = async (
   const nodeServer = createServer(async (request, response) => {
     const startedAt = Date.now()
     let pathname = '/'
+    let rawAssetPathname = '/'
     let selectedEntryId = 'unknown'
     let activeRenderRequest: SsrHttpRequest<any> | undefined
     let activeDefinition = lastDefinition
@@ -488,6 +625,10 @@ export const createSsrManagedServer = async (
       const serverOptions = definition.server
       const requestUrl = new URL(request.url || '/', 'http://internal')
       pathname = requestUrl.pathname
+      // WHATWG URL parsing normalizes encoded dot segments. Keep the raw path
+      // for filesystem security checks so `%2e%2e` cannot be erased before the
+      // asset resolver has a chance to reject it.
+      rawAssetPathname = (request.url || '/').split('?', 1)[0]
       const healthPath = serverOptions.healthPath
       const readinessPath = serverOptions.readinessPath
 
@@ -653,16 +794,30 @@ export const createSsrManagedServer = async (
         if (result) return sendResponse(request, response, result)
       }
 
-      if (options.production) {
+      if (
+        options.production &&
+        (request.method === 'GET' || request.method === 'HEAD')
+      ) {
         const asset = await scope.run(() =>
-          resolveSsrProductionAsset(
+          resolveSsrProductionAsset({
             clientRoot,
-            pathname,
-            definition.applications.map(({ template }) => template),
-            scope.signal
-          )
+            pathname: rawAssetPathname,
+            protectedTemplates: definition.applications.map(
+              ({ template }) => template
+            ),
+            viteBase,
+            immutableAssetPaths,
+            signal: scope.signal,
+          })
         )
-        if (asset) return sendResponse(request, response, asset)
+        if (
+          asset &&
+          (await scope.run(() =>
+            writeSsrProductionAsset(request, response, asset, scope.signal)
+          ))
+        ) {
+          return
+        }
       } else if (
         options.vite &&
         (pathname.startsWith('/src/') ||
