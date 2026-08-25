@@ -1,3 +1,5 @@
+import './style.css'
+
 import { defineComponent, h } from 'vue'
 import { defineApplication } from '../../../src/index'
 
