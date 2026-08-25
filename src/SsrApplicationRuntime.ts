@@ -42,10 +42,12 @@ import type {
 const resolveApplicationSiteOrigin = (
   definition: SsrResolvedApplicationDefinition<any, any>,
   request: SsrRenderRequest<any>,
-  production: boolean
+  production: boolean,
+  requireSeoOrigin: boolean
 ): string => {
   const requireProductionOrigin =
     production &&
+    requireSeoOrigin &&
     isSeoEnabled(definition.seo) &&
     !isPrivateSeoMode(definition.seo)
   return resolveCanonicalOrigin({
@@ -147,7 +149,12 @@ export const createSsrApplication = async <
   const production = isSsrProduction()
   const siteOrigin =
     options.hydrationState?.siteOrigin ??
-    resolveApplicationSiteOrigin(definition, options.request, production)
+    resolveApplicationSiteOrigin(
+      definition,
+      options.request,
+      production,
+      !options.spa
+    )
   const managedHead = createManagedHeadController(options.server)
 
   // The hydration controller owns generic plugin state contribution and
