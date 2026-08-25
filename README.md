@@ -38,18 +38,6 @@ Or:
 yarn add vue-ssr-lite vue-router
 ```
 
-# Supported Host Versions
-
-vue-ssr-lite is verified against the following host-owned runtime contract:
-
-- Node.js `>=22.12.0`
-- Vue `^3.5.0`
-- Vue Router `^4.6.0`
-- Vite `^7.0.0`
-
-Vue, Vue Router, and Vite are peer dependencies supplied by the consuming
-application. Newer major versions are outside the currently verified contract.
-
 # Minimal Setup
 
 ## 1. Add the Vite plugin
@@ -61,7 +49,7 @@ import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 
 export default defineConfig({
-	plugins: [vue(), vueSsrLite()],
+  plugins: [vue(), vueSsrLite()],
 })
 ```
 
@@ -69,11 +57,11 @@ export default defineConfig({
 
 ```json
 {
-	"scripts": {
-		"dev": "vue-ssr-lite dev",
-		"build": "vue-ssr-lite build",
-		"start": "vue-ssr-lite start"
-	}
+  "scripts": {
+    "dev": "vue-ssr-lite dev",
+    "build": "vue-ssr-lite build",
+    "start": "vue-ssr-lite start"
+  }
 }
 ```
 
@@ -90,47 +78,14 @@ import App from './App.vue'
 import { routes } from './router/routes'
 
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 })
 ```
-
-Global CSS follows the normal Vite convention: import it from the application
-entry. vue-ssr-lite exposes entry-imported styles in the initial SSR document,
-then hands ownership to Vite during hydration so CSS HMR continues to work. Do
-not duplicate the import with a stylesheet link in `index.html`.
-
-Lazy Vue routes need no asset annotations. During SSR, vue-ssr-lite uses the
-modules reported by Vue to include only the rendered route's Vite-managed CSS.
-Production builds resolve those modules through Vite's generated SSR manifest
-and module-preload their client chunks; unrelated lazy routes remain excluded.
-SSR applications support Vite absolute-path and `http(s)` CDN bases. Relative
-Vite bases (`./` or an empty base) are rejected at startup because they cannot
-resolve assets correctly for arbitrary server-rendered route URLs.
 
 ## 4. HTML Entry (`index.html`)
 
 Keep your standard Vite `index.html` at the project root. No special SSR markup is required:
-
-```html
-<!doctype html>
-<html lang="en">
-	<head>
-		<meta charset="UTF-8" />
-		<meta
-			name="viewport"
-			content="width=device-width, initial-scale=1.0" />
-		<title>My App</title>
-	</head>
-
-	<body>
-		<div id="app"></div>
-		<script
-			type="module"
-			src="/src/main.ts"></script>
-	</body>
-</html>
-```
 
 ## 5. Start development
 
@@ -150,10 +105,10 @@ For stateful plugins such as Pinia, use a factory:
 import { createPinia } from 'pinia'
 
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 
-	plugins: () => [createPinia()],
+  plugins: () => [createPinia()],
 })
 ```
 
@@ -167,13 +122,13 @@ This creates an isolated plugin instance for each SSR application/request.
 
 ```ts
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 
-	seo: {
-		siteName: 'My App',
-		titleTemplate: '%s | My App',
-	},
+  seo: {
+    siteName: 'My App',
+    titleTemplate: '%s | My App',
+  },
 })
 ```
 
@@ -206,17 +161,17 @@ SEO can be defined in three places:
 
 ```ts
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 
-	seo: {
-		siteName: 'My Store',
-		title: 'Home',
-		titleTemplate: '%s | My Store',
-		description: 'My online store.',
-		image: 'https://example.com/social.png',
-		siteUrl: 'https://example.com',
-	},
+  seo: {
+    siteName: 'My Store',
+    title: 'Home',
+    titleTemplate: '%s | My Store',
+    description: 'My online store.',
+    image: 'https://example.com/social.png',
+    siteUrl: 'https://example.com',
+  },
 })
 ```
 
@@ -239,26 +194,26 @@ Common options:
 
 ```ts
 export const routes = [
-	{
-		path: '/',
-		component: HomeView,
-		meta: {
-			seo: {
-				title: 'Home',
-				description: 'Welcome to our website.',
-			},
-		},
-	},
-	{
-		path: '/:pathMatch(.*)*',
-		component: NotFoundView,
-		meta: {
-			seo: {
-				title: 'Page Not Found',
-				status: 404,
-			},
-		},
-	},
+  {
+    path: '/',
+    component: HomeView,
+    meta: {
+      seo: {
+        title: 'Home',
+        description: 'Welcome to our website.',
+      },
+    },
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    component: NotFoundView,
+    meta: {
+      seo: {
+        title: 'Page Not Found',
+        status: 404,
+      },
+    },
+  },
 ]
 ```
 
@@ -272,17 +227,17 @@ import { computed } from 'vue'
 import { useSeo } from 'vue-ssr-lite'
 
 const props = defineProps<{
-	product: {
-		name: string
-		description: string
-		image: string
-	}
+  product: {
+    name: string
+    description: string
+    image: string
+  }
 }>()
 
 useSeo({
-	title: computed(() => props.product.name),
-	description: computed(() => props.product.description),
-	image: computed(() => props.product.image),
+  title: computed(() => props.product.name),
+  description: computed(() => props.product.description),
+  image: computed(() => props.product.image),
 })
 </script>
 ```
@@ -291,20 +246,20 @@ Useful fields:
 
 ```ts
 useSeo({
-	title: 'Product',
-	description: 'Product description',
-	image: 'https://example.com/product.png',
-	canonical: '/products/item',
-	index: true,
-	follow: true,
+  title: 'Product',
+  description: 'Product description',
+  image: 'https://example.com/product.png',
+  canonical: '/products/item',
+  index: true,
+  follow: true,
 
-	openGraph: {
-		type: 'product',
-	},
+  openGraph: {
+    type: 'product',
+  },
 
-	twitter: {
-		card: 'summary_large_image',
-	},
+  twitter: {
+    card: 'summary_large_image',
+  },
 })
 ```
 
@@ -314,11 +269,11 @@ Values can be plain values, refs, computed refs, or getters.
 
 ```ts
 useSeo({
-	structuredData: {
-		'@context': 'https://schema.org',
-		'@type': 'Product',
-		name: 'Example Product',
-	},
+  structuredData: {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: 'Example Product',
+  },
 })
 ```
 
@@ -326,15 +281,15 @@ useSeo({
 
 ```ts
 useSeo({
-	meta: [{ name: 'theme-color', content: '#ffffff' }],
+  meta: [{ name: 'theme-color', content: '#ffffff' }],
 
-	links: [
-		{
-			rel: 'alternate',
-			hreflang: 'es',
-			href: 'https://example.com/es',
-		},
-	],
+  links: [
+    {
+      rel: 'alternate',
+      hreflang: 'es',
+      href: 'https://example.com/es',
+    },
+  ],
 })
 ```
 
@@ -365,8 +320,8 @@ import { setResponseStatus, useSeo } from 'vue-ssr-lite'
 const article = await fetchArticle()
 
 if (!article) {
-	setResponseStatus(404)
-	useSeo({ title: 'Article Not Found' })
+  setResponseStatus(404)
+  useSeo({ title: 'Article Not Found' })
 }
 ```
 
@@ -391,12 +346,12 @@ For dynamic routes such as `/blog/:slug`, create:
 import { defineSitemap, type SitemapContext } from 'vue-ssr-lite/server'
 
 export default defineSitemap(async (context: SitemapContext) => {
-	const articles = await loadPublishedArticles()
+  const articles = await loadPublishedArticles()
 
-	return articles.map((article) => ({
-		loc: `/blog/${article.slug}`,
-		lastmod: article.updatedAt,
-	}))
+  return articles.map((article) => ({
+    loc: `/blog/${article.slug}`,
+    lastmod: article.updatedAt,
+  }))
 })
 ```
 
@@ -425,14 +380,14 @@ Custom rules:
 
 ```ts
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 
-	seo: {
-		robotsTxt: {
-			disallow: ['/admin/', '/private/'],
-		},
-	},
+  seo: {
+    robotsTxt: {
+      disallow: ['/admin/', '/private/'],
+    },
+  },
 })
 ```
 
@@ -451,10 +406,10 @@ Use `publicConfig` to pass browser-safe server configuration into Vue.
 import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
-	publicConfig: () => ({
-		apiUrl: process.env.PUBLIC_API_URL,
-		environment: process.env.NODE_ENV,
-	}),
+  publicConfig: () => ({
+    apiUrl: process.env.PUBLIC_API_URL,
+    environment: process.env.NODE_ENV,
+  }),
 })
 ```
 
@@ -465,8 +420,8 @@ export default defineSsrConfig({
 import { usePublicConfig } from 'vue-ssr-lite'
 
 interface PublicConfig {
-	apiUrl: string
-	environment: string
+  apiUrl: string
+  environment: string
 }
 
 const config = usePublicConfig<PublicConfig>()
@@ -514,10 +469,10 @@ Use it for server settings or advanced application routing:
 import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
-	server: {
-		port: 3000,
-		trustProxy: true,
-	},
+  server: {
+    port: 3000,
+    trustProxy: true,
+  },
 })
 ```
 
@@ -585,9 +540,9 @@ Behind a trusted reverse proxy:
 
 ```ts
 export default defineSsrConfig({
-	server: {
-		trustProxy: true,
-	},
+  server: {
+    trustProxy: true,
+  },
 })
 ```
 
@@ -627,12 +582,12 @@ Environment variables:
 
 ```ts
 import {
-	defineApplication,
-	useSeo,
-	usePublicConfig,
-	useSiteOrigin,
-	setResponseStatus,
-	defineExtension,
+  defineApplication,
+  useSeo,
+  usePublicConfig,
+  useSiteOrigin,
+  setResponseStatus,
+  defineExtension,
 } from 'vue-ssr-lite'
 ```
 
@@ -655,11 +610,11 @@ import { vueSsrLite } from 'vue-ssr-lite/vite'
 
 ```ts
 import {
-	defineSsrConfig,
-	defineSitemap,
-	createSsrManagedServer,
-	createSsrMemoryResponseCache,
-	useSsrDomain,
+  defineSsrConfig,
+  defineSitemap,
+  createSsrManagedServer,
+  createSsrMemoryResponseCache,
+  useSsrDomain,
 } from 'vue-ssr-lite/server'
 ```
 
@@ -716,19 +671,19 @@ One server can host multiple applications:
 
 ```ts
 export default defineSsrConfig({
-	applications: {
-		website: {
-			app: './src/website/main.ts',
-			template: './index.html',
-			host: 'example.com',
-		},
+  applications: {
+    website: {
+      app: './src/website/main.ts',
+      template: './index.html',
+      host: 'example.com',
+    },
 
-		admin: {
-			app: './src/admin/main.ts',
-			template: './admin.html',
-			host: 'admin.example.com',
-		},
-	},
+    admin: {
+      app: './src/admin/main.ts',
+      template: './admin.html',
+      host: 'admin.example.com',
+    },
+  },
 })
 ```
 
@@ -739,21 +694,21 @@ physical HTML template; equivalent paths to the same template are rejected.
 
 ```ts
 export default defineSsrConfig({
-	applications: {
-		website: {
-			app: './src/website/main.ts',
-			template: './index.html',
-			host: 'example.com',
-			render: 'ssr',
-		},
+  applications: {
+    website: {
+      app: './src/website/main.ts',
+      template: './index.html',
+      host: 'example.com',
+      render: 'ssr',
+    },
 
-		admin: {
-			app: './src/admin/main.ts',
-			template: './admin.html',
-			host: 'admin.example.com',
-			render: 'spa',
-		},
-	},
+    admin: {
+      app: './src/admin/main.ts',
+      template: './admin.html',
+      host: 'admin.example.com',
+      render: 'spa',
+    },
+  },
 })
 ```
 
@@ -763,18 +718,18 @@ export default defineSsrConfig({
 
 ```ts
 export default defineSsrConfig({
-	applications: {
-		app: {
-			app: './src/app/main.ts',
+  applications: {
+    app: {
+      app: './src/app/main.ts',
 
-			domain: {
-				development: 'app.localhost',
-				production: 'app.example.com',
-				mode: 'root-and-subdomains',
-				customDomains: true,
-			},
-		},
-	},
+      domain: {
+        development: 'app.localhost',
+        production: 'app.example.com',
+        mode: 'root-and-subdomains',
+        customDomains: true,
+      },
+    },
+  },
 })
 ```
 
@@ -856,9 +811,9 @@ These features are optional. Most applications do not need them.
 
 ```ts
 export default defineSsrConfig({
-	cookies: {
-		allow: ['session', 'locale'],
-	},
+  cookies: {
+    allow: ['session', 'locale'],
+  },
 })
 ```
 
@@ -868,21 +823,21 @@ export default defineSsrConfig({
 
 ```ts
 export default defineSsrConfig({
-	endpoints: [
-		{
-			id: 'example',
+  endpoints: [
+    {
+      id: 'example',
 
-			match: (request) => request.pathname === '/api/example',
+      match: (request) => request.pathname === '/api/example',
 
-			handle: async () => ({
-				statusCode: 200,
-				headers: {
-					'content-type': 'application/json',
-				},
-				body: JSON.stringify({ ok: true }),
-			}),
-		},
-	],
+      handle: async () => ({
+        statusCode: 200,
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ok: true }),
+      }),
+    },
+  ],
 })
 ```
 
@@ -890,10 +845,10 @@ export default defineSsrConfig({
 
 ```ts
 export default defineSsrConfig({
-	responseCache: {
-		store: myCacheStore,
-		ttlMs: 60_000,
-	},
+  responseCache: {
+    store: myCacheStore,
+    ttlMs: 60_000,
+  },
 })
 ```
 
@@ -924,24 +879,24 @@ Use `defineExtension()` only for custom request/app-scoped runtime behavior:
 import { defineExtension } from 'vue-ssr-lite'
 
 const analytics = defineExtension({
-	name: 'analytics',
+  name: 'analytics',
 
-	createState() {
-		return {
-			enabled: true,
-		}
-	},
+  createState() {
+    return {
+      enabled: true,
+    }
+  },
 
-	setup(context) {
-		context.contributeHead({
-			meta: [
-				{
-					name: 'x-analytics',
-					content: 'enabled',
-				},
-			],
-		})
-	},
+  setup(context) {
+    context.contributeHead({
+      meta: [
+        {
+          name: 'x-analytics',
+          content: 'enabled',
+        },
+      ],
+    })
+  },
 })
 ```
 
@@ -949,10 +904,10 @@ Register it:
 
 ```ts
 export default defineApplication({
-	root: App,
-	routes,
+  root: App,
+  routes,
 
-	extensions: [analytics],
+  extensions: [analytics],
 })
 ```
 
@@ -972,10 +927,10 @@ Advanced:
 
 ```ts
 vueSsrLite({
-	config: './ssr.config.ts',
-	root: process.cwd(),
-	dedupe: ['some-package'],
-	ssrNoExternal: ['some-library'],
+  config: './ssr.config.ts',
+  root: process.cwd(),
+  dedupe: ['some-package'],
+  ssrNoExternal: ['some-library'],
 })
 ```
 
