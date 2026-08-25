@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineComponent, h, inject, onServerPrefetch, ref } from 'vue'
+import { defineComponent, h, inject, onServerPrefetch, ref, useSSRContext } from 'vue'
 import { defineApplication } from './index'
 import { SSR_REQUEST_RESOLUTION } from './SsrRequestResolution'
 import { ssrWatch } from './SsrReactivityRuntime'
@@ -59,6 +59,34 @@ describe('renderSsrApplication resolution passes', () => {
     expect(rendered.html).toContain('DATA')
     expect(rendered.html).not.toContain('LOADING')
     expect(rendered.metrics.renderPasses).toBe(2)
+  })
+
+  it('returns modules from only the final accepted render pass', async () => {
+    const store = createDeferredStore(5)
+    const application = defineApplication({
+      id: 'final-assets',
+      root: defineComponent({
+        setup() {
+          const resolution = inject(SSR_REQUEST_RESOLUTION)!
+          const ssrContext = useSSRContext<{ modules?: Set<string> }>()
+          if (!store.state.loaded) {
+            ssrContext.modules ??= new Set()
+            ssrContext.modules.add('src/Discarded.vue')
+            resolution.track(store.load())
+            resolution.requestAdditionalPass()
+          } else {
+            ssrContext.modules ??= new Set()
+            ssrContext.modules.add('src/Final.vue')
+          }
+          return () => h('main', store.state.loaded ? 'final' : 'discarded')
+        },
+      }),
+    })
+
+    const rendered = await renderSsrApplication(application, baseRequest(), {
+      resolutionDeadlineMs: 1_000,
+    })
+    expect(rendered.renderedModules).toEqual(['src/Final.vue'])
   })
 
   it('is bounded: never exceeds maxResolutionPasses when work never settles', async () => {
