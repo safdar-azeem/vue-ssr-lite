@@ -67,5 +67,14 @@
   },
   "resolutions": {
     "vite": "7.3.6"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "semi": false,
+    "singleQuote": true,
+    "trailingComma": "es5",
+    "tabWidth": 2,
+    "endOfLine": "auto",
+    "bracketSameLine": true
   }
 }
