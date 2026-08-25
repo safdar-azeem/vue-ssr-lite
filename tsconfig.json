@@ -10,9 +10,21 @@
     "sourceMap": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["node", "vite/client", "vitest/globals"]
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node",
+      "vite/client",
+      "vitest/globals"
+    ]
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ]
 }
