@@ -4,7 +4,19 @@ import {
   normalizeSiteOrigin,
   resolveCanonicalOrigin,
 } from '../SsrCanonicalOrigin'
-import type { SsrHttpRequest } from '../SsrRuntimeTypes'
+import type { SsrEntryKind, SsrHttpRequest } from '../SsrRuntimeTypes'
+import {
+  isPrivateSeoMode,
+  isSeoEnabled,
+  type SeoApplicationConfig,
+} from '../extensions/seo/types'
+
+/** Shared startup/request rule for authoritative public SEO origins. */
+export const requiresProductionSeoOrigin = (
+  kind: SsrEntryKind,
+  seo: SeoApplicationConfig | undefined
+): boolean =>
+  kind === 'ssr' && isSeoEnabled(seo) && !isPrivateSeoMode(seo)
 
 export interface ResolveServerSiteOriginOptions {
   siteUrl?: string
