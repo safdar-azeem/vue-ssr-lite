@@ -11,6 +11,7 @@ import type {
   SsrConfig,
   SsrConfigExport,
   SsrDomainMode,
+  SsrPublicConfigFactory,
   SsrRenderMode,
 } from './SsrConfigTypes'
 import { createSeoEndpoints } from './extensions/seo/SeoEndpoints'
@@ -34,10 +35,7 @@ import type {
   SsrResponseCacheStrategy,
   SsrServerOptions,
 } from './SsrRuntimeTypes'
-import {
-  SsrHostConfigurationError,
-  validateSsrHostEntries,
-} from './server/SsrHostRuntime'
+import { SsrHostConfigurationError, validateSsrHostEntries } from './server/SsrHostRuntime'
 import { prepareSsrHtmlTemplate } from './server/SsrHtmlRuntime'
 import {
   generateSsrDevelopmentRenderedStylesheetHandoff,
@@ -77,9 +75,7 @@ export interface SsrCompiledApplication {
   cookieAllowlist: string[]
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
-  publicConfigFactory?: () =>
-    | Record<string, unknown>
-    | Promise<Record<string, unknown>>
+  publicConfigFactory?: SsrPublicConfigFactory
   applicationModule?: SsrApplicationModuleRef
   domain: {
     development: string
@@ -211,20 +207,17 @@ const assertUniqueApplicationTemplates = (
   }
 }
 
-export const isSsrApplicationModuleRef = (
-  value: unknown
-): value is SsrApplicationModuleRef =>
+export const isSsrApplicationModuleRef = (value: unknown): value is SsrApplicationModuleRef =>
   Boolean(
     value &&
-      typeof value === 'object' &&
-      'module' in value &&
-      typeof (value as SsrApplicationModuleRef).module === 'string'
+    typeof value === 'object' &&
+    'module' in value &&
+    typeof (value as SsrApplicationModuleRef).module === 'string'
   )
 
 const asApplicationSource = (
   value: SsrApplicationSource | string | undefined
-): SsrApplicationSource =>
-  typeof value === 'string' ? { module: value } : value!
+): SsrApplicationSource => (typeof value === 'string' ? { module: value } : value!)
 
 const normalizeHostname = (value: string, label: string): string => {
   const normalized = stripSsrHostPort(normalizeSsrHost(value) || value)
@@ -306,9 +299,7 @@ const normalizeApplication = (
     throw new Error(`Application "${id}" must be an object.`)
   }
   if (input.app && input.application) {
-    throw new Error(
-      `Application "${id}" cannot declare both app and application. Use app.`
-    )
+    throw new Error(`Application "${id}" cannot declare both app and application. Use app.`)
   }
   const render = input.render ?? 'ssr'
   if (render !== 'ssr' && render !== 'spa') {
@@ -363,8 +354,7 @@ export const normalizeSsrConfig = (
     throw new Error('ssr.config must export an object or a function returning one.')
   }
   const development =
-    options.development ??
-    (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
+    options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
   const hasApplications = config.applications != null
   if (hasApplications) {
     const singleApplicationKeys = [
@@ -383,9 +373,7 @@ export const normalizeSsrConfig = (
       'publicConfig',
     ] as const
     const configRecord = config as unknown as Record<string, unknown>
-    const mixedKey = singleApplicationKeys.find(
-      (key) => configRecord[key] !== undefined
-    )
+    const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
     if (mixedKey) {
       throw new Error(
         `SSR config cannot use single-application field \`${mixedKey}\` with applications. Move it into the relevant applications entry.`
@@ -481,10 +469,7 @@ const assertConventionFiles = async (root: string, config: SsrConfig) => {
 }
 
 /** Load optional overrides; absence means the standard Vue conventions. */
-export const loadSsrConfigFile = async (
-  root: string,
-  configPath?: string
-): Promise<SsrConfig> => {
+export const loadSsrConfigFile = async (root: string, configPath?: string): Promise<SsrConfig> => {
   const absoluteConfig = await resolveSsrConfigPath(root, configPath)
   if (!absoluteConfig) {
     const config: SsrConfig = {}
@@ -601,9 +586,7 @@ export const generateSsrRuntimeModule = (
     configPath
       ? '  const exported = __ssrUserConfig?.default ?? __ssrUserConfig\n  const config = typeof exported === "function" ? await exported() : exported'
       : '  const config = {}',
-    sitemapPath
-      ? '  config.sitemap = __ssrSitemap?.default ?? __ssrSitemap'
-      : '',
+    sitemapPath ? '  config.sitemap = __ssrSitemap?.default ?? __ssrSitemap' : '',
     `  const viteBase = ${JSON.stringify(viteBase)}`,
     '  if (config?.applications) {',
     '    const applications = { ...config.applications }',
@@ -620,10 +603,7 @@ export const generateSsrRuntimeModule = (
   ].join('\n')
 }
 
-export const generateSsrClientModule = (
-  root: string,
-  entry: SsrViteApplicationEntry
-): string => {
+export const generateSsrClientModule = (root: string, entry: SsrViteApplicationEntry): string => {
   const definitionPath = absoluteImportPath(root, entry.definition)
   const importStatement = entry.exportName
     ? `import { ${entry.exportName} as loadApplication } from ${JSON.stringify(definitionPath)}`
@@ -633,12 +613,8 @@ export const generateSsrClientModule = (
   return [
     importStatement,
     `import { ${mountFunction} } from 'vue-ssr-lite/client'`,
-    ...(entry.kind === 'ssr'
-      ? generateSsrDevelopmentStylesheetHandoff(entry.id)
-      : []),
-    ...(entry.kind === 'ssr'
-      ? generateSsrDevelopmentRenderedStylesheetHandoff(entry.id)
-      : []),
+    ...(entry.kind === 'ssr' ? generateSsrDevelopmentStylesheetHandoff(entry.id) : []),
+    ...(entry.kind === 'ssr' ? generateSsrDevelopmentRenderedStylesheetHandoff(entry.id) : []),
     'const definition = typeof loadApplication === "function"',
     '  ? await loadApplication()',
     '  : loadApplication',
@@ -689,9 +665,7 @@ const resolveApplicationSource = async (
   let loader: SsrApplicationLoader = source as SsrApplicationLoader
   if (isSsrApplicationModuleRef(source)) {
     const root = options.root || process.cwd()
-    const specifier = source.module.startsWith('.')
-      ? resolve(root, source.module)
-      : source.module
+    const specifier = source.module.startsWith('.') ? resolve(root, source.module) : source.module
     const mod = options.importModule
       ? await options.importModule(source.module)
       : ((await import(pathToFileURL(specifier).href)) as Record<string, unknown>)
@@ -769,8 +743,7 @@ export const compileSsrConfig = async (
   const exported = moduleValue?.default ?? (loaded as SsrConfigExport)
   const raw = typeof exported === 'function' ? await exported() : exported
   const development =
-    options.development ??
-    (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
+    options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
   const config = normalizeSsrConfig((raw || {}) as SsrConfig, {
     root: options.root,
     development,
@@ -783,14 +756,10 @@ export const compileSsrConfig = async (
     typeof loadedRecord.__vueSsrLiteViteBase === 'string'
       ? loadedRecord.__vueSsrLiteViteBase
       : undefined
-  const sitemapPath = options.root
-    ? await resolveSitemapConfigPath(options.root)
-    : undefined
+  const sitemapPath = options.root ? await resolveSitemapConfigPath(options.root) : undefined
   const sitemapProvider =
     (await loadSitemapProvider(loadedRecord?.sitemap)) ??
-    (sitemapPath
-      ? await importSitemapProvider(sitemapPath, options.importModule)
-      : undefined)
+    (sitemapPath ? await importSitemapProvider(sitemapPath, options.importModule) : undefined)
   const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord?.resolveSiteUrl
   const applications: SsrCompiledApplication[] = []
   for (const app of Object.values(config.applications)) {
@@ -852,10 +821,7 @@ export const compileSsrConfig = async (
               resolveSiteUrl,
               request,
               production: !development,
-              requireProductionOrigin: requiresProductionSeoOrigin(
-                app.render,
-                application.seo
-              ),
+              requireProductionOrigin: requiresProductionSeoOrigin(app.render, application.seo),
               allowHttpOrigin: application.seo?.allowHttpOrigin,
             }),
         }))
