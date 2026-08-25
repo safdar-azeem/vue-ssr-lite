@@ -74,6 +74,7 @@ const runConfig = async (
     }
   )) as {
     resolve?: { dedupe?: string[] }
+    optimizeDeps?: { include?: string[] }
     ssr?: {
       external?: string[]
       noExternal?: Array<string | RegExp>
@@ -123,6 +124,7 @@ describe('SSR Vite package identity', () => {
     expect(config.resolve?.dedupe).toContain('vue-router')
     expect(config.resolve?.dedupe).toContain('vue-ssr-lite')
     expect(config.resolve?.dedupe).not.toContain('@vue/server-renderer')
+    expect(config.optimizeDeps?.include).toEqual(['vue-ssr-lite/client'])
     expect(config.ssr?.external).toContain('vue-ssr-lite')
     expect(config.ssr?.noExternal).not.toContain('vue-ssr-lite')
   })
