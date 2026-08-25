@@ -7,6 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { build, createServer, type ViteDevServer } from 'vite'
 import {
+  parseSsrProductionAssetMetadata,
+  SSR_PRODUCTION_ASSET_METADATA_PATH,
+} from '../SsrAssetMetadata'
+import {
   extractSsrViteEntries,
   generateSsrClientModule,
   generateSsrRuntimeModule,
@@ -355,9 +359,10 @@ describe('zero-config clean consumer fixture', () => {
     expect(builtHtml).not.toContain('/src/main.ts')
     expect(builtHtml).not.toContain('/@vue-ssr-lite/client/app')
     expect(builtHtml).not.toContain('?html-proxy&index=')
-    expect(builtHtml).toMatch(
-      /<script type="module"[^>]+src="\/products\/assets\/[^"']+\.js"/
-    )
+    const entryScriptHref = builtHtml.match(
+      /<script type="module"[^>]+src="(\/products\/assets\/[^"']+\.js)"/
+    )?.[1]
+    expect(entryScriptHref).toBeTruthy()
     const stylesheetHref = builtHtml.match(
       /<link rel="stylesheet"[^>]+href="(\/products\/assets\/[^"']+\.css)"/
     )?.[1]
@@ -388,19 +393,22 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: {
-            port: 0,
-            clientOutDir: productionOutDir,
-          },
-          resolveSiteUrl: () => 'https://example.com',
-          application: { root: Root },
-          template: './index.html',
-          domain: {
-            production: 'localhost',
-            customDomains: true,
-          },
-        } as any),
+        default: {
+          ...defineSsrConfig({
+            server: {
+              port: 0,
+              clientOutDir: productionOutDir,
+            },
+            resolveSiteUrl: () => 'https://example.com',
+            application: { root: Root },
+            template: './index.html',
+            domain: {
+              production: 'localhost',
+              customDomains: true,
+            },
+          } as any),
+          __vueSsrLiteViteBase: '/products/',
+        },
       }),
     })
     await managedServer.listen()
@@ -412,6 +420,38 @@ describe('zero-config clean consumer fixture', () => {
     expect(response.status).toBe(200)
     expect(responseHtml).toContain(stylesheetHref!)
     expect(responseHtml).toContain('<main>production-clean-consumer</main>')
+    const emittedStylesheet = await readFile(
+      join(productionOutDir, stylesheetHref!.replace(/^\/products\//, ''))
+    )
+    const stylesheetResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}${stylesheetHref}`
+    )
+    expect(stylesheetResponse.status).toBe(200)
+    expect(stylesheetResponse.headers.get('content-type')).toBe(
+      'text/css; charset=utf-8'
+    )
+    expect(stylesheetResponse.headers.get('content-length')).toBe(
+      String(emittedStylesheet.byteLength)
+    )
+    // Rollup does not expose hash-substitution provenance for OutputAsset, so
+    // CSS stays conservative instead of relying on its hash-looking filename.
+    expect(stylesheetResponse.headers.get('cache-control')).toBe(
+      'public, max-age=3600'
+    )
+    expect(Buffer.from(await stylesheetResponse.arrayBuffer())).toEqual(
+      emittedStylesheet
+    )
+    const emittedEntry = await readFile(
+      join(productionOutDir, entryScriptHref!.replace(/^\/products\//, ''))
+    )
+    const entryResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}${entryScriptHref}`
+    )
+    expect(entryResponse.status).toBe(200)
+    expect(entryResponse.headers.get('cache-control')).toBe(
+      'public, max-age=31536000, immutable'
+    )
+    expect(Buffer.from(await entryResponse.arrayBuffer())).toEqual(emittedEntry)
 
     await managedServer.close()
     managedServer = undefined
@@ -429,13 +469,16 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: { port: 0, clientOutDir: productionOutDir },
-          resolveSiteUrl: () => 'https://example.com',
-          application: applicationModule.default,
-          template: './index.html',
-          domain: { production: 'localhost', customDomains: true },
-        } as any),
+        default: {
+          ...defineSsrConfig({
+            server: { port: 0, clientOutDir: productionOutDir },
+            resolveSiteUrl: () => 'https://example.com',
+            application: applicationModule.default,
+            template: './index.html',
+            domain: { production: 'localhost', customDomains: true },
+          } as any),
+          __vueSsrLiteViteBase: '/products/',
+        },
       }),
     })
     await managedServer.listen()
@@ -473,6 +516,159 @@ describe('zero-config clean consumer fixture', () => {
     expect(lazyHtml).toContain(`rel="modulepreload" href="${lazyJs}"`)
     expect(lazyHtml).toContain(`rel="stylesheet" href="${asyncCardCss}"`)
     expect(lazyHtml).toContain(`rel="modulepreload" href="${asyncCardJs}"`)
+  })
+
+  it('keeps manifest-owned stable Vite output names conservatively cached', async () => {
+    productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
+    await build({
+      root: fixtureRoot,
+      configFile: join(fixtureRoot, 'vite.config.ts'),
+      base: '/products/',
+      build: {
+        outDir: productionOutDir,
+        emptyOutDir: true,
+        rollupOptions: {
+          output: {
+            entryFileNames: 'assets/[name].js',
+            chunkFileNames: 'assets/[name].js',
+            assetFileNames: 'assets/[name][extname]',
+          },
+        },
+      },
+    })
+
+    const manifest = JSON.parse(
+      await readFile(join(productionOutDir, '.vite/manifest.json'), 'utf8')
+    ) as Record<string, { file?: string; isEntry?: boolean }>
+    const stableEntry = Object.values(manifest).find(
+      (entry) => entry.isEntry && entry.file?.endsWith('.js')
+    )?.file
+    expect(stableEntry).toBeTruthy()
+    expect(stableEntry).not.toMatch(/-[A-Za-z0-9_-]{6,}\.js$/)
+
+    const cacheMetadata = parseSsrProductionAssetMetadata(
+      await readFile(
+        join(productionOutDir, SSR_PRODUCTION_ASSET_METADATA_PATH),
+        'utf8'
+      )
+    )
+    expect(cacheMetadata.has(stableEntry!)).toBe(false)
+
+    const Root = defineComponent({
+      setup: () => () => h('main', 'stable-output-consumer'),
+    })
+    managedServer = await createSsrManagedServer({
+      production: true,
+      root: fixtureRoot,
+      loadRuntime: async () => ({
+        default: {
+          ...defineSsrConfig({
+            server: { port: 0, clientOutDir: productionOutDir },
+            resolveSiteUrl: () => 'https://example.com',
+            application: { root: Root },
+            template: './index.html',
+            domain: { production: 'localhost', customDomains: true },
+          } as any),
+          __vueSsrLiteViteBase: '/products/',
+        },
+      }),
+    })
+    await managedServer.listen()
+    const assetResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}/products/${stableEntry}`
+    )
+
+    expect(assetResponse.status).toBe(200)
+    expect(assetResponse.headers.get('content-type')).toBe(
+      'text/javascript; charset=utf-8'
+    )
+    expect(assetResponse.headers.get('cache-control')).toBe(
+      'public, max-age=3600'
+    )
+    expect((await assetResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
+  })
+
+  it('excludes explicit hash-looking chunk filenames from revision metadata', async () => {
+    productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
+    const explicitFileName = 'assets/manual-ABCDEF12.js'
+    const publicId = 'virtual:explicit-hash-looking-chunk'
+    const resolvedId = `\0${publicId}`
+    await build({
+      root: fixtureRoot,
+      configFile: join(fixtureRoot, 'vite.config.ts'),
+      base: '/products/',
+      plugins: [
+        {
+          name: 'test-explicit-hash-looking-chunk',
+          buildStart() {
+            this.emitFile({
+              type: 'chunk',
+              id: publicId,
+              fileName: explicitFileName,
+            })
+          },
+          resolveId(id) {
+            if (id === publicId) return resolvedId
+          },
+          load(id) {
+            if (id === resolvedId) return 'export const manual = true'
+          },
+        },
+      ],
+      build: { outDir: productionOutDir, emptyOutDir: true },
+    })
+
+    const emittedSource = await readFile(
+      join(productionOutDir, explicitFileName)
+    )
+    expect(emittedSource.byteLength).toBeGreaterThan(0)
+    // The literal filename intentionally resembles Vite's normal
+    // `assets/[name]-[hash].js` output despite bypassing that pattern.
+    expect(explicitFileName).toMatch(/^assets\/[A-Za-z0-9_-]+-[A-Z0-9]{8}\.js$/)
+
+    const manifest = JSON.parse(
+      await readFile(join(productionOutDir, '.vite/manifest.json'), 'utf8')
+    ) as Record<string, { file?: string }>
+    expect(
+      Object.values(manifest).some(({ file }) => file === explicitFileName)
+    ).toBe(true)
+    const cacheMetadata = parseSsrProductionAssetMetadata(
+      await readFile(
+        join(productionOutDir, SSR_PRODUCTION_ASSET_METADATA_PATH),
+        'utf8'
+      )
+    )
+    expect(cacheMetadata.has(explicitFileName)).toBe(false)
+
+    const Root = defineComponent({
+      setup: () => () => h('main', 'explicit-output-consumer'),
+    })
+    managedServer = await createSsrManagedServer({
+      production: true,
+      root: fixtureRoot,
+      loadRuntime: async () => ({
+        default: {
+          ...defineSsrConfig({
+            server: { port: 0, clientOutDir: productionOutDir },
+            resolveSiteUrl: () => 'https://example.com',
+            application: { root: Root },
+            template: './index.html',
+            domain: { production: 'localhost', customDomains: true },
+          } as any),
+          __vueSsrLiteViteBase: '/products/',
+        },
+      }),
+    })
+    await managedServer.listen()
+    const response = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}/products/${explicitFileName}`
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe(
+      'public, max-age=3600'
+    )
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(emittedSource)
   })
 
   it('preserves a Vite CDN base for rendered lazy route assets', async () => {
