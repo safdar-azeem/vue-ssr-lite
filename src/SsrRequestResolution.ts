@@ -146,11 +146,7 @@ export const createSsrResolutionController = (
       passRequested = false
     },
     pendingWork: () =>
-      disposed
-        ? []
-        : [...tracked]
-            .filter((entry) => !entry.settled)
-            .map((entry) => entry.promise),
+      disposed ? [] : [...tracked].filter((entry) => !entry.settled).map((entry) => entry.promise),
     additionalPassRequested: () => !disposed && passRequested,
     drain: async (deadlineMs: number, signal?: AbortSignal): Promise<boolean> => {
       const settleAll = async (): Promise<boolean> => {
