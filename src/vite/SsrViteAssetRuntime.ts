@@ -120,11 +120,11 @@ export const normalizeViteAssetUrl = (
  * public Rollup parser, then map those imports back to public graph nodes.
  * This adapter is the sole dependency-classification compatibility boundary.
  */
-export const readEagerViteImports = async (
+const readEagerViteImportsFromCode = async (
   server: ViteDevServer,
-  module: EnvironmentModuleNode
+  module: EnvironmentModuleNode,
+  code: string | null | undefined
 ): Promise<EnvironmentModuleNode[]> => {
-  const code = module.transformResult?.code
   if (code == null) {
     throw new Error(
       `vue-ssr-lite cannot inspect eager imports for untransformed Vite module ${module.url}.`
@@ -185,27 +185,40 @@ export const readEagerViteImports = async (
   return dependencies
 }
 
+export const readEagerViteImports = async (
+  server: ViteDevServer,
+  module: EnvironmentModuleNode
+): Promise<EnvironmentModuleNode[]> =>
+  readEagerViteImportsFromCode(server, module, module.transformResult?.code)
+
 const transformEagerModuleGraph = async (
   server: ViteDevServer,
-  entryModule: EnvironmentModuleNode
-): Promise<void> => {
+  entryModule: EnvironmentModuleNode,
+  transformedCode = new Map<EnvironmentModuleNode, string>()
+): Promise<Map<EnvironmentModuleNode, string>> => {
   const environment = server.environments.client
   const visited = new Set<EnvironmentModuleNode>([entryModule])
   const visit = async (module: EnvironmentModuleNode): Promise<void> => {
-    const dependencies = (await readEagerViteImports(server, module)).filter(
-      (dependency) => !visited.has(dependency)
-    )
+    // Dependency optimization can invalidate a graph node while its request is
+    // completing. The returned transform is still the usable result for this
+    // traversal, even when Vite intentionally leaves transformResult unset.
+    let code = transformedCode.get(module) ?? module.transformResult?.code
+    if (code == null) {
+      code = (await environment.transformRequest(module.url))?.code
+    }
+    if (code != null) transformedCode.set(module, code)
+    const dependencies = (
+      await readEagerViteImportsFromCode(server, module, code)
+    ).filter((dependency) => !visited.has(dependency))
     await Promise.all(
       dependencies.map(async (dependency) => {
         visited.add(dependency)
-        if (!dependency.transformResult) {
-          await environment.transformRequest(dependency.url)
-        }
         await visit(dependency)
       })
     )
   }
   await visit(entryModule)
+  return transformedCode
 }
 
 const toApplicationStylesheet = (
@@ -241,7 +254,11 @@ export const resolveApplicationStyleDependencies = async (
       `vue-ssr-lite could not find application "${applicationId}" in Vite's client module graph after transforming ${browserEntryUrl}.`
     )
   }
-  await transformEagerModuleGraph(server, entryModule)
+  const transformedCode = await transformEagerModuleGraph(
+    server,
+    entryModule,
+    new Map([[entryModule, transformed.code]])
+  )
   await environment.waitForRequestsIdle()
 
   const styles = new Map<string, SsrApplicationStylesheet>()
@@ -258,7 +275,11 @@ export const resolveApplicationStyleDependencies = async (
     if (stylesheet && identity && !styles.has(identity)) {
       styles.set(identity, stylesheet)
     }
-    for (const dependency of await readEagerViteImports(server, module)) {
+    for (const dependency of await readEagerViteImportsFromCode(
+      server,
+      module,
+      transformedCode.get(module) ?? module.transformResult?.code
+    )) {
       await collectStyles(dependency)
     }
   }
@@ -291,6 +312,7 @@ export const resolveRenderedStyleDependencies = async (
 ): Promise<SsrRenderedApplicationAsset[]> => {
   const environment = server.environments.client
   const roots: EnvironmentModuleNode[] = []
+  const transformedCode = new Map<EnvironmentModuleNode, string>()
   for (const moduleId of moduleIds) {
     let module = environment.moduleGraph.getModuleById(moduleId)
     for (const url of renderedModuleUrls(server, moduleId)) {
@@ -311,9 +333,10 @@ export const resolveRenderedStyleDependencies = async (
       )
     }
     if (!module.transformResult) {
-      await environment.transformRequest(module.url)
+      const transformed = await environment.transformRequest(module.url)
+      if (transformed) transformedCode.set(module, transformed.code)
     }
-    await transformEagerModuleGraph(server, module)
+    await transformEagerModuleGraph(server, module, transformedCode)
     roots.push(module)
   }
   await environment.waitForRequestsIdle()
@@ -338,7 +361,11 @@ export const resolveRenderedStyleDependencies = async (
         })
       }
     }
-    for (const dependency of await readEagerViteImports(server, module)) {
+    for (const dependency of await readEagerViteImportsFromCode(
+      server,
+      module,
+      transformedCode.get(module) ?? module.transformResult?.code
+    )) {
       await collect(dependency)
     }
   }
