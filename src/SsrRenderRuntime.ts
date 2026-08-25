@@ -4,6 +4,7 @@ import { createSsrResolutionController } from './SsrRequestResolution'
 import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
+import { safeSsrLog } from './SsrObservability'
 import type {
   SsrResolvedApplicationDefinition,
   SsrCreatedApplication,
@@ -15,6 +16,12 @@ import type {
 
 const now = () => globalThis.performance?.now?.() ?? Date.now()
 const byteLength = (value: string) => new TextEncoder().encode(value).byteLength
+
+const throwIfRequestAborted = (signal: AbortSignal): void => {
+  if (!signal.aborted) return
+  if (signal.reason instanceof Error) throw signal.reason
+  throw new DOMException('The SSR request was aborted.', 'AbortError')
+}
 
 export interface SsrRenderOptions {
   /**
@@ -39,8 +46,40 @@ const reportDiagnostics = (
 ) => {
   for (const diagnostic of messages) {
     const detail = { requestId, applicationId, code: diagnostic.code }
-    if (logger?.warn) logger.warn(`ssr.diagnostic.${diagnostic.code}`, detail)
-    else console.warn(`[vue-ssr-lite] ${diagnostic.message}`, detail)
+    if (
+      !safeSsrLog(
+        logger,
+        'warn',
+        `ssr.diagnostic.${diagnostic.code}`,
+        detail
+      )
+    ) {
+      try {
+        console.warn(`[vue-ssr-lite] ${diagnostic.message}`, detail)
+      } catch {
+        // Diagnostics are best effort.
+      }
+    }
+  }
+}
+
+const reportCleanupFailure = (
+  logger: SsrLogger | undefined,
+  event: string,
+  requestId: string,
+  applicationId: string,
+  error: unknown
+): void => {
+  const details = {
+    requestId,
+    applicationId,
+    error: error instanceof Error ? error.message : String(error),
+  }
+  if (safeSsrLog(logger, 'error', event, details)) return
+  try {
+    console.error(`[vue-ssr-lite] ${event}`, details)
+  } catch {
+    // Cleanup reporting must not become a cleanup failure.
   }
 }
 
@@ -55,6 +94,7 @@ export const renderSsrApplication = async <
   request: SsrRenderRequest<TPublicConfig>,
   options: SsrRenderOptions = {}
 ): Promise<SsrRenderResult<TApplicationState, TPublicConfig>> => {
+  throwIfRequestAborted(request.signal)
   const startedAt = now()
   const maxPasses = Math.max(1, Math.floor(options.maxResolutionPasses ?? 4))
   const deadlineMs = options.resolutionDeadlineMs ?? 0
@@ -73,9 +113,8 @@ export const renderSsrApplication = async <
     | SsrCreatedApplication<TApplicationState, TPublicConfig>
     | undefined
   let html = ''
-  let teleports = ''
+  let teleports: Record<string, string> = {}
   let passes = 0
-  let primaryError: unknown
 
   const disposeCurrent = async () => {
     if (!created) return
@@ -84,18 +123,31 @@ export const renderSsrApplication = async <
     try {
       await definition.cleanup?.(current.context)
     } catch (error) {
-      console.error('[vue-ssr-lite] application cleanup failed', error)
+      reportCleanupFailure(
+        options.logger,
+        'ssr.application.cleanup.failed',
+        request.requestId,
+        definition.id,
+        error
+      )
     }
     try {
       current.hydration.dispose()
     } catch (error) {
-      console.error('[vue-ssr-lite] hydration cleanup failed', error)
+      reportCleanupFailure(
+        options.logger,
+        'ssr.hydration.cleanup.failed',
+        request.requestId,
+        definition.id,
+        error
+      )
     }
   }
 
   try {
     let finalized = false
     for (let pass = 0; pass < maxPasses && !finalized; pass += 1) {
+      throwIfRequestAborted(request.signal)
       passes = pass + 1
       resolution.beginPass(pass)
       created = await createSsrApplication(definition, {
@@ -104,12 +156,14 @@ export const renderSsrApplication = async <
         resumeState: pass === 0 ? undefined : carried,
         resolution,
       })
+      throwIfRequestAborted(request.signal)
       if (pass === 0) contextReadyAt = now()
 
       if (created.router) {
         const url = new URL(request.url)
         await created.router.push(`${url.pathname}${url.search}${url.hash}`)
         await created.router.isReady()
+        throwIfRequestAborted(request.signal)
         resolveResponseStatusForRoute(
           created.context.response,
           created.router.currentRoute.value
@@ -119,7 +173,8 @@ export const renderSsrApplication = async <
 
       const ssrContext: { teleports?: Record<string, string> } = {}
       html = await renderToString(created.app, ssrContext)
-      teleports = ssrContext.teleports?.body ?? ''
+      throwIfRequestAborted(request.signal)
+      teleports = { ...(ssrContext.teleports ?? {}) }
       renderedAt = now()
 
       const pending = resolution.pendingWork()
@@ -142,6 +197,7 @@ export const renderSsrApplication = async <
       // Another pass is warranted. Carry plugin state forward, await the
       // registered work (bounded), then recreate the app warm.
       await resolution.drain(deadlineMs, request.signal)
+      throwIfRequestAborted(request.signal)
       carried = created.hydration.collect()
       await disposeCurrent()
     }
@@ -197,26 +253,31 @@ export const renderSsrApplication = async <
         renderPasses: passes,
       },
     }
-  } catch (error) {
-    primaryError = error
-    throw error
   } finally {
-    let cleanupError: unknown
     if (created) {
       try {
         await definition.cleanup?.(created.context)
       } catch (error) {
-        cleanupError = error
-        console.error('[vue-ssr-lite] application cleanup failed', error)
+        reportCleanupFailure(
+          options.logger,
+          'ssr.application.cleanup.failed',
+          request.requestId,
+          definition.id,
+          error
+        )
       }
       try {
         created.hydration.dispose()
       } catch (error) {
-        console.error('[vue-ssr-lite] hydration cleanup failed', error)
-        if (!cleanupError) cleanupError = error
+        reportCleanupFailure(
+          options.logger,
+          'ssr.hydration.cleanup.failed',
+          request.requestId,
+          definition.id,
+          error
+        )
       }
     }
     resolution.dispose()
-    if (!primaryError && cleanupError) throw cleanupError
   }
 }
