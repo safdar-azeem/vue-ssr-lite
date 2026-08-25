@@ -1,8 +1,17 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import vue from '@vitejs/plugin-vue'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { build, createServer, type ViteDevServer } from 'vite'
@@ -29,10 +38,13 @@ const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
   '../../fixtures/clean-consumer'
 )
+const packageRoot = join(fixtureRoot, '../..')
 
 let devServer: ViteDevServer | undefined
 let managedServer: SsrManagedServer | undefined
 let productionOutDir = ''
+let viteCacheDir = ''
+let coldConsumerRoot = ''
 
 afterEach(async () => {
   await devServer?.close()
@@ -42,6 +54,14 @@ afterEach(async () => {
   if (productionOutDir) {
     await rm(productionOutDir, { recursive: true, force: true })
     productionOutDir = ''
+  }
+  if (viteCacheDir) {
+    await rm(viteCacheDir, { recursive: true, force: true })
+    viteCacheDir = ''
+  }
+  if (coldConsumerRoot) {
+    await rm(coldConsumerRoot, { recursive: true, force: true })
+    coldConsumerRoot = ''
   }
 })
 
@@ -293,6 +313,127 @@ describe('zero-config clean consumer fixture', () => {
     expect(html).toContain('data-vue-ssr-lite-style="app"')
     expect(stylesheetIndex).toBeGreaterThan(-1)
     expect(stylesheetIndex).toBeLessThan(clientIndex)
+  })
+
+  it('serves concurrent first SSR navigations from a cold Vite optimizer cache', async () => {
+    coldConsumerRoot = await mkdtemp(
+      join(tmpdir(), 'vue-ssr-lite-cold-consumer-')
+    )
+    viteCacheDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-vite-cache-'))
+    await cp(fixtureRoot, coldConsumerRoot, { recursive: true })
+    const mainPath = join(coldConsumerRoot, 'src/main.ts')
+    await writeFile(
+      mainPath,
+      (await readFile(mainPath, 'utf8')).replace(
+        "../../../src/index",
+        'vue-ssr-lite'
+      )
+    )
+    const installedModules = join(coldConsumerRoot, 'node_modules')
+    const installedPackage = join(installedModules, 'vue-ssr-lite')
+    await mkdir(installedPackage, { recursive: true })
+    await Promise.all([
+      writeFile(
+        join(installedPackage, 'package.json'),
+        JSON.stringify({
+          name: 'vue-ssr-lite',
+          type: 'module',
+          exports: {
+            '.': './index.mjs',
+            './client': './client.mjs',
+          },
+        })
+      ),
+      writeFile(
+        join(installedPackage, 'index.mjs'),
+        'export const defineApplication = (definition) => definition\n'
+      ),
+      writeFile(
+        join(installedPackage, 'client.mjs'),
+        'export const hydrateSsrApplication = () => {}\n'
+      ),
+      symlink(join(packageRoot, 'node_modules/vue'), join(installedModules, 'vue')),
+      symlink(
+        join(packageRoot, 'node_modules/vue-router'),
+        join(installedModules, 'vue-router')
+      ),
+    ])
+    devServer = await createServer({
+      root: coldConsumerRoot,
+      configFile: false,
+      cacheDir: viteCacheDir,
+      plugins: [vueSsrLite({ root: coldConsumerRoot }), vue()],
+      server: {
+        middlewareMode: true,
+        hmr: { server: createHttpServer() },
+      },
+      appType: 'custom',
+    })
+    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const clientGraph = devServer.environments.client.moduleGraph
+    const hasGeneratedClientEntry = () =>
+      [...clientGraph.urlToModuleMap.values()].some((module) =>
+        module.url.includes('/@vue-ssr-lite/client/app')
+      )
+    expect(hasGeneratedClientEntry()).toBe(false)
+
+    managedServer = await createSsrManagedServer({
+      production: false,
+      root: coldConsumerRoot,
+      vite: devServer,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          application: applicationModule.default,
+        } as any),
+      }),
+    })
+    await managedServer.listen()
+    expect(hasGeneratedClientEntry()).toBe(false)
+    const origin = `http://127.0.0.1:${managedServer.address().port}`
+    const firstWave = await Promise.all(
+      ['/', '/', '/lazy'].map(async (path) => {
+        const response = await fetch(`${origin}${path}`, {
+          headers: { accept: 'text/html' },
+        })
+        return { path, status: response.status, html: await response.text() }
+      })
+    )
+
+    for (const { path, status, html } of firstWave) {
+      expect(status, path).toBe(200)
+      expect(html, path).toContain('/@vue-ssr-lite/client/app')
+      expect(html, path).toContain('/src/style.css')
+      expect(html, path).toContain('data-vue-ssr-lite-style="app"')
+      expect(html, path).not.toContain('Application unavailable')
+      expect(html, path).not.toContain(
+        'cannot inspect eager imports for untransformed Vite module'
+      )
+      expect(html.indexOf('/src/style.css'), path).toBeLessThan(
+        html.indexOf('/@vue-ssr-lite/client/app')
+      )
+      if (path === '/lazy') {
+        expect(html).toContain('lazy-consumer')
+        expect(html).toContain('data-vue-ssr-lite-rendered-style="app"')
+      } else {
+        expect(html).toContain('class="home-page"')
+        expect(html).toContain('clean-consumer</div>')
+      }
+    }
+    const clientModuleUrls = [...clientGraph.urlToModuleMap.values()].map(
+      (module) => module.url
+    )
+    expect(clientModuleUrls).toContainEqual(
+      expect.stringContaining('vue-ssr-lite_client.js?v=')
+    )
+
+    const subsequent = await fetch(`${origin}/`, {
+      headers: { accept: 'text/html' },
+    })
+    const subsequentHtml = await subsequent.text()
+    expect(subsequent.status).toBe(200)
+    expect(subsequentHtml).toContain('class="home-page"')
+    expect(subsequentHtml).not.toContain('Application unavailable')
   })
 
   it('injects only the rendered lazy Vue route CSS in development', async () => {
