@@ -65,6 +65,41 @@ describe('SSR HTML runtime', () => {
       .toThrow('missing mount element')
   })
 
+  it('targets only an exact genuine mount id and preserves lookalike attributes', () => {
+    const template = prepareSsrHtmlTemplate(
+      `<html><head></head><body><section data-id="app"></section><aside aria-id='app'></aside><div class="shell" id='app'> \n </div></body></html>`
+    )
+
+    expect(template).toContain('<section data-id="app"></section>')
+    expect(template).toContain("<aside aria-id='app'></aside>")
+    expect(template).toContain(
+      `<div class="shell" id='app'><!--vue-ssr-lite:html--></div>`
+    )
+  })
+
+  it('rejects lookalike, case-mismatched, duplicate, and non-empty mounts', () => {
+    expect(() =>
+      prepareSsrHtmlTemplate(
+        '<html><head></head><body><div data-id="app"></div><div aria-id="app"></div></body></html>'
+      )
+    ).toThrow('missing mount element #app')
+    expect(() =>
+      prepareSsrHtmlTemplate(
+        '<html><head></head><body><div id="APP"></div></body></html>'
+      )
+    ).toThrow('missing mount element #app')
+    expect(() =>
+      prepareSsrHtmlTemplate(
+        '<html><head></head><body><div id="app"></div><main id="app"></main></body></html>'
+      )
+    ).toThrow('appears more than once')
+    expect(() =>
+      prepareSsrHtmlTemplate(
+        '<html><head></head><body><div id="app"><div>nested</div><p>surrounding</p></div></body></html>'
+      )
+    ).toThrow('must be an empty dedicated container')
+  })
+
   it('merges declared HTML attributes without dropping template attributes', () => {
     const template = prepareSsrHtmlTemplate(
       '<html lang="en" data-shell="public"><head></head><body><div id="app"></div></body></html>'
@@ -218,5 +253,81 @@ describe('SSR HTML runtime', () => {
         teleports: { '.modal': '<div>Unsafe</div>' },
       })
     ).toThrow('is unsupported by the SSR template injector')
+  })
+
+  it('uses exact genuine id attributes for Vue Teleport targets', () => {
+    const source =
+      '<html><head></head><body><div id="app"></div><div data-id="modals"></div><aside aria-id="modals"></aside><div class="target" id="modals"></div></body></html>'
+    const template = prepareSsrHtmlTemplate(source)
+    const injection = {
+      applicationId: 'public',
+      html: '<main>Application</main>',
+      head: { tags: [] },
+      state: {
+        version: 1 as const,
+        applicationId: 'public',
+        publicConfig: {},
+        domain: {
+          entry: 'public',
+          authority: 'public.test',
+          protocol: 'https' as const,
+          port: '',
+          hostname: 'public.test',
+          baseDomain: 'public.test',
+          subdomain: null,
+          isCustomDomain: false,
+          development: false,
+          params: {},
+        },
+        application: {},
+      },
+    }
+
+    const html = injectSsrHtml(template, {
+      ...injection,
+      teleports: { '#modals': '<dialog>Exact</dialog>' },
+    })
+    expect(html).toContain('<div data-id="modals"></div>')
+    expect(html).toContain('<aside aria-id="modals"></aside>')
+    expect(html).toContain(
+      '<div class="target" id="modals"><dialog>Exact</dialog></div>'
+    )
+
+    const lookalikeOnly = prepareSsrHtmlTemplate(
+      '<html><head></head><body><div id="app"></div><div data-id="modals"></div></body></html>'
+    )
+    expect(() =>
+      injectSsrHtml(lookalikeOnly, {
+        ...injection,
+        teleports: { '#modals': '<dialog>Missing</dialog>' },
+      })
+    ).toThrow('is missing from the SSR HTML template')
+
+    const wrongCase = prepareSsrHtmlTemplate(
+      '<html><head></head><body><div id="app"></div><div id="MODALS"></div></body></html>'
+    )
+    expect(() =>
+      injectSsrHtml(wrongCase, {
+        ...injection,
+        teleports: { '#modals': '<dialog>Missing</dialog>' },
+      })
+    ).toThrow('is missing from the SSR HTML template')
+
+    const duplicate = prepareSsrHtmlTemplate(
+      '<html><head></head><body><div id="app"></div><div id="modals"></div><aside id="modals"></aside></body></html>'
+    )
+    expect(() =>
+      injectSsrHtml(duplicate, {
+        ...injection,
+        teleports: { '#modals': '<dialog>Duplicate</dialog>' },
+      })
+    ).toThrow('Teleport target ids must be unique')
+
+    expect(() =>
+      injectSsrHtml(template, {
+        ...injection,
+        teleports: { '#app': '<dialog>Unsafe</dialog>' },
+      })
+    ).toThrow('cannot be the SSR application mount')
   })
 })
