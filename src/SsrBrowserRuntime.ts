@@ -5,14 +5,19 @@ import { getSsrStateElementId } from './SsrSerialization'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import type {
   SsrHydrationState,
+  SsrApplicationDefinition,
   SsrRenderRequest,
-  SsrResolvedApplicationDefinition,
 } from './SsrRuntimeTypes'
+
+/** Application definition after the server/config integration assigns its id. */
+export type SsrClientApplicationDefinition<
+  TApplicationState = Record<string, unknown>,
+  TPublicConfig = unknown,
+> = SsrApplicationDefinition<TApplicationState, TPublicConfig> & { id: string }
 
 export interface SsrHydrateOptions {
   mountSelector?: string
   stateElementId?: string
-  removeHeadSelector?: string
 }
 
 export interface SsrSpaMountOptions<TPublicConfig = unknown> {
@@ -68,7 +73,7 @@ const readSpaDomainState = <TPublicConfig>(): {
 }
 
 export const hydrateSsrApplication = async (
-  definition: SsrResolvedApplicationDefinition<any, any>,
+  definition: SsrClientApplicationDefinition<any, any>,
   options: SsrHydrateOptions = {}
 ): Promise<void> => {
   const stateElementId =
@@ -138,7 +143,7 @@ export const mountSpaApplication = async <
   TApplicationState extends Record<string, any> = Record<string, unknown>,
   TPublicConfig = unknown,
 >(
-  definition: SsrResolvedApplicationDefinition<
+  definition: SsrClientApplicationDefinition<
     TApplicationState,
     TPublicConfig
   >,
