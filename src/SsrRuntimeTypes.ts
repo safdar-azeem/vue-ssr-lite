@@ -242,7 +242,8 @@ export interface SsrResponseCacheStrategy<TPublicConfig = unknown> {
   /**
    * Adds publication/data version, locale, or another public discriminator to
    * the package-owned application + host + route key. Returning null bypasses
-   * the cache. Requests with forwarded cookies are always bypassed.
+   * the cache. Requests with non-empty Cookie, Authorization, or
+   * Proxy-Authorization headers are always bypassed.
    */
   vary?: (
     request: SsrHttpRequest<TPublicConfig>
