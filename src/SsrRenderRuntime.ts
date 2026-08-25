@@ -114,6 +114,7 @@ export const renderSsrApplication = async <
     | undefined
   let html = ''
   let teleports: Record<string, string> = {}
+  let renderedModules: string[] = []
   let passes = 0
 
   const disposeCurrent = async () => {
@@ -171,10 +172,16 @@ export const renderSsrApplication = async <
       }
       if (pass === 0) routeReadyAt = now()
 
-      const ssrContext: { teleports?: Record<string, string> } = {}
+      const ssrContext: {
+        teleports?: Record<string, string>
+        modules?: Set<string>
+      } = {}
       html = await renderToString(created.app, ssrContext)
       throwIfRequestAborted(request.signal)
       teleports = { ...(ssrContext.teleports ?? {}) }
+      // Replace rather than union: only the pass that produced `html` may own
+      // request assets. Earlier resolution passes are intentionally discarded.
+      renderedModules = [...(ssrContext.modules ?? [])]
       renderedAt = now()
 
       const pending = resolution.pendingWork()
@@ -238,6 +245,7 @@ export const renderSsrApplication = async <
     return {
       html,
       teleports,
+      renderedModules,
       head,
       response: created.context.response,
       hydrationState,
