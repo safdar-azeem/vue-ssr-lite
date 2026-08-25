@@ -299,6 +299,117 @@ describe('managed SSR server lifecycle', () => {
     }
   })
 
+  it.each(['./', ''])('allows production SPA-only startup with Vite base %j', async (viteBase) => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await mkdir(join(root, 'dist', 'client'), { recursive: true })
+    await writeFile(
+      join(root, 'dist', 'client', 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: {
+          ...spaConfig(),
+          __vueSsrLiteViteBase: viteBase,
+        },
+      }),
+    })
+
+    await expect(managed.listen()).resolves.toBeUndefined()
+  })
+
+  it('allows a relative base when the current role enables only SPA applications', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await mkdir(join(root, 'dist', 'client'), { recursive: true })
+    await writeFile(
+      join(root, 'dist', 'client', 'admin.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const Root = defineComponent({ setup: () => () => h('main', 'SSR') })
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: {
+          ...defineSsrConfig({
+            runtime: 'admin',
+            server: { port: 0 },
+            applications: {
+              website: {
+                render: 'ssr',
+                roles: ['website'],
+                application: { root: Root },
+                template: 'website.html',
+                host: 'website.test',
+                domain: { production: 'website.test' },
+              },
+              admin: {
+                render: 'spa',
+                roles: ['admin'],
+                application: { module: './Admin.ts' },
+                template: 'admin.html',
+                host: 'admin.test',
+                domain: { production: 'admin.test' },
+              },
+            },
+          } as any),
+          __vueSsrLiteViteBase: './',
+        },
+      }),
+    })
+
+    await expect(managed.listen()).resolves.toBeUndefined()
+  })
+
+  it.each(['./', ''])('rejects Vite base %j when production SSR is enabled', async (viteBase) => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const Root = defineComponent({ setup: () => () => h('main', 'SSR') })
+    await expect(
+      createSsrManagedServer({
+        production: true,
+        root,
+        loadRuntime: async () => ({
+          default: {
+            ...defineSsrConfig({
+              server: { port: 0 },
+              resolveSiteUrl: () => 'https://example.com',
+              application: { root: Root },
+              domain: { production: 'localhost', customDomains: true },
+            } as any),
+            __vueSsrLiteViteBase: viteBase,
+          },
+        }),
+      })
+    ).rejects.toThrow('does not support Vite relative base')
+  })
+
+  it('fails production SSR startup when Vite asset metadata is missing', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await mkdir(join(root, 'dist', 'client'), { recursive: true })
+    await writeFile(
+      join(root, 'dist', 'client', 'index.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    const Root = defineComponent({ setup: () => () => h('main', 'SSR') })
+
+    await expect(
+      createSsrManagedServer({
+        production: true,
+        root,
+        loadRuntime: async () => ({
+          default: defineSsrConfig({
+            server: { port: 0 },
+            resolveSiteUrl: () => 'https://example.com',
+            application: { root: Root },
+            domain: { production: 'localhost', customDomains: true },
+          } as any),
+        }),
+      })
+    ).rejects.toThrow("requires Vite's generated SSR manifest")
+  })
+
   it('never reads or writes the shared response cache for raw credential headers', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(
