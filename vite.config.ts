@@ -21,6 +21,7 @@ export default defineConfig({
       external: [
         /^node:/,
         'esbuild',
+        'es-module-lexer',
         'vite',
         /^vue(?:\/|$)/,
         /^vue-router(?:\/|$)/,
