@@ -31,9 +31,7 @@ describe('SsrResolutionController', () => {
     const controller = createSsrResolutionController(true)
     const first = new Promise<void>((r) => setTimeout(r, 5))
     controller.track(first)
-    void first.then(() =>
-      controller.track(new Promise<void>((r) => setTimeout(r, 5)))
-    )
+    void first.then(() => controller.track(new Promise<void>((r) => setTimeout(r, 5))))
 
     const settled = await controller.drain(1_000)
     expect(settled).toBe(true)
