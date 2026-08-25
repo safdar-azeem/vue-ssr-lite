@@ -11,6 +11,7 @@ import {
 } from '../SsrAssetMetadata'
 import { defineSsrConfig } from '../SsrConfigRuntime'
 import { useSsrRequestContext } from '../SsrRequestContext'
+import { useSeo } from '../extensions/seo/useSeo'
 import { createSsrMemoryResponseCache } from './SsrResponseCacheRuntime'
 import {
   createSsrManagedServer,
@@ -28,7 +29,6 @@ afterEach(async () => {
   managed = undefined
   root = ''
 })
-
 const spaConfig = () =>
   defineSsrConfig({
     name: 'test-runtime',
@@ -469,6 +469,190 @@ describe('managed SSR server lifecycle', () => {
       if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
       else process.env.PUBLIC_URL = previousPublicUrl
     }
+  })
+
+  it('keeps production SSR head, hydration, domain, and public config request-local', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(join(clientRoot, '.vite'), { recursive: true })
+    const templatePath = join(clientRoot, 'index.html')
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><head><meta name="template-version" content="original"></head><body><div id="app"></div></body></html>'
+    )
+    await writeFile(join(clientRoot, '.vite', 'ssr-manifest.json'), '{}')
+
+    let requestNumber = 0
+    const Root = defineComponent({
+      setup() {
+        const context = useSsrRequestContext<
+          Record<string, never>,
+          { marker: string }
+        >()
+        const marker = `${context.publicConfig.marker}:${context.domain.hostname}`
+        useSeo({ meta: [{ name: 'request-marker', content: marker }] })
+        return () => h('main', marker)
+      },
+    })
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, trustProxy: true },
+          resolveSiteUrl: () => 'https://example.com',
+          applications: {
+            site: {
+              application: { id: 'site', root: Root },
+              template: 'index.html',
+              domain: { production: 'example.com', customDomains: true },
+              publicConfig: () => ({
+                marker: requestNumber++ === 0 ? 'A' : 'B',
+              }),
+            },
+          },
+        } as any),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const navigate = (host: string) =>
+      fetch(`${origin}/`, {
+        headers: {
+          accept: 'text/html',
+          'x-forwarded-host': host,
+          'x-forwarded-proto': 'https',
+        },
+      }).then((response) => response.text())
+
+    const first = await navigate('a.test')
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><head><meta name="template-version" content="changed"></head><body><div id="app"></div></body></html>'
+    )
+    const second = await navigate('b.test')
+
+    expect(first).toContain('content="A:a.test"')
+    expect(first).toContain('"marker":"A"')
+    expect(first).toContain('"hostname":"a.test"')
+    expect(first).not.toContain('B:b.test')
+    expect(second).toContain('content="B:b.test"')
+    expect(second).toContain('"marker":"B"')
+    expect(second).toContain('"hostname":"b.test"')
+    expect(second).not.toContain('A:a.test')
+    expect(second).toContain('content="original"')
+    expect(second).not.toContain('content="changed"')
+  })
+
+  it('keeps production SPA domain and public config injection request-local', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(clientRoot, { recursive: true })
+    await writeFile(
+      join(clientRoot, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let requestNumber = 0
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, trustProxy: true },
+          applications: {
+            spa: {
+              render: 'spa',
+              application: { module: './SpaApp.ts' },
+              template: 'index.html',
+              domain: { production: 'example.com', customDomains: true },
+              publicConfig: () => ({ marker: ++requestNumber }),
+            },
+          },
+        } as any),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const navigate = (host: string) =>
+      fetch(`${origin}/`, {
+        headers: { accept: 'text/html', 'x-forwarded-host': host },
+      }).then((response) => response.text())
+
+    const first = await navigate('a.test')
+    const second = await navigate('b.test')
+    expect(first).toContain('"marker":1')
+    expect(first).toContain('"hostname":"a.test"')
+    expect(second).toContain('"marker":2')
+    expect(second).toContain('"hostname":"b.test"')
+    expect(second).not.toContain('"marker":1')
+  })
+
+  it('reloads development templates on every request', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const templatePath = join(root, 'index.html')
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><body><div id="app">first</div></body></html>'
+    )
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({ default: spaConfig() }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+
+    const first = await fetch(`${origin}/`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(await first.text()).toContain('>first</div>')
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><body><div id="app">second</div></body></html>'
+    )
+    const second = await fetch(`${origin}/`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(await second.text()).toContain('>second</div>')
+  })
+
+  it('does not share production templates between managed servers', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(clientRoot, { recursive: true })
+    const templatePath = join(clientRoot, 'index.html')
+    const createManaged = () =>
+      createSsrManagedServer({
+        production: true,
+        root,
+        loadRuntime: async () => ({ default: spaConfig() }),
+      })
+
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><body><div id="app">server-a</div></body></html>'
+    )
+    managed = await createManaged()
+    await managed.listen()
+    const serverA = await fetch(
+      `http://127.0.0.1:${managed.address().port}/`,
+      { headers: { accept: 'text/html' } }
+    )
+    expect(await serverA.text()).toContain('>server-a</div>')
+    await managed.close()
+    managed = undefined
+
+    await writeFile(
+      templatePath,
+      '<!doctype html><html><body><div id="app">server-b</div></body></html>'
+    )
+    managed = await createManaged()
+    await managed.listen()
+    const serverB = await fetch(
+      `http://127.0.0.1:${managed.address().port}/`,
+      { headers: { accept: 'text/html' } }
+    )
+    expect(await serverB.text()).toContain('>server-b</div>')
   })
 
   it('streams production assets with GET, HEAD, validators, and custom-base semantics', async () => {
