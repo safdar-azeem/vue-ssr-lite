@@ -6,13 +6,18 @@ import {
   compileSsrConfig,
   type SsrCompiledConfig,
 } from '../SsrConfigCompileRuntime'
-import { isPrivateSeoMode, isSeoEnabled } from '../extensions/seo/types'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
+import {
+  createSafeSsrLogger,
+  safeSsrLog,
+  safeSsrMetrics,
+} from '../SsrObservability'
 import { resolvePublicConfigValue } from '../SsrPublicConfig'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import {
   assertProductionSeoOriginConfigured,
   readPublicUrl,
+  requiresProductionSeoOrigin,
   resolveServerSiteOrigin,
 } from './SsrSiteOriginRuntime'
 import type {
@@ -57,6 +62,119 @@ class SsrRequestTimeoutError extends Error {
   constructor() {
     super('SSR request timed out.')
     this.name = 'SsrRequestTimeoutError'
+  }
+}
+
+class SsrRequestCancelledError extends Error {
+  constructor() {
+    super('SSR request was cancelled.')
+    this.name = 'SsrRequestCancelledError'
+  }
+}
+
+class SsrErrorRendererTimeoutError extends Error {
+  constructor() {
+    super('SSR error renderer timed out.')
+    this.name = 'SsrErrorRendererTimeoutError'
+  }
+}
+
+// Error rendering is a failure-response escape hatch, not a second request
+// lifetime. Keep it bounded even when the original request has already
+// reached its deadline (and therefore has an aborted request signal).
+const SSR_ERROR_RENDER_TIMEOUT_MS = 250
+
+const runBoundedErrorRenderer = async <T>(
+  work: () => T | Promise<T>,
+  signal: AbortSignal
+): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new SsrErrorRendererTimeoutError()),
+      SSR_ERROR_RENDER_TIMEOUT_MS
+    )
+  })
+  const aborted = signal.aborted
+    ? undefined
+    : new Promise<never>((_resolve, reject) => {
+        onAbort = () =>
+          reject(
+            signal.reason instanceof Error
+              ? signal.reason
+              : new SsrRequestCancelledError()
+          )
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+  try {
+    const workResult = Promise.resolve().then(work)
+    return await Promise.race(
+      aborted ? [workResult, timeout, aborted] : [workResult, timeout]
+    )
+  } finally {
+    if (timer) clearTimeout(timer)
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
+interface SsrRequestScope {
+  readonly signal: AbortSignal
+  readonly remainingMs: () => number
+  cancel(reason?: Error): void
+  run<T>(work: () => T | Promise<T>): Promise<T>
+  throwIfAborted(): void
+  dispose(): void
+}
+
+const createRequestScope = (timeoutMs: number): SsrRequestScope => {
+  const controller = new AbortController()
+  const finiteTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+  const deadline = finiteTimeout
+    ? Date.now() + timeoutMs
+    : Number.POSITIVE_INFINITY
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  if (finiteTimeout) {
+    timer = setTimeout(() => {
+      controller.abort(new SsrRequestTimeoutError())
+    }, timeoutMs)
+  }
+
+  const abortReason = (): Error =>
+    controller.signal.reason instanceof Error
+      ? controller.signal.reason
+      : new SsrRequestCancelledError()
+
+  return {
+    signal: controller.signal,
+    remainingMs: () =>
+      Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 0,
+    cancel: (reason = new SsrRequestCancelledError()) => {
+      if (!controller.signal.aborted) controller.abort(reason)
+    },
+    throwIfAborted: () => {
+      if (controller.signal.aborted) throw abortReason()
+    },
+    run: async <T>(work: () => T | Promise<T>): Promise<T> => {
+      if (controller.signal.aborted) throw abortReason()
+      let onAbort: (() => void) | undefined
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(abortReason())
+        controller.signal.addEventListener('abort', onAbort, { once: true })
+      })
+      try {
+        return await Promise.race([Promise.resolve().then(work), aborted])
+      } finally {
+        if (onAbort) controller.signal.removeEventListener('abort', onAbort)
+      }
+    },
+    dispose: () => {
+      if (timer) clearTimeout(timer)
+      if (!controller.signal.aborted) {
+        controller.abort(new SsrRequestCancelledError())
+      }
+    },
   }
 }
 
@@ -117,9 +235,12 @@ const resolveRuntime = async (
     }
     if (
       options.production &&
+      enabledForRole &&
       application.application &&
-      isSeoEnabled(application.application.seo) &&
-      !isPrivateSeoMode(application.application.seo)
+      requiresProductionSeoOrigin(
+        application.kind,
+        application.application.seo
+      )
     ) {
       assertProductionSeoOriginConfigured({
         siteUrl: application.application.seo?.siteUrl,
@@ -194,26 +315,6 @@ const sendJson = (
     },
   })
 
-const withTimeout = async <T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  controller: AbortController
-): Promise<T> => {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
-      controller.abort()
-      reject(new SsrRequestTimeoutError())
-    }, timeoutMs)
-  })
-  try {
-    return await Promise.race([promise, timeoutPromise])
-  } finally {
-    if (timeout) clearTimeout(timeout)
-  }
-}
-
 const requestHeaders = (request: IncomingMessage): SsrHeaders =>
   request.headers as SsrHeaders
 
@@ -235,11 +336,11 @@ export const createSsrManagedServer = async (
   let shuttingDown = false
   const initialRuntime = await resolveRuntime(await options.loadRuntime(), options)
   const initialServerOptions = initialRuntime.server
-  const host = initialServerOptions.host || '0.0.0.0'
+  const host = initialServerOptions.host
   const port = parsePort(initialServerOptions.port)
   const clientRoot = resolve(
-    initialServerOptions.root || options.root,
-    initialServerOptions.clientOutDir || 'dist/client'
+    initialServerOptions.root,
+    initialServerOptions.clientOutDir
   )
 
   // Dev reloads the Vite SSR runtime on every request so HMR is picked up.
@@ -257,7 +358,7 @@ export const createSsrManagedServer = async (
         lastDefinition = next
         return next
       } catch (error) {
-        initialServerOptions.logger?.error?.('ssr.runtime.reload.failed', {
+        safeSsrLog(initialServerOptions.logger, 'error', 'ssr.runtime.reload.failed', {
           error: error instanceof Error ? error.message : 'Unknown error',
         })
         return lastDefinition
@@ -271,12 +372,13 @@ export const createSsrManagedServer = async (
   const loadTemplate = async (
     definition: SsrCompiledConfig,
     templateName: string,
-    requestUrl: string
+    requestUrl: string,
+    signal?: AbortSignal
   ) => {
-    const runtimeRoot = definition.server.root || options.root
+    const runtimeRoot = definition.server.root
     const template = await readFile(
       resolve(options.production ? clientRoot : runtimeRoot, templateName),
-      'utf8'
+      { encoding: 'utf8', signal }
     )
     if (options.production || !options.vite) return template
     const templateUrl = `/${templateName
@@ -286,7 +388,7 @@ export const createSsrManagedServer = async (
   }
 
   const assertReady = async (definition: SsrCompiledConfig) => {
-    const runtimeRoot = definition.server.root || options.root
+    const runtimeRoot = definition.server.root
     const enabledApplications = definition.applications.filter(
       (application) =>
         !application.roles?.length ||
@@ -319,7 +421,7 @@ export const createSsrManagedServer = async (
   )
   await Promise.all(
     initialEnabledApplications.map(async (application) => {
-      const runtimeRoot = initialRuntime.server.root || options.root
+      const runtimeRoot = initialRuntime.server.root
       const information = await stat(
         resolve(
           options.production ? clientRoot : runtimeRoot,
@@ -337,19 +439,25 @@ export const createSsrManagedServer = async (
     let pathname = '/'
     let selectedEntryId = 'unknown'
     let activeRenderRequest: SsrHttpRequest<any> | undefined
-    const controller = new AbortController()
-    request.once('aborted', () => controller.abort())
-    response.once('close', () => {
-      if (!response.writableEnded) controller.abort()
-    })
+    let activeDefinition = lastDefinition
+    const scope = createRequestScope(
+      lastDefinition.server.requestTimeoutMs
+    )
+    const cancelDisconnectedRequest = () => scope.cancel()
+    const cancelClosedResponse = () => {
+      if (!response.writableEnded) scope.cancel()
+    }
+    request.once('aborted', cancelDisconnectedRequest)
+    response.once('close', cancelClosedResponse)
 
     try {
-      const definition = await loadDefinition()
+      const definition = await scope.run(loadDefinition)
+      activeDefinition = definition
       const serverOptions = definition.server
       const requestUrl = new URL(request.url || '/', 'http://internal')
       pathname = requestUrl.pathname
-      const healthPath = serverOptions.healthPath || '/healthz'
-      const readinessPath = serverOptions.readinessPath || '/readyz'
+      const healthPath = serverOptions.healthPath
+      const readinessPath = serverOptions.readinessPath
 
       if (pathname === healthPath) {
         return sendJson(request, response, 200, {
@@ -368,7 +476,7 @@ export const createSsrManagedServer = async (
           })
         }
         try {
-          await assertReady(definition)
+          await scope.run(() => assertReady(definition))
           return sendJson(request, response, 200, {
             status: 'ok',
             service: definition.name,
@@ -417,7 +525,7 @@ export const createSsrManagedServer = async (
       }
       const entry = hostResolution.entry
       selectedEntryId = entry.id
-      serverOptions.logger?.debug?.('ssr.host_resolved', {
+      safeSsrLog(serverOptions.logger, 'debug', 'ssr.host_resolved', {
         entryId: entry.id,
         category: hostResolution.category,
         specificity: hostResolution.specificity,
@@ -454,15 +562,16 @@ export const createSsrManagedServer = async (
       const domain = resolveSsrDomainContext(
         incomingHost,
         entry,
-        definition.development
+        definition.development,
+        protocol
       )
       const cookie = filterSsrCookieHeader(
         request.headers.cookie,
         entry.cookieAllowlist,
         entry.cookieDenylist
       )
-      const publicConfig = await resolvePublicConfigValue(
-        entry.publicConfigFactory ?? entry.publicConfig
+      const publicConfig = await scope.run(() =>
+        resolvePublicConfigValue(entry.publicConfigFactory ?? entry.publicConfig)
       )
       const renderRequest: SsrHttpRequest<any> = {
         requestId:
@@ -479,43 +588,47 @@ export const createSsrManagedServer = async (
         cookie,
         publicConfig,
         domain,
-        signal: controller.signal,
+        signal: scope.signal,
         pathname,
         search: requestUrl.search,
         entryId: entry.id,
       }
-      renderRequest.siteOrigin = await resolveServerSiteOrigin({
-        siteUrl: entry.application?.seo?.siteUrl,
-        publicUrl: readPublicUrl(),
-        resolveSiteUrl: definition.resolveSiteUrl,
-        request: renderRequest,
-        production: options.production,
-        requireProductionOrigin:
-          isSeoEnabled(entry.application?.seo) &&
-          !isPrivateSeoMode(entry.application?.seo),
-        allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
-      })
       activeRenderRequest = renderRequest
+      renderRequest.siteOrigin = await scope.run(() =>
+        resolveServerSiteOrigin({
+          siteUrl: entry.application?.seo?.siteUrl,
+          publicUrl: readPublicUrl(),
+          resolveSiteUrl: definition.resolveSiteUrl,
+          request: renderRequest,
+          production: options.production,
+          requireProductionOrigin: requiresProductionSeoOrigin(
+            entry.kind,
+            entry.application?.seo
+          ),
+          allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
+        })
+      )
       const endpointTools: SsrEndpointTools = {
-        signal: controller.signal,
-        logger: serverOptions.logger,
+        signal: scope.signal,
+        logger: createSafeSsrLogger(serverOptions.logger),
       }
 
       for (const endpoint of entry.endpoints) {
         if (!endpoint.match(renderRequest)) continue
-        const result = await withTimeout(
-          Promise.resolve(endpoint.handle(renderRequest, endpointTools)),
-          serverOptions.requestTimeoutMs ?? 15_000,
-          controller
+        const result = await scope.run(() =>
+          endpoint.handle(renderRequest, endpointTools)
         )
         if (result) return sendResponse(request, response, result)
       }
 
       if (options.production) {
-        const asset = await resolveSsrProductionAsset(
-          clientRoot,
-          pathname,
-          definition.applications.map(({ template }) => template)
+        const asset = await scope.run(() =>
+          resolveSsrProductionAsset(
+            clientRoot,
+            pathname,
+            definition.applications.map(({ template }) => template),
+            scope.signal
+          )
         )
         if (asset) return sendResponse(request, response, asset)
       } else if (
@@ -525,7 +638,7 @@ export const createSsrManagedServer = async (
           pathname.includes('.') ||
           pathname === '/__vite_ping')
       ) {
-        await runViteMiddleware(options.vite, request, response)
+        await scope.run(() => runViteMiddleware(options.vite!, request, response))
         if (response.writableEnded) return
       }
 
@@ -540,13 +653,12 @@ export const createSsrManagedServer = async (
       const responseCache = entry.kind === 'ssr' ? entry.responseCache : undefined
       let responseCacheKey: string | null = null
       try {
-        responseCacheKey = await resolveSsrResponseCacheKey(
-          entry.id,
-          renderRequest,
-          responseCache
+        responseCacheKey = await scope.run(() =>
+          resolveSsrResponseCacheKey(entry.id, renderRequest, responseCache)
         )
       } catch (error) {
-        serverOptions.logger?.warn?.('ssr.cache.key.failed', {
+        scope.throwIfAborted()
+        safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.key.failed', {
           entryId: entry.id,
           requestId: renderRequest.requestId,
           error: error instanceof Error ? error.message : 'Unknown cache error',
@@ -554,7 +666,11 @@ export const createSsrManagedServer = async (
       }
       if (responseCache && responseCacheKey) {
         try {
-          const cached = await responseCache.store.get(responseCacheKey)
+          const cached = await scope.run(() =>
+            responseCache.store.get(responseCacheKey!, {
+              signal: scope.signal,
+            })
+          )
           if (cached) {
             return sendResponse(request, response, {
               ...cached,
@@ -565,7 +681,8 @@ export const createSsrManagedServer = async (
             })
           }
         } catch (error) {
-          serverOptions.logger?.warn?.('ssr.cache.read.failed', {
+          scope.throwIfAborted()
+          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.read.failed', {
             entryId: entry.id,
             requestId: renderRequest.requestId,
             error: error instanceof Error ? error.message : 'Unknown cache error',
@@ -573,7 +690,14 @@ export const createSsrManagedServer = async (
         }
       }
 
-      let template = await loadTemplate(definition, entry.template, request.url || '/')
+      let template = await scope.run(() =>
+        loadTemplate(
+          definition,
+          entry.template,
+          request.url || '/',
+          scope.signal
+        )
+      )
       if (entry.kind === 'spa') {
         return sendResponse(request, response, {
           statusCode: 200,
@@ -597,17 +721,19 @@ export const createSsrManagedServer = async (
         template,
         entry.mountSelector
       )
-      const requestTimeoutMs = serverOptions.requestTimeoutMs ?? 15_000
-      const rendered = await withTimeout(
+      const remainingRequestMs = scope.remainingMs()
+      const configuredResolutionMs =
+        serverOptions.resolutionDeadlineMs
+      const resolutionDeadlineMs = remainingRequestMs > 0
+        ? Math.min(configuredResolutionMs, remainingRequestMs)
+        : configuredResolutionMs
+      const rendered = await scope.run(() =>
         renderSsrApplication(application, renderRequest, {
           maxResolutionPasses: serverOptions.maxResolutionPasses,
-          resolutionDeadlineMs:
-            serverOptions.resolutionDeadlineMs ?? requestTimeoutMs,
-          diagnostics: serverOptions.diagnostics ?? !options.production,
+          resolutionDeadlineMs,
+          diagnostics: serverOptions.diagnostics,
           logger: serverOptions.logger,
-        }),
-        requestTimeoutMs,
-        controller
+        })
       )
       if (rendered.response.redirect) {
         const redirect = rendered.response.redirect
@@ -633,8 +759,13 @@ export const createSsrManagedServer = async (
         head: rendered.head,
         state: rendered.hydrationState,
       })
-      serverOptions.onMetrics?.(rendered.metrics)
-      serverOptions.logger?.info?.('ssr.render.complete', rendered.metrics as any)
+      safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
+      safeSsrLog(
+        serverOptions.logger,
+        'info',
+        'ssr.render.complete',
+        rendered.metrics as any
+      )
       const result: SsrHttpResponse = {
         statusCode: rendered.response.statusCode,
         body: document,
@@ -657,12 +788,19 @@ export const createSsrManagedServer = async (
         isSsrResponseCacheable(result, renderRequest, responseCache)
       ) {
         try {
-          await responseCache.store.set(responseCacheKey, result, {
-            ttlMs: responseCache.ttlMs,
-            tags: await responseCache.tags?.(renderRequest),
-          })
+          const tags = await scope.run(() =>
+            responseCache.tags?.(renderRequest) ?? []
+          )
+          await scope.run(() =>
+            responseCache.store.set(responseCacheKey!, result, {
+              ttlMs: responseCache.ttlMs,
+              tags,
+              signal: scope.signal,
+            })
+          )
         } catch (error) {
-          serverOptions.logger?.warn?.('ssr.cache.write.failed', {
+          scope.throwIfAborted()
+          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.write.failed', {
             entryId: entry.id,
             requestId: renderRequest.requestId,
             error: error instanceof Error ? error.message : 'Unknown cache error',
@@ -671,26 +809,42 @@ export const createSsrManagedServer = async (
       }
       return sendResponse(request, response, result)
     } catch (error) {
-      options.vite?.ssrFixStacktrace(error as Error)
-      const definition = await loadDefinition().catch(() => initialRuntime)
-      definition.server.logger?.error?.('ssr.request.failed', {
+      try {
+        options.vite?.ssrFixStacktrace(error as Error)
+      } catch {
+        // Development stack rewriting is diagnostic-only.
+      }
+      const definition = activeDefinition
+      const cancelled = error instanceof SsrRequestCancelledError
+      if (cancelled) {
+        if (!response.destroyed) response.destroy()
+        return
+      }
+      safeSsrLog(definition.server.logger, 'error', 'ssr.request.failed', {
         entryId: selectedEntryId,
         pathname,
         error: error instanceof Error ? error.message : 'Unknown error',
       })
       if (response.writableEnded) return
       if (response.headersSent) return response.destroy()
-      const timeout = error instanceof SsrRequestTimeoutError
-      const statusCode = timeout ? 504 : 500
+      let timeout =
+        error instanceof SsrRequestTimeoutError ||
+        scope.signal.reason instanceof SsrRequestTimeoutError
+      let statusCode = timeout ? 504 : 500
       if (definition.server.renderError) {
         try {
-          const renderedError = await definition.server.renderError({
-            error,
-            kind: timeout ? 'timeout' : 'internal',
-            production: options.production,
-            request: activeRenderRequest,
-            entryId: selectedEntryId === 'unknown' ? undefined : selectedEntryId,
-          })
+          const renderedError = await runBoundedErrorRenderer(
+            () =>
+              definition.server.renderError!({
+                error,
+                kind: timeout ? 'timeout' : 'internal',
+                production: options.production,
+                request: activeRenderRequest,
+                entryId:
+                  selectedEntryId === 'unknown' ? undefined : selectedEntryId,
+              }),
+            scope.signal
+          )
           if (renderedError) {
             return sendResponse(request, response, {
               ...renderedError,
@@ -706,7 +860,11 @@ export const createSsrManagedServer = async (
             })
           }
         } catch (renderError) {
-          definition.server.logger?.error?.('ssr.error-renderer.failed', {
+          if (renderError instanceof SsrRequestTimeoutError) {
+            timeout = true
+            statusCode = 504
+          }
+          safeSsrLog(definition.server.logger, 'error', 'ssr.error-renderer.failed', {
             entryId: selectedEntryId,
             error:
               renderError instanceof Error
@@ -737,6 +895,10 @@ export const createSsrManagedServer = async (
         status: 'error',
         service: definition.name,
       })
+    } finally {
+      request.off('aborted', cancelDisconnectedRequest)
+      response.off('close', cancelClosedResponse)
+      scope.dispose()
     }
   })
 
@@ -766,7 +928,7 @@ export const createSsrManagedServer = async (
     close: async () => {
       if (shuttingDown) return
       shuttingDown = true
-      const timeoutMs = initialServerOptions.shutdownTimeoutMs ?? 10_000
+      const timeoutMs = initialServerOptions.shutdownTimeoutMs
       let forced: ReturnType<typeof setTimeout> | undefined
       try {
         await Promise.race([
