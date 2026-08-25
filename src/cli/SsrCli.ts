@@ -2,6 +2,7 @@
 import { pathToFileURL } from 'node:url'
 import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 import { createSsrManagedServer } from '../server/SsrServerRuntime'
+import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
@@ -29,7 +30,7 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
     vite,
     loadRuntime: production
       ? () => import(pathToFileURL(options.serverOutput).href)
-      : () => vite!.ssrLoadModule(SSR_RUNTIME_VIRTUAL_ID),
+      : () => importSsrViteModule(vite!, SSR_RUNTIME_VIRTUAL_ID),
   })
   await managed.listen()
 
