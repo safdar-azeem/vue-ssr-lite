@@ -1,12 +1,23 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { request as createHttpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { PassThrough, Readable } from 'node:stream'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
+import {
+  serializeSsrProductionAssetMetadata,
+  SSR_PRODUCTION_ASSET_METADATA_PATH,
+} from '../SsrAssetMetadata'
 import { defineSsrConfig } from '../SsrConfigRuntime'
 import { useSsrRequestContext } from '../SsrRequestContext'
 import { createSsrMemoryResponseCache } from './SsrResponseCacheRuntime'
-import { createSsrManagedServer, type SsrManagedServer } from './SsrServerRuntime'
+import {
+  createSsrManagedServer,
+  writeSsrProductionAsset,
+  type SsrManagedServer,
+} from './SsrServerRuntime'
+import type { SsrResolvedProductionAsset } from './SsrAssetRuntime'
 
 let managed: SsrManagedServer | undefined
 let root = ''
@@ -48,7 +59,168 @@ const spaConfig = () =>
     },
   })
 
+const requestRawPathStatus = (port: number, path: string): Promise<number> =>
+  new Promise((resolveStatus, rejectStatus) => {
+    const request = createHttpRequest({
+      hostname: '127.0.0.1',
+      port,
+      path,
+      headers: { accept: 'application/octet-stream' },
+    })
+    request.once('response', (response) => {
+      response.resume()
+      response.once('end', () => resolveStatus(response.statusCode || 0))
+    })
+    request.once('error', rejectStatus)
+    request.end()
+  })
+
 describe('managed SSR server lifecycle', () => {
+  it('does not open body files for HEAD, 304, pre-abort, or a deleted-file race', async () => {
+    const asset: SsrResolvedProductionAsset = {
+      filePath: '/temporary/asset.js',
+      size: 5,
+      contentType: 'text/javascript; charset=utf-8',
+      cacheControl: 'public, max-age=3600',
+      etag: 'W/"5-123"',
+      lastModified: new Date(1_000).toUTCString(),
+      mtimeMs: 1_000,
+    }
+    const response = () =>
+      ({ writeHead: vi.fn(), end: vi.fn() }) as unknown as import('node:http').ServerResponse
+    const openFile = vi.fn()
+
+    const headResponse = response()
+    await expect(
+      writeSsrProductionAsset(
+        { method: 'HEAD', headers: {} } as any,
+        headResponse,
+        asset,
+        new AbortController().signal,
+        openFile as any
+      )
+    ).resolves.toBe(true)
+    expect(openFile).not.toHaveBeenCalled()
+    expect(headResponse.writeHead).toHaveBeenCalledWith(
+      200,
+      expect.objectContaining({ 'content-length': '5', etag: asset.etag })
+    )
+
+    const notModifiedResponse = response()
+    await expect(
+      writeSsrProductionAsset(
+        {
+          method: 'GET',
+          headers: { 'if-none-match': asset.etag },
+        } as any,
+        notModifiedResponse,
+        asset,
+        new AbortController().signal,
+        openFile as any
+      )
+    ).resolves.toBe(true)
+    expect(openFile).not.toHaveBeenCalled()
+    expect(notModifiedResponse.writeHead).toHaveBeenCalledWith(
+      304,
+      expect.objectContaining({ etag: asset.etag })
+    )
+
+    const aborted = new AbortController()
+    aborted.abort(new Error('cancelled before open'))
+    await expect(
+      writeSsrProductionAsset(
+        { method: 'GET', headers: {} } as any,
+        response(),
+        asset,
+        aborted.signal,
+        openFile as any
+      )
+    ).rejects.toThrow('cancelled before open')
+    expect(openFile).not.toHaveBeenCalled()
+
+    const deleted = Object.assign(new Error('deleted'), { code: 'ENOENT' })
+    openFile.mockRejectedValueOnce(deleted)
+    const deletedResponse = response()
+    await expect(
+      writeSsrProductionAsset(
+        { method: 'GET', headers: {} } as any,
+        deletedResponse,
+        asset,
+        new AbortController().signal,
+        openFile as any
+      )
+    ).resolves.toBe(false)
+    expect(deletedResponse.writeHead).not.toHaveBeenCalled()
+  })
+
+  it('destroys the source and closes its handle when streaming is aborted', async () => {
+    const controller = new AbortController()
+    let handleClosed = false
+    let reads = 0
+    const closeHandle = vi.fn(async () => {
+      handleClosed = true
+    })
+    const source = new Readable({
+      read() {
+        reads += 1
+        this.push(Buffer.alloc(1024, reads))
+        if (reads === 1) {
+          queueMicrotask(() => controller.abort(new Error('stream cancelled')))
+        }
+      },
+      destroy(error, callback) {
+        void closeHandle().then(
+          () => callback(error),
+          (closeError) => callback(closeError as Error)
+        )
+      },
+    })
+    const file = {
+      stat: vi.fn().mockResolvedValue({
+        size: 1024 * 1024,
+        mtime: new Date(1_000),
+        mtimeMs: 1_000,
+        isFile: () => true,
+      }),
+      createReadStream: vi.fn(() => source),
+      close: closeHandle,
+    }
+    const openFile = vi.fn().mockResolvedValue(file)
+    const response = new PassThrough() as PassThrough & {
+      writeHead: ReturnType<typeof vi.fn>
+      end: ReturnType<typeof vi.fn>
+    }
+    response.writeHead = vi.fn()
+    const originalEnd = response.end.bind(response)
+    response.end = vi.fn(originalEnd) as any
+    const asset: SsrResolvedProductionAsset = {
+      filePath: '/temporary/large.js',
+      size: 1024 * 1024,
+      contentType: 'text/javascript; charset=utf-8',
+      cacheControl: 'public, max-age=3600',
+      etag: 'W/"100000-3e8"',
+      lastModified: new Date(1_000).toUTCString(),
+      mtimeMs: 1_000,
+    }
+
+    await expect(
+      writeSsrProductionAsset(
+        { method: 'GET', headers: {} } as any,
+        response as any,
+        asset,
+        controller.signal,
+        openFile as any
+      )
+    ).rejects.toThrow()
+
+    expect(source.destroyed).toBe(true)
+    expect(handleClosed).toBe(true)
+    expect(closeHandle).toHaveBeenCalledTimes(1)
+    expect(reads).toBeGreaterThan(0)
+    expect(response.writeHead).toHaveBeenCalledTimes(1)
+    expect(response.end).not.toHaveBeenCalled()
+  })
+
   it('starts, serves health/SPA/404, checks readiness, and shuts down', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(
@@ -297,6 +469,271 @@ describe('managed SSR server lifecycle', () => {
       if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
       else process.env.PUBLIC_URL = previousPublicUrl
     }
+  })
+
+  it('streams production assets with GET, HEAD, validators, and custom-base semantics', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(join(clientRoot, 'assets', 'nested'), { recursive: true })
+    await mkdir(join(clientRoot, '.vite'), { recursive: true })
+    await writeFile(
+      join(clientRoot, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const javascript = 'console.log("streamed asset")\n'
+    await writeFile(join(clientRoot, 'assets', 'app-DG71SDF2.js'), javascript)
+    await writeFile(join(clientRoot, 'assets', 'nested', 'site.css'), 'body{}')
+    await writeFile(join(clientRoot, 'assets', 'robots-generated.txt'), 'mutable')
+    await writeFile(join(clientRoot, 'assets', 'empty.bin'), '')
+    await writeFile(
+      join(clientRoot, '.vite', 'manifest.json'),
+      JSON.stringify({
+        'src/main.ts': {
+          file: 'assets/app-DG71SDF2.js',
+          css: ['assets/nested/site.css'],
+        },
+      })
+    )
+    await writeFile(
+      join(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH),
+      serializeSsrProductionAssetMetadata([
+        'assets/app-DG71SDF2.js',
+        'assets/nested/site.css',
+      ])
+    )
+
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: {
+          ...spaConfig(),
+          __vueSsrLiteViteBase: '/products/',
+        },
+      }),
+    })
+    await managed.listen()
+    const { port } = managed.address()
+    const origin = `http://127.0.0.1:${port}`
+    const assetUrl = `${origin}/products/assets/app-DG71SDF2.js?v=1`
+
+    const get = await fetch(assetUrl)
+    const etag = get.headers.get('etag')!
+    const lastModified = get.headers.get('last-modified')!
+    expect(get.status).toBe(200)
+    expect(get.headers.get('content-type')).toBe(
+      'text/javascript; charset=utf-8'
+    )
+    expect(get.headers.get('content-length')).toBe(
+      String(Buffer.byteLength(javascript))
+    )
+    expect(get.headers.get('cache-control')).toBe(
+      'public, max-age=31536000, immutable'
+    )
+    expect(etag).toMatch(/^W\/"[a-f\d]+-[a-f\d]+"$/)
+    expect(Number.isNaN(Date.parse(lastModified))).toBe(false)
+    expect(await get.text()).toBe(javascript)
+
+    const head = await fetch(assetUrl, { method: 'HEAD' })
+    expect(head.status).toBe(200)
+    expect(head.headers.get('content-length')).toBe(
+      String(Buffer.byteLength(javascript))
+    )
+    expect(head.headers.get('etag')).toBe(etag)
+    expect((await head.arrayBuffer()).byteLength).toBe(0)
+
+    const etagHit = await fetch(assetUrl, {
+      headers: { 'if-none-match': etag },
+    })
+    expect(etagHit.status).toBe(304)
+    expect(etagHit.headers.get('etag')).toBe(etag)
+    expect((await etagHit.arrayBuffer()).byteLength).toBe(0)
+
+    const strongEquivalentHit = await fetch(assetUrl, {
+      headers: { 'if-none-match': etag.slice(2) },
+    })
+    expect(strongEquivalentHit.status).toBe(304)
+
+    const dateHit = await fetch(assetUrl, {
+      headers: { 'if-modified-since': lastModified },
+    })
+    expect(dateHit.status).toBe(304)
+
+    const etagPrecedence = await fetch(assetUrl, {
+      headers: {
+        'if-none-match': '"stale"',
+        'if-modified-since': lastModified,
+      },
+    })
+    expect(etagPrecedence.status).toBe(200)
+    await etagPrecedence.arrayBuffer()
+
+    const ignoredRange = await fetch(assetUrl, {
+      headers: { range: 'bytes=0-3' },
+    })
+    expect(ignoredRange.status).toBe(200)
+    expect(ignoredRange.headers.has('accept-ranges')).toBe(false)
+    expect(await ignoredRange.text()).toBe(javascript)
+
+    const [
+      css,
+      mutable,
+      empty,
+      directory,
+      post,
+      missing,
+    ] = await Promise.all([
+      fetch(`${origin}/products/assets/nested/site.css`),
+      fetch(`${origin}/products/assets/robots-generated.txt`),
+      fetch(`${origin}/products/assets/empty.bin`),
+      fetch(`${origin}/products/assets/`, {
+        headers: { accept: 'application/octet-stream' },
+      }),
+      fetch(assetUrl, { method: 'POST' }),
+      fetch(`${origin}/products/assets/missing.js`),
+    ])
+    expect(css.headers.get('content-type')).toBe('text/css; charset=utf-8')
+    expect(mutable.headers.get('cache-control')).toBe(
+      'public, max-age=3600'
+    )
+    expect(empty.status).toBe(200)
+    expect(empty.headers.get('content-length')).toBe('0')
+    expect(directory.status).toBe(404)
+    expect(post.status).toBe(404)
+    expect(missing.status).toBe(404)
+    await expect(
+      requestRawPathStatus(
+        port,
+        '/products/%2e%2e/assets/app-DG71SDF2.js'
+      )
+    ).resolves.toBe(404)
+    await expect(
+      requestRawPathStatus(
+        port,
+        '/products/assets/%5c..%5capp-DG71SDF2.js'
+      )
+    ).resolves.toBe(404)
+
+    const protectedTemplate = await fetch(`${origin}/products/index.html`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(protectedTemplate.status).toBe(200)
+    expect(await protectedTemplate.text()).toContain('vue-ssr-lite-domain')
+  })
+
+  it('streams concurrent large assets and tears down a disconnected request', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(join(clientRoot, 'assets'), { recursive: true })
+    await writeFile(
+      join(clientRoot, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const largeAsset = Buffer.alloc(4 * 1024 * 1024, 0x5a)
+    await writeFile(join(clientRoot, 'assets', 'large-A1B2C3D4.bin'), largeAsset)
+
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({ default: spaConfig() }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const assetUrl = `${origin}/assets/large-A1B2C3D4.bin`
+
+    const bodies = await Promise.all(
+      Array.from({ length: 3 }, async () => {
+        const response = await fetch(assetUrl)
+        expect(response.headers.get('content-length')).toBe(
+          String(largeAsset.byteLength)
+        )
+        return Buffer.from(await response.arrayBuffer())
+      })
+    )
+    for (const body of bodies) {
+      expect(body.byteLength).toBe(largeAsset.byteLength)
+      expect(body[0]).toBe(0x5a)
+      expect(body.at(-1)).toBe(0x5a)
+    }
+
+    await new Promise<void>((resolveDisconnect, rejectDisconnect) => {
+      const request = createHttpRequest(assetUrl)
+      request.once('error', (error) => {
+        if ((error as NodeJS.ErrnoException).code === 'ECONNRESET') {
+          resolveDisconnect()
+        } else {
+          rejectDisconnect(error)
+        }
+      })
+      request.once('response', (response) => {
+        response.once('data', () => {
+          request.destroy()
+          response.destroy()
+        })
+        response.once('close', resolveDisconnect)
+      })
+      request.end()
+    })
+
+    const health = await fetch(`${origin}/healthz`)
+    expect(health.status).toBe(200)
+  })
+
+  it('keeps static assets outside the SSR response cache', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    const clientRoot = join(root, 'dist', 'client')
+    await mkdir(join(clientRoot, 'assets'), { recursive: true })
+    await mkdir(join(clientRoot, '.vite'), { recursive: true })
+    await writeFile(
+      join(clientRoot, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    await writeFile(join(clientRoot, '.vite', 'ssr-manifest.json'), '{}')
+    await writeFile(join(clientRoot, 'assets', 'cached-A1B2C3D4.js'), 'asset')
+
+    const memoryStore = createSsrMemoryResponseCache()
+    let reads = 0
+    let writes = 0
+    const trackingStore = {
+      get: (...args: Parameters<typeof memoryStore.get>) => {
+        reads += 1
+        return memoryStore.get(...args)
+      },
+      set: (...args: Parameters<typeof memoryStore.set>) => {
+        writes += 1
+        return memoryStore.set(...args)
+      },
+      invalidate: (...args: Parameters<typeof memoryStore.invalidate>) =>
+        memoryStore.invalidate(...args),
+    }
+    const Root = defineComponent({ setup: () => () => h('main', 'SSR') })
+    managed = await createSsrManagedServer({
+      production: true,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          resolveSiteUrl: () => 'https://example.com',
+          applications: {
+            cached: {
+              application: { id: 'cached', root: Root },
+              template: 'index.html',
+              responseCache: { store: trackingStore, ttlMs: 60_000 },
+              domain: { production: 'localhost', customDomains: true },
+            },
+          },
+        } as any),
+      }),
+    })
+    await managed.listen()
+    const response = await fetch(
+      `http://127.0.0.1:${managed.address().port}/assets/cached-A1B2C3D4.js`
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('asset')
+    expect(reads).toBe(0)
+    expect(writes).toBe(0)
   })
 
   it.each(['./', ''])('allows production SPA-only startup with Vite base %j', async (viteBase) => {
