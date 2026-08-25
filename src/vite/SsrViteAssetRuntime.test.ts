@@ -5,6 +5,7 @@ import {
   isViteStylesheetModule,
   normalizeViteAssetUrl,
   readEagerViteImports,
+  resolveApplicationStyleDependencies,
 } from './SsrViteAssetRuntime'
 
 describe('SSR Vite application assets', () => {
@@ -117,5 +118,48 @@ describe('SSR Vite application assets', () => {
     ).rejects.toThrow(
       'could not map eager stylesheet imports from /src/main.ts'
     )
+  })
+
+  it('uses returned Vite transforms while optimized module graph state is transient', async () => {
+    const stylesheet = {
+      url: '/src/style.css',
+      transformResult: null,
+      importedModules: new Set(),
+    } as unknown as EnvironmentModuleNode
+    const optimizedRuntime = {
+      url: '/node_modules/.vite/deps/vue-ssr-lite_client.js?v=cold',
+      transformResult: null,
+      importedModules: new Set([stylesheet]),
+    } as unknown as EnvironmentModuleNode
+    const entry = {
+      url: '/@vue-ssr-lite/client/app',
+      transformResult: null,
+      importedModules: new Set([optimizedRuntime]),
+    } as unknown as EnvironmentModuleNode
+    const code = new Map([
+      [entry.url, `import '${optimizedRuntime.url}'`],
+      [optimizedRuntime.url, `import '${stylesheet.url}'`],
+      [stylesheet.url, 'export {}'],
+    ])
+    const environment = {
+      transformRequest: async (url: string) => {
+        const transformed = code.get(url)
+        return transformed == null ? null : { code: transformed, map: null }
+      },
+      waitForRequestsIdle: async () => {},
+      moduleGraph: {
+        getModuleByUrl: async (url: string) =>
+          url === entry.url ? entry : undefined,
+      },
+    }
+    const server = {
+      config: { base: '/' },
+      environments: { client: environment },
+    } as unknown as ViteDevServer
+
+    await expect(
+      resolveApplicationStyleDependencies(server, 'app', entry.url)
+    ).resolves.toEqual([{ applicationId: 'app', href: stylesheet.url }])
+    expect(optimizedRuntime.transformResult).toBeNull()
   })
 })
