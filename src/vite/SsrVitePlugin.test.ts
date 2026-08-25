@@ -1,12 +1,17 @@
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { build, createServer, type ViteDevServer } from 'vite'
 import { vueSsrLite } from './SsrVitePlugin'
 
 let root = ''
+let server: ViteDevServer | undefined
 
 afterEach(async () => {
+  await server?.close()
+  server = undefined
   if (root) await rm(root, { recursive: true, force: true })
   root = ''
 })
@@ -236,7 +241,7 @@ describe('SSR Vite package identity', () => {
       throw new Error('vueSsrLite must expose transformIndexHtml.')
     }
     const source = await readFile(join(pluginRoot, 'site.html'), 'utf8')
-    const result = transform.handler.call(
+    const result = await transform.handler.call(
       {} as never,
       source,
       {
@@ -259,5 +264,237 @@ describe('SSR Vite package identity', () => {
     expect(JSON.stringify(tags)).toContain('/@vue-ssr-lite/client/storefront')
     expect(JSON.stringify(tags)).not.toContain('virtual:vue-ssr-lite/client/storefront')
     expect(JSON.stringify(tags)).not.toContain('children')
+  })
+
+  it('isolates eager styles by application and applies Vite base URLs', async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'vue-ssr-lite-assets-')))
+    await mkdir(join(root, 'src', 'website'), { recursive: true })
+    await mkdir(join(root, 'src', 'admin'), { recursive: true })
+    await mkdir(join(root, 'src', 'portal'), { recursive: true })
+    await writeFile(
+      join(root, 'client-runtime.ts'),
+      'export const hydrateSsrApplication = () => {}; export const mountSpaApplication = () => {}'
+    )
+    await writeFile(
+      join(root, 'ssr.config.mjs'),
+      `
+export default {
+  applications: {
+    website: {
+      render: 'ssr',
+      app: '@site/main.ts',
+      template: './website.html',
+      domain: { development: 'localhost', customDomains: true },
+    },
+    admin: {
+      render: 'ssr',
+      app: './src/admin/main.ts',
+      template: './admin.html',
+      domain: { development: 'admin.localhost' },
+    },
+    portal: {
+      render: 'spa',
+      app: './src/portal/main.ts',
+      template: './portal.html',
+      domain: { development: 'portal.localhost' },
+    },
+  },
+}
+`
+    )
+    await writeFile(
+      join(root, 'website.html'),
+      '<html><head></head><body><div id="app"></div><script type="module" src="/src/website/main.ts"></script></body></html>'
+    )
+    await writeFile(
+      join(root, 'admin.html'),
+      '<html><head></head><body><div id="app"></div><script type="module" src="/src/admin/main.ts"></script></body></html>'
+    )
+    await writeFile(
+      join(root, 'portal.html'),
+      '<html><head></head><body><div id="app"></div><script type="module" src="/src/portal/main.ts"></script></body></html>'
+    )
+    await writeFile(
+      join(root, 'src', 'website', 'main.ts'),
+      `import './base.css'; import './bootstrap.ts'; import './router.ts'; export default { root: {} }`
+    )
+    await writeFile(
+      join(root, 'src', 'website', 'bootstrap.ts'),
+      `import './website.css'`
+    )
+    await writeFile(join(root, 'src', 'website', 'base.css'), 'html { color: blue }')
+    await writeFile(
+      join(root, 'src', 'website', 'website.css'),
+      'body { background: white }'
+    )
+    await writeFile(
+      join(root, 'src', 'website', 'router.ts'),
+      `globalThis.__loadVueSsrLiteLazyPage = () => import('./LazyPage.ts')`
+    )
+    await writeFile(
+      join(root, 'src', 'website', 'LazyPage.ts'),
+      `import './lazy.css'; export default {}`
+    )
+    await writeFile(
+      join(root, 'src', 'website', 'lazy.css'),
+      'body { border: 10px solid red }'
+    )
+    await writeFile(
+      join(root, 'src', 'admin', 'main.ts'),
+      `import './admin.css'; export default { root: {} }`
+    )
+    await writeFile(join(root, 'src', 'admin', 'admin.css'), 'body { color: red }')
+    await writeFile(
+      join(root, 'src', 'portal', 'main.ts'),
+      `import './portal.css'; export default { root: {} }`
+    )
+    await writeFile(join(root, 'src', 'portal', 'portal.css'), 'body { color: green }')
+
+    server = await createServer({
+      root,
+      base: '/dashboard/',
+      configFile: false,
+      resolve: {
+        alias: {
+          'vue-ssr-lite/client': join(root, 'client-runtime.ts'),
+          '@site': join(root, 'src', 'website'),
+        },
+      },
+      plugins: [vueSsrLite({ root })],
+      server: {
+        middlewareMode: true,
+        hmr: { server: createHttpServer() },
+      },
+      appType: 'custom',
+    })
+    const websiteSource = await readFile(join(root, 'website.html'), 'utf8')
+    const adminSource = await readFile(join(root, 'admin.html'), 'utf8')
+    const portalSource = await readFile(join(root, 'portal.html'), 'utf8')
+    const [websiteHtml, adminHtml, portalHtml] = await Promise.all([
+      server.transformIndexHtml('/website.html', websiteSource, '/'),
+      server.transformIndexHtml('/admin.html', adminSource, '/'),
+      server.transformIndexHtml('/portal.html', portalSource, '/'),
+    ])
+
+    expect(websiteHtml).toMatch(
+      /href="\/dashboard\/[^"']*src\/website\/base\.css"/
+    )
+    expect(websiteHtml).toMatch(
+      /href="\/dashboard\/[^"']*src\/website\/website\.css"/
+    )
+    expect(websiteHtml.indexOf('src/website/base.css')).toBeLessThan(
+      websiteHtml.indexOf('src/website/website.css')
+    )
+    expect(websiteHtml).not.toContain('/src/admin/admin.css')
+    expect(websiteHtml).not.toContain('lazy.css')
+    expect(adminHtml).toMatch(
+      /href="\/dashboard\/[^"']*src\/admin\/admin\.css"/
+    )
+    expect(adminHtml).not.toContain('/src/website/website.css')
+    expect(portalHtml).not.toContain('data-vue-ssr-lite-style')
+    expect(portalHtml).toContain('/dashboard/@vue-ssr-lite/client/portal')
+    expect((await server.transformRequest('/src/portal/main.ts'))?.code).toMatch(
+      /\/dashboard\/[^"']*src\/portal\/portal\.css/
+    )
+    const lazyPageModule = await server.environments.client.moduleGraph.getModuleByUrl(
+      '/src/website/LazyPage.ts'
+    )
+    expect(lazyPageModule).toBeDefined()
+    expect(lazyPageModule?.transformResult).toBeNull()
+    expect(
+      await server.environments.client.moduleGraph.getModuleByUrl(
+        '/src/website/lazy.css'
+      )
+    ).toBeUndefined()
+
+    await server.close()
+    server = undefined
+    const outDir = join(root, 'dist-test')
+    await build({
+      root,
+      base: '/dashboard/',
+      configFile: false,
+      logLevel: 'silent',
+      resolve: {
+        alias: {
+          'vue-ssr-lite/client': join(root, 'client-runtime.ts'),
+          '@site': join(root, 'src', 'website'),
+        },
+      },
+      plugins: [vueSsrLite({ root })],
+      build: { outDir, emptyOutDir: true },
+    })
+    const [builtWebsite, builtAdmin, builtPortal] = await Promise.all([
+      readFile(join(outDir, 'website.html'), 'utf8'),
+      readFile(join(outDir, 'admin.html'), 'utf8'),
+      readFile(join(outDir, 'portal.html'), 'utf8'),
+    ])
+    expect(builtWebsite).toMatch(
+      /href="\/dashboard\/assets\/website-[^"']+\.css"/
+    )
+    expect(builtWebsite).not.toMatch(/assets\/admin-[^"']+\.css/)
+    const manifest = JSON.parse(
+      await readFile(join(outDir, '.vite', 'manifest.json'), 'utf8')
+    ) as Record<string, {
+      file?: string
+      css?: string[]
+      isDynamicEntry?: boolean
+    }>
+    const lazyEntry = Object.entries(manifest).find(([id]) =>
+      id.endsWith('/src/website/LazyPage.ts') || id === 'src/website/LazyPage.ts'
+    )?.[1]
+    expect(lazyEntry?.isDynamicEntry).toBe(true)
+    expect(lazyEntry?.css?.some((file) => file.endsWith('.css'))).toBe(true)
+    for (const lazyCss of lazyEntry?.css ?? []) {
+      expect(builtWebsite).not.toContain(lazyCss)
+    }
+    expect(builtAdmin).toMatch(
+      /href="\/dashboard\/assets\/admin-[^"']+\.css"/
+    )
+    expect(builtAdmin).not.toMatch(/assets\/website-[^"']+\.css/)
+    expect(builtPortal).toMatch(
+      /href="\/dashboard\/assets\/portal-[^"']+\.css"/
+    )
+    expect(builtPortal).not.toContain('data-vue-ssr-lite-style')
+  })
+
+  it('deduplicates application CSS against consumer-owned stylesheet links', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    await writeFile(
+      join(pluginRoot, 'src/SsrApplication.ts'),
+      `import './style.css'; export default { root: {} }`
+    )
+    await writeFile(join(pluginRoot, 'src/style.css'), 'body { margin: 0 }')
+    await writeFile(
+      join(pluginRoot, 'client-runtime.ts'),
+      'export const hydrateSsrApplication = () => {}'
+    )
+    const source = `<html><head>
+      <link rel="stylesheet" href="/src/style.css">
+      <link rel="stylesheet" href="https://fonts.example.com/font.css">
+    </head><body><div id="app"></div><script type="module" src="/src/SsrApplication.ts"></script></body></html>`
+    await writeFile(join(pluginRoot, 'site.html'), source)
+    server = await createServer({
+      root: pluginRoot,
+      configFile: false,
+      resolve: {
+        alias: {
+          'vue-ssr-lite/client': join(pluginRoot, 'client-runtime.ts'),
+        },
+      },
+      plugins: [vueSsrLite({ root: pluginRoot })],
+      server: {
+        middlewareMode: true,
+        hmr: { server: createHttpServer() },
+      },
+      appType: 'custom',
+    })
+
+    const html = await server.transformIndexHtml('/site.html', source, '/')
+    expect(html.match(/href="\/src\/style\.css"/g)).toHaveLength(1)
+    expect(html).toContain('https://fonts.example.com/font.css')
+    expect(html).not.toContain(
+      'href="/src/style.css" data-vue-ssr-lite-style="storefront"'
+    )
   })
 })
