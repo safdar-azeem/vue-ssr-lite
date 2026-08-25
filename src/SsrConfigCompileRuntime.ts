@@ -188,6 +188,23 @@ export interface CompileSsrConfigOptions extends NormalizeSsrConfigOptions {
   importModule?: (specifier: string) => Promise<Record<string, unknown>>
 }
 
+const assertUniqueApplicationTemplates = (
+  applications: Record<string, SsrNormalizedApplicationConfig>,
+  root: string
+) => {
+  const owners = new Map<string, string>()
+  for (const application of Object.values(applications)) {
+    const templatePath = resolve(root, application.template)
+    const existing = owners.get(templatePath)
+    if (existing) {
+      throw new Error(
+        `Applications "${existing}" and "${application.id}" resolve to the same HTML template: ${templatePath}. Each application must currently use a unique template.`
+      )
+    }
+    owners.set(templatePath, application.id)
+  }
+}
+
 export const isSsrApplicationModuleRef = (
   value: unknown
 ): value is SsrApplicationModuleRef =>
@@ -385,6 +402,7 @@ export const normalizeSsrConfig = (
     ])
   )
   const root = resolve(options.root || process.cwd())
+  assertUniqueApplicationTemplates(applications, root)
   return {
     name: String(config.name || basename(root) || 'app'),
     runtime: config.runtime,
