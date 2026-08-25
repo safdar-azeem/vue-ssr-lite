@@ -8,6 +8,10 @@ import {
   serializeSsrState,
 } from '../SsrSerialization'
 import type { SsrHydrationState } from '../SsrRuntimeTypes'
+import {
+  SSR_DEVELOPMENT_RENDERED_STYLESHEET_ATTRIBUTE,
+  type SsrRenderedApplicationAsset,
+} from '../SsrApplicationAssetRuntime'
 
 export const SSR_HEAD_MARKER = '<!--vue-ssr-lite:head-->'
 export const SSR_TELEPORT_MARKER = '<!--vue-ssr-lite:teleports-->'
@@ -24,6 +28,7 @@ const assertIdSelector = (selector: string): string => {
 interface SsrHtmlElementStart {
   tagName: string
   end: number
+  attributes: string
   ids: string[]
 }
 
@@ -112,6 +117,7 @@ const scanSsrHtmlElementStarts = (source: string): SsrHtmlElementStart[] => {
     elements.push({
       tagName,
       end,
+      attributes: source.slice(nameEnd, end - 1),
       ids: readElementIds(source.slice(nameEnd, end - 1)),
     })
 
@@ -281,6 +287,83 @@ export interface SsrHtmlInjection {
   teleports: Readonly<Record<string, string>>
   head: ManagedHeadSnapshot | null
   state: SsrHydrationState<any, any>
+  /** Request assets resolved from the final Vue-rendered module set. */
+  assets?: readonly SsrRenderedApplicationAsset[]
+}
+
+const readHtmlAttribute = (source: string, target: string): string | undefined => {
+  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(
+    `(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+    'i'
+  ).exec(source)
+  return match?.[1] ?? match?.[2] ?? match?.[3]
+}
+
+const normalizeRenderedAssetHref = (href: string): string | undefined => {
+  try {
+    const url = new URL(href, 'http://vue-ssr-lite.local')
+    for (const name of ['direct', 'import', 't', 'v']) {
+      url.searchParams.delete(name)
+    }
+    url.searchParams.sort()
+    return url.origin === 'http://vue-ssr-lite.local'
+      ? `${url.pathname}${url.search}`
+      : url.href
+  } catch {
+    return undefined
+  }
+}
+
+const serializeSsrRenderedAssets = (
+  source: string,
+  assets: readonly SsrRenderedApplicationAsset[]
+): string => {
+  const existing = new Set<string>()
+  for (const element of scanSsrHtmlElementStarts(source)) {
+    const tagName = element.tagName.toLowerCase()
+    if (tagName === 'script') {
+      const type = readHtmlAttribute(element.attributes, 'type')?.toLowerCase()
+      const src = readHtmlAttribute(element.attributes, 'src')?.replaceAll(
+        '&amp;',
+        '&'
+      )
+      const identity = src && normalizeRenderedAssetHref(src)
+      if (identity && type === 'module') {
+        existing.add(`modulepreload:${identity}`)
+      }
+      continue
+    }
+    if (tagName !== 'link') continue
+    const rel =
+      readHtmlAttribute(element.attributes, 'rel')?.toLowerCase().split(/\s+/) ?? []
+    const href = readHtmlAttribute(element.attributes, 'href')?.replaceAll(
+      '&amp;',
+      '&'
+    )
+    const identity = href && normalizeRenderedAssetHref(href)
+    for (const supported of ['stylesheet', 'modulepreload'] as const) {
+      if (identity && rel.includes(supported)) {
+        existing.add(`${supported}:${identity}`)
+      }
+    }
+  }
+  const tags: string[] = []
+  for (const asset of assets) {
+    const normalizedHref = normalizeRenderedAssetHref(asset.href)
+    if (!normalizedHref) continue
+    const identity = `${asset.rel}:${normalizedHref}`
+    if (existing.has(identity)) continue
+    existing.add(identity)
+    const temporary = asset.temporary
+      ? ` ${SSR_DEVELOPMENT_RENDERED_STYLESHEET_ATTRIBUTE}="${escapeSsrHtml(asset.applicationId)}"`
+      : ''
+    const crossorigin = asset.rel === 'modulepreload' ? ' crossorigin' : ''
+    tags.push(
+      `<link rel="${asset.rel}" href="${escapeSsrHtml(asset.href)}"${crossorigin}${temporary}>`
+    )
+  }
+  return tags.join('')
 }
 
 const injectTeleportTarget = (
@@ -382,13 +465,18 @@ export const injectSsrHtml = (
   const stateScript = `<script id="${escapeSsrHtml(stateId)}" type="application/json">${serializeSsrState(injection.state)}</script>`
   const snapshot = injection.head ?? { tags: [] }
   const documentTemplate = stripConflictingStaticTags(template, snapshot)
+  const managedHead = serializeManagedHead(snapshot)
+  const renderedAssets = serializeSsrRenderedAssets(
+    `${documentTemplate}${managedHead}`,
+    injection.assets ?? []
+  )
   const withTeleports = injectSsrTeleports(
     documentTemplate,
     injection.teleports
   )
   return applyHtmlAttributes(
     withTeleports
-      .replace(SSR_HEAD_MARKER, serializeManagedHead(snapshot))
+      .replace(SSR_HEAD_MARKER, `${managedHead}${renderedAssets}`)
       .replace(SSR_HTML_MARKER, injection.html)
       .replace(SSR_STATE_MARKER, stateScript),
     snapshot.htmlAttributes
