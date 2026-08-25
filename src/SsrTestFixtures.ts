@@ -7,6 +7,9 @@ export const createTestDomain = (
   overrides: Partial<SsrDomainContext> = {}
 ): SsrDomainContext => ({
   entry: 'test',
+  authority: host,
+  protocol: 'https',
+  port: '',
   hostname: host,
   baseDomain: host,
   subdomain: null,
