@@ -17,6 +17,13 @@ import { promisify } from 'node:util'
 
 const execFile = promisify(execFileCallback)
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const consumerVersions = {
+  pluginVue: process.env.SSR_SMOKE_PLUGIN_VUE_VERSION || '6.0.1',
+  jsdom: process.env.SSR_SMOKE_JSDOM_VERSION || '29.0.2',
+  vite: process.env.SSR_SMOKE_VITE_VERSION || '7.3.6',
+  vue: process.env.SSR_SMOKE_VUE_VERSION || '3.5.40',
+  vueRouter: process.env.SSR_SMOKE_VUE_ROUTER_VERSION || '4.6.4',
+}
 const FRAMEWORK_WARNING =
   /inject\(\) can only be used|Symbol\(route location\)|resolveComponent can only be used|already been installed|reading ['"]meta['"]/i
 
@@ -81,6 +88,25 @@ const assertDependencyOwnership = (manifest, options = {}) => {
   }
 }
 
+const writeSsrConfig = (consumerRoot, revision) =>
+  writeFile(
+    join(consumerRoot, 'ssr.config.mjs'),
+    `import { defineSsrConfig } from 'vue-ssr-lite/server'
+
+export default defineSsrConfig({
+  server: { port: Number(process.env.SMOKE_PORT || 4173) },
+  publicConfig: ({ host, pathname, headers, domain }) => ({
+    host,
+    pathname,
+    locale: headers['accept-language'] || 'none',
+    applicationId: domain.entry,
+    revision: ${JSON.stringify(revision)},
+  }),
+})
+`,
+    'utf8'
+  )
+
 const writeFixture = async (consumerRoot) => {
   const sourceRoot = join(consumerRoot, 'src')
   await mkdir(sourceRoot, { recursive: true })
@@ -99,16 +125,7 @@ export default defineConfig({ plugins: [vue(), vueSsrLite()] })
 `,
     'utf8'
   )
-  await writeFile(
-    join(consumerRoot, 'ssr.config.mjs'),
-    `import { defineSsrConfig } from 'vue-ssr-lite/server'
-
-export default defineSsrConfig({
-  server: { port: Number(process.env.SMOKE_PORT || 4173) },
-})
-`,
-    'utf8'
-  )
+  await writeSsrConfig(consumerRoot, 'before-hmr')
   await writeFile(
     join(sourceRoot, 'Home.vue'),
     '<template><section id="home-page">packed-home</section></template>\n',
@@ -125,14 +142,22 @@ export default defineSsrConfig({
     'utf8'
   )
   await writeFile(
+    join(sourceRoot, 'Lazy.vue'),
+    '<template><section id="lazy-page">packed-lazy</section></template><style>#lazy-page{color:rgb(4,5,6)}</style>\n',
+    'utf8'
+  )
+  await writeFile(join(sourceRoot, 'style.css'), '#routed-app{color:rgb(1,2,3)}\n', 'utf8')
+  await writeFile(
     join(sourceRoot, 'App.vue'),
     `<script setup>
 import { computed, onMounted } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
+import { usePublicConfig } from 'vue-ssr-lite'
 
 if (!RouterView) throw new Error('host RouterView import is unavailable')
 const route = useRoute()
 const router = useRouter()
+const publicConfig = usePublicConfig()
 if (!route) throw new Error('host useRoute() did not resolve the installed router')
 if (!router) throw new Error('host useRouter() did not resolve the installed router')
 
@@ -145,6 +170,9 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
   <main id="routed-app" :data-route="route.path" :data-force-light="String(forceLight)">
     <div id="route-path">{{ route.path }}</div>
     <div id="route-meta">{{ String(route.meta.forceLight) }}</div>
+    <div id="public-config-path">{{ publicConfig.pathname }}</div>
+    <div id="public-config-application">{{ publicConfig.applicationId }}</div>
+    <div id="public-config-revision">{{ publicConfig.revision }}</div>
     <button id="navigate-about" type="button" @click="navigate">about</button>
     <router-view />
   </main>
@@ -159,12 +187,14 @@ import Home from './Home.vue'
 import About from './About.vue'
 import NotFound from './NotFound.vue'
 import App from './App.vue'
+import './style.css'
 
 export default defineApplication({
   root: App,
   routes: [
     { path: '/', component: Home, meta: { forceLight: true, seo: { title: 'Home' } } },
     { path: '/about', component: About, meta: { forceLight: false, seo: { title: 'About' } } },
+    { path: '/lazy', component: () => import('./Lazy.vue'), meta: { seo: { title: 'Lazy' } } },
     {
       path: '/:pathMatch(.*)*',
       component: NotFound,
@@ -255,7 +285,10 @@ const assertResponse = async (origin, path, status, markers) => {
 }
 
 const assertWarningFree = (output, label) => {
-  assert(!FRAMEWORK_WARNING.test(output), `${label} emitted a framework identity warning:\n${output}`)
+  assert(
+    !FRAMEWORK_WARNING.test(output),
+    `${label} emitted a framework identity warning:\n${output}`
+  )
 }
 
 const assertSingleFrameworkResolution = async (consumerRoot) => {
@@ -279,7 +312,7 @@ const assertSingleFrameworkResolution = async (consumerRoot) => {
 const waitFor = async (predicate, message) => {
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    if (predicate()) return
+    if (await predicate()) return
     await new Promise((resolveWait) => setTimeout(resolveWait, 20))
   }
   throw new Error(message)
@@ -308,7 +341,11 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
   }
   for (const [key, value] of Object.entries(browserGlobals)) {
     previousGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key))
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value,
+    })
   }
   const warnings = []
   const originalWarn = console.warn
@@ -320,11 +357,7 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       /<script\b[^>]*type=["']module["'][^>]*src=["']([^"']+)["']/i
     )?.[1]
     assert(moduleSource, 'production HTML did not contain the generated browser entry.')
-    const modulePath = join(
-      consumerRoot,
-      'dist/client',
-      moduleSource.replace(/^\//, '')
-    )
+    const modulePath = join(consumerRoot, 'dist/client', moduleSource.replace(/^\//, ''))
     await import(`${pathToFileURL(modulePath).href}?smoke=${Date.now()}`)
     await waitFor(
       () => dom.window.document.documentElement.getAttribute('data-hydrated') === 'true',
@@ -367,7 +400,9 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
 
 const main = async () => {
   const repositoryManifest = await readJson(join(repositoryRoot, 'package.json'))
-  assertDependencyOwnership(repositoryManifest, { requireDevelopmentTooling: true })
+  assertDependencyOwnership(repositoryManifest, {
+    requireDevelopmentTooling: true,
+  })
 
   const builtServer = await readMjsTree(join(repositoryRoot, 'dist'))
   assert(
@@ -384,7 +419,9 @@ const main = async () => {
     const packed = await execFile(
       'npm',
       ['pack', '--ignore-scripts', '--json', '--pack-destination', temporaryRoot],
-      { cwd: repositoryRoot }
+      {
+        cwd: repositoryRoot,
+      }
     )
     const records = JSON.parse(packed.stdout)
     const tarball = join(temporaryRoot, records[0].filename)
@@ -397,11 +434,11 @@ const main = async () => {
           private: true,
           type: 'module',
           dependencies: {
-            '@vitejs/plugin-vue': '6.0.1',
-            jsdom: '29.0.2',
-            vue: '3.5.40',
-            'vue-router': '4.6.4',
-            vite: '7.3.6',
+            '@vitejs/plugin-vue': consumerVersions.pluginVue,
+            jsdom: consumerVersions.jsdom,
+            vue: consumerVersions.vue,
+            'vue-router': consumerVersions.vueRouter,
+            vite: consumerVersions.vite,
             'vue-ssr-lite': `file:${tarball}`,
           },
         },
@@ -428,17 +465,40 @@ const main = async () => {
       join(consumerRoot, 'node_modules/vue-ssr-lite/package.json')
     )
     assertDependencyOwnership(installedManifest)
+    const installedRuntimeTypes = await readFile(
+      join(consumerRoot, 'node_modules/vue-ssr-lite/dist/SsrRuntimeTypes.d.ts'),
+      'utf8'
+    )
+    assert(
+      /string\s*\|\s*readonly string\[\]\s*\|\s*undefined/.test(
+        installedRuntimeTypes
+      ),
+      'SsrPublicConfigRequest header arrays must be readonly in the public declarations.'
+    )
+    assert(
+      /export type SsrPublicConfigDomain[\s\S]*?params:\s*Readonly<Record<string, string>>[\s\S]*?export interface SsrPublicConfigRequest/.test(
+        installedRuntimeTypes
+      ),
+      'SsrPublicConfigRequest domain params must be readonly in the public declarations.'
+    )
+    assert(
+      await pathExists(join(consumerRoot, 'node_modules/vue-ssr-lite/LICENSE')),
+      'the packed package must include the MIT license text.'
+    )
     await assertSingleFrameworkResolution(consumerRoot)
 
     const devPort = await reservePort()
     const dev = await startCli(consumerRoot, 'dev', devPort)
     try {
       const origin = `http://127.0.0.1:${devPort}`
-      await assertResponse(origin, '/', 200, [
+      const home = await assertResponse(origin, '/', 200, [
         'id="routed-app"',
         'data-route="/"',
         'id="route-meta">true',
         'id="home-page">packed-home',
+        'id="public-config-path">/',
+        'id="public-config-application">app',
+        'id="public-config-revision">before-hmr',
       ])
       await assertResponse(origin, '/about', 200, [
         'data-route="/about"',
@@ -448,6 +508,22 @@ const main = async () => {
       await assertResponse(origin, '/definitely-missing', 404, [
         'id="not-found-page">packed-not-found',
       ])
+      const lazy = await assertResponse(origin, '/lazy', 200, [
+        'id="lazy-page">packed-lazy',
+        'id="public-config-path">/lazy',
+      ])
+      assert(home.includes('/src/style.css'), 'development HTML lacks entry CSS.')
+      assert(
+        lazy.includes('data-vue-ssr-lite-rendered-style'),
+        'development lazy route lacks request-rendered CSS.'
+      )
+      await writeSsrConfig(consumerRoot, 'after-hmr')
+      let updatedHtml = ''
+      await waitFor(async () => {
+        const response = await fetch(`${origin}/`)
+        updatedHtml = await response.text()
+        return updatedHtml.includes('id="public-config-revision">after-hmr')
+      }, 'development SSR did not observe the updated publicConfig factory.')
       assertWarningFree(dev.output(), 'development Vite SSR')
     } finally {
       await stopCli(dev)
@@ -467,12 +543,16 @@ const main = async () => {
         'id="routed-app"',
         'id="home-page">packed-home',
       ])
-      await assertResponse(origin, '/about', 200, [
-        'id="about-page">packed-about',
+      await assertResponse(origin, '/about', 200, ['id="about-page">packed-about'])
+      await assertResponse(origin, '/missing', 404, ['id="not-found-page">packed-not-found'])
+      const lazyHtml = await assertResponse(origin, '/lazy', 200, [
+        'id="lazy-page">packed-lazy',
+        'id="public-config-path">/lazy',
       ])
-      await assertResponse(origin, '/missing', 404, [
-        'id="not-found-page">packed-not-found',
-      ])
+      const homeCss = [...homeHtml.matchAll(/href=["']([^"']+\.css)["']/g)]
+      const lazyCss = [...lazyHtml.matchAll(/href=["']([^"']+\.css)["']/g)]
+      assert(homeCss.length >= 1, 'production HTML lacks entry CSS.')
+      assert(lazyCss.length > homeCss.length, 'production lazy route lacks request-specific CSS.')
       await assertResponse(origin, '/sitemap.xml', 200, [
         '<loc>https://packed-smoke.test/</loc>',
         '<loc>https://packed-smoke.test/about</loc>',
