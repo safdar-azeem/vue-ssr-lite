@@ -39,6 +39,7 @@ import {
   validateSsrHostEntries,
 } from './server/SsrHostRuntime'
 import { prepareSsrHtmlTemplate } from './server/SsrHtmlRuntime'
+import { generateSsrDevelopmentStylesheetHandoff } from './SsrApplicationAssetRuntime'
 
 export { defineSsrConfig }
 
@@ -548,8 +549,12 @@ export const resolveSsrViteEntries = async (
 ): Promise<SsrViteEntries> =>
   extractSsrViteEntries(await loadSsrConfigFile(root, configPath), { root })
 
-const absoluteImportPath = (root: string, filePath: string): string =>
-  resolve(root, filePath).replaceAll('\\', '/')
+const absoluteImportPath = (root: string, filePath: string): string => {
+  // Preserve Vite aliases and package specifiers for Vite's resolver. Relative,
+  // absolute, and conventional root-relative filesystem entries remain stable.
+  if (/^[@~#]/.test(filePath)) return filePath.replaceAll('\\', '/')
+  return resolve(root, filePath).replaceAll('\\', '/')
+}
 
 export const generateSsrRuntimeModule = (
   root: string,
@@ -620,6 +625,9 @@ export const generateSsrClientModule = (
   return [
     importStatement,
     `import { ${mountFunction} } from 'vue-ssr-lite/client'`,
+    ...(entry.kind === 'ssr'
+      ? generateSsrDevelopmentStylesheetHandoff(entry.id)
+      : []),
     'const definition = typeof loadApplication === "function"',
     '  ? await loadApplication()',
     '  : loadApplication',
