@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promi
 import { createServer as createHttpServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build, createServer, type ViteDevServer } from 'vite'
 import { vueSsrLite } from './SsrVitePlugin'
@@ -135,6 +136,51 @@ describe('SSR Vite package identity', () => {
 
     expect(development.ssr?.external).toContain('vue-ssr-lite')
     expect(production.ssr?.external).toContain('vue-ssr-lite')
+  })
+
+  it.each(['./', ''])('carries relative SPA base %j through a real generated SSR runtime', async (base) => {
+    const pluginRoot = await writeMinimalConfig()
+    await writeFile(
+      join(pluginRoot, 'ssr.config.mjs'),
+      `
+export default {
+  server: { port: 0 },
+  applications: {
+    admin: {
+      render: 'spa',
+      application: { module: './src/SsrApplication.ts' },
+      template: 'site.html',
+      host: 'admin.test',
+      domain: { production: 'admin.test' },
+    },
+  },
+}
+`
+    )
+    const outDir = join(pluginRoot, 'server-build')
+    await build({
+      root: pluginRoot,
+      base,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [vueSsrLite({ root: pluginRoot })],
+      build: {
+        ssr: true,
+        outDir,
+        emptyOutDir: true,
+        rollupOptions: {
+          input: 'virtual:vue-ssr-lite/runtime',
+          output: { entryFileNames: 'runtime.mjs' },
+        },
+      },
+    })
+    const runtime = (await import(
+      `${pathToFileURL(join(outDir, 'runtime.mjs')).href}?test=${Date.now()}`
+    )) as { default: () => Promise<Record<string, unknown>> }
+    const generated = await runtime.default()
+
+    expect(generated.__vueSsrLiteViteBase).toBe(base)
+    expect((generated.applications as Record<string, { render: string }>).admin.render).toBe('spa')
   })
 
   it('stays API-client neutral: no Apollo or GraphQL packages by default', async () => {
