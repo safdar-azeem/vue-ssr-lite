@@ -39,14 +39,15 @@ describe('SSR generic hydration cleanup', () => {
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
-  it('disposes plugin state and reports consumer cleanup failure after a successful render', async () => {
+  it('disposes plugin state without replacing a successful render when cleanup fails', async () => {
     const dispose = vi.fn()
-    await expect(renderSsrApplication({
+    const result = await renderSsrApplication({
       id: 'cleanup-failure',
       root: defineComponent(() => () => h('main', 'rendered')),
       install: ({ hydration }) => hydration.onDispose(dispose),
       cleanup: () => { throw new Error('cleanup failed') },
-    }, request())).rejects.toThrow('cleanup failed')
+    }, request())
+    expect(result.html).toContain('rendered')
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 })
