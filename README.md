@@ -707,18 +707,21 @@ export default defineSsrConfig({
 	applications: {
 		website: {
 			app: './src/website/main.ts',
+			template: './index.html',
 			host: 'example.com',
 		},
 
 		admin: {
 			app: './src/admin/main.ts',
+			template: './admin.html',
 			host: 'admin.example.com',
 		},
 	},
 })
 ```
 
-The object key is the application ID.
+The object key is the application ID. Each application must use a distinct
+physical HTML template; equivalent paths to the same template are rejected.
 
 ## SSR and SPA Together
 
@@ -727,12 +730,14 @@ export default defineSsrConfig({
 	applications: {
 		website: {
 			app: './src/website/main.ts',
+			template: './index.html',
 			host: 'example.com',
 			render: 'ssr',
 		},
 
 		admin: {
 			app: './src/admin/main.ts',
+			template: './admin.html',
 			host: 'admin.example.com',
 			render: 'spa',
 		},
@@ -823,6 +828,8 @@ containers outside the application mount:
 ```
 
 Targets may be `body`, `head`, or a simple id selector such as `#modals`.
+The application mount must also be an empty dedicated container apart from
+formatting whitespace.
 Dedicated id targets must be empty apart from formatting whitespace. Missing,
 unsafe, non-empty, or mount-element targets fail with an actionable template
 error instead of silently placing content in the wrong container.
@@ -890,7 +897,8 @@ responseCache: {
 }
 ```
 
-Requests with forwarded cookies bypass the shared response cache.
+Requests with non-empty `Cookie`, `Authorization`, or `Proxy-Authorization`
+headers bypass the shared response cache, whether or not cookies are forwarded.
 
 ---
 
