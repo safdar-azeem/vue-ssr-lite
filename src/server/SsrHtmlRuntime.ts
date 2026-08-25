@@ -21,6 +21,168 @@ const assertIdSelector = (selector: string): string => {
   return selector.slice(1)
 }
 
+interface SsrHtmlElementStart {
+  tagName: string
+  end: number
+  ids: string[]
+}
+
+const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'textarea', 'title'])
+
+const readElementIds = (attributes: string): string[] => {
+  const ids: string[] = []
+  let index = 0
+  while (index < attributes.length) {
+    while (/\s|\//.test(attributes[index] || '')) index += 1
+    const nameStart = index
+    while (index < attributes.length && !/[\s=/>]/.test(attributes[index])) {
+      index += 1
+    }
+    if (index === nameStart) {
+      index += 1
+      continue
+    }
+    const name = attributes.slice(nameStart, index).toLowerCase()
+    while (/\s/.test(attributes[index] || '')) index += 1
+    let value = ''
+    if (attributes[index] === '=') {
+      index += 1
+      while (/\s/.test(attributes[index] || '')) index += 1
+      const quote = attributes[index]
+      if (quote === '"' || quote === "'") {
+        index += 1
+        const valueStart = index
+        while (index < attributes.length && attributes[index] !== quote) {
+          index += 1
+        }
+        value = attributes.slice(valueStart, index)
+        if (attributes[index] === quote) index += 1
+      } else {
+        const valueStart = index
+        while (index < attributes.length && !/[\s>]/.test(attributes[index])) {
+          index += 1
+        }
+        value = attributes.slice(valueStart, index)
+      }
+    }
+    if (name === 'id') ids.push(value)
+  }
+  return ids
+}
+
+/**
+ * Locate real start tags without treating attribute-name suffixes or raw-text
+ * contents as elements. This is intentionally only a target locator; template
+ * mutation remains marker-based below.
+ */
+const scanSsrHtmlElementStarts = (source: string): SsrHtmlElementStart[] => {
+  const elements: SsrHtmlElementStart[] = []
+  let index = 0
+  while (index < source.length) {
+    const start = source.indexOf('<', index)
+    if (start < 0) break
+    if (source.startsWith('<!--', start)) {
+      const commentEnd = source.indexOf('-->', start + 4)
+      index = commentEnd < 0 ? source.length : commentEnd + 3
+      continue
+    }
+    if (!/[A-Za-z]/.test(source[start + 1] || '')) {
+      index = start + 1
+      continue
+    }
+
+    let nameEnd = start + 2
+    while (/[A-Za-z0-9:-]/.test(source[nameEnd] || '')) nameEnd += 1
+    const tagName = source.slice(start + 1, nameEnd)
+    let end = nameEnd
+    let quote = ''
+    while (end < source.length) {
+      const character = source[end]
+      if (quote) {
+        if (character === quote) quote = ''
+      } else if (character === '"' || character === "'") {
+        quote = character
+      } else if (character === '>') {
+        break
+      }
+      end += 1
+    }
+    if (end >= source.length) break
+    end += 1
+    elements.push({
+      tagName,
+      end,
+      ids: readElementIds(source.slice(nameEnd, end - 1)),
+    })
+
+    const normalizedTag = tagName.toLowerCase()
+    if (
+      RAW_TEXT_ELEMENTS.has(normalizedTag) &&
+      !source.slice(nameEnd, end).trimEnd().endsWith('/>')
+    ) {
+      const closing = new RegExp(`<\\/\\s*${normalizedTag}\\s*>`, 'ig')
+      closing.lastIndex = end
+      const match = closing.exec(source)
+      index = match ? closing.lastIndex : source.length
+    } else {
+      index = end
+    }
+  }
+  return elements
+}
+
+const findSsrHtmlElementById = (
+  source: string,
+  id: string,
+  label: string
+): SsrHtmlElementStart => {
+  const matches = scanSsrHtmlElementStarts(source).filter((element) =>
+    element.ids.includes(id)
+  )
+  if (!matches.length) {
+    throw new Error(`${label} is missing from the SSR HTML template.`)
+  }
+  if (matches.length > 1 || matches[0].ids.length > 1) {
+    throw new Error(
+      `${label} appears more than once in the SSR HTML template. Target ids must be unique.`
+    )
+  }
+  return matches[0]
+}
+
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const dedicatedContainerPattern = (
+  tagName: string,
+  marker?: string
+): RegExp =>
+  new RegExp(
+    marker
+      ? `^(\\s*)${escapeRegExp(marker)}(\\s*)(<\\/\\s*${escapeRegExp(tagName)}\\s*>)`
+      : `^(\\s*)(<\\/\\s*${escapeRegExp(tagName)}\\s*>)`,
+    'i'
+  )
+
+const findSsrMountElement = (
+  source: string,
+  mountSelector: string,
+  id: string
+): SsrHtmlElementStart => {
+  try {
+    return findSsrHtmlElementById(
+      source,
+      id,
+      `SSR template mount element ${mountSelector}`
+    )
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('is missing from')) {
+      throw new Error(`SSR template is missing mount element ${mountSelector}.`)
+    }
+    throw error
+  }
+}
+
 export const prepareSsrHtmlTemplate = (
   source: string,
   mountSelector = '#app'
@@ -34,14 +196,25 @@ export const prepareSsrHtmlTemplate = (
   }
   if (!html.includes(SSR_HTML_MARKER)) {
     const id = assertIdSelector(mountSelector)
-    const mountPattern = new RegExp(
-      `(<([A-Za-z][\\w-]*)\\b[^>]*\\bid=["']${id}["'][^>]*>)[\\s\\S]*?(<\\/\\2>)`,
-      'i'
-    )
-    if (!mountPattern.test(html)) {
-      throw new Error(`SSR template is missing mount element ${mountSelector}.`)
+    const mount = findSsrMountElement(html, mountSelector, id)
+    const remainder = html.slice(mount.end)
+    const closing = dedicatedContainerPattern(mount.tagName).exec(remainder)
+    if (!closing) {
+      throw new Error(
+        `SSR template mount element ${mountSelector} must be an empty dedicated container. Remove child markup and use the documented <div id="${id}"></div> convention.`
+      )
     }
-    html = html.replace(mountPattern, `$1${SSR_HTML_MARKER}$3`)
+    html = `${html.slice(0, mount.end)}${SSR_HTML_MARKER}${closing[2]}${html.slice(mount.end + closing[0].length)}`
+  } else {
+    const id = assertIdSelector(mountSelector)
+    const mount = findSsrMountElement(html, mountSelector, id)
+    if (!dedicatedContainerPattern(mount.tagName, SSR_HTML_MARKER).test(
+      html.slice(mount.end)
+    )) {
+      throw new Error(
+        `SSR template mount element ${mountSelector} must contain only the managed SSR marker.`
+      )
+    }
   }
   if (!html.includes(SSR_STATE_MARKER)) {
     html = html.replace(/<\/body>/i, `\t${SSR_STATE_MARKER}\n</body>`)
@@ -131,27 +304,27 @@ const injectTeleportTarget = (
   }
 
   const id = target.slice(1)
-  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const targetOpenPattern = new RegExp(
-    `<[A-Za-z][\\w-]*\\b[^>]*\\bid=["']${escapedId}["'][^>]*>`,
-    'gi'
-  )
-  if ([...template.matchAll(targetOpenPattern)].length > 1) {
-    throw new Error(
-      `Vue Teleport target "${target}" appears more than once in the SSR HTML template. Teleport target ids must be unique.`
+  let element: SsrHtmlElementStart
+  try {
+    element = findSsrHtmlElementById(
+      template,
+      id,
+      `Vue Teleport target "${target}"`
     )
-  }
-  const targetPattern = new RegExp(
-    `(<([A-Za-z][\\w-]*)\\b[^>]*\\bid=["']${escapedId}["'][^>]*>)([\\s\\S]*?)(<\\/\\2>)`,
-    'i'
-  )
-  const match = targetPattern.exec(template)
-  if (!match) {
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('appears more than once')) {
+      throw new Error(
+        `Vue Teleport target "${target}" appears more than once in the SSR HTML template. Teleport target ids must be unique.`
+      )
+    }
     throw new Error(
       `Vue Teleport target "${target}" is missing from the SSR HTML template. Add a dedicated ${target} container outside the application mount.`
     )
   }
-  if (match[3].includes(SSR_HTML_MARKER)) {
+  const remainder = template.slice(element.end)
+  if (
+    new RegExp(`^\\s*${escapeRegExp(SSR_HTML_MARKER)}`).test(remainder)
+  ) {
     throw new Error(
       `Vue Teleport target "${target}" cannot be the SSR application mount. Add a separate target container outside the mount.`
     )
@@ -161,16 +334,13 @@ const injectTeleportTarget = (
   // tags make a regex-based insertion ambiguous. Require target containers to
   // be empty (apart from formatting whitespace) so Teleports are appended at
   // the actual container level rather than silently corrupting the document.
-  if (match[3].trim()) {
+  const closing = dedicatedContainerPattern(element.tagName).exec(remainder)
+  if (!closing) {
     throw new Error(
       `Vue Teleport target "${target}" must be an empty dedicated container. Remove existing child markup from ${target} or use a separate target outside the application mount.`
     )
   }
-  return template.replace(
-    targetPattern,
-    (_match, opening: string, _tag: string, contents: string, closing: string) =>
-      `${opening}${contents}${markup}${closing}`
-  )
+  return `${template.slice(0, element.end)}${closing[1]}${markup}${closing[2]}${template.slice(element.end + closing[0].length)}`
 }
 
 const injectSsrTeleports = (
