@@ -21,6 +21,10 @@ const spaConfig = () =>
   defineSsrConfig({
     name: 'test-runtime',
     runtime: 'unified',
+    // Lifecycle tests must not claim the public development port. Binding to
+    // zero keeps them isolated from local managed-server processes and other
+    // test workers.
+    server: { port: 0 },
     applications: {
       spa: {
         render: 'spa',
@@ -84,12 +88,16 @@ describe('managed SSR server lifecycle', () => {
         if (context.url.pathname === '/redirect') {
           context.response.redirect = { location: '/target', statusCode: 307 }
         }
-        if (context.url.pathname === '/timeout') {
+        if (
+          context.url.pathname === '/timeout' ||
+          context.url.pathname === '/timeout-hanging-renderer'
+        ) {
           await new Promise<never>(() => undefined)
         }
         return () => h('main', 'ready')
       },
     })
+    let timeoutRenderKind: string | undefined
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -97,7 +105,20 @@ describe('managed SSR server lifecycle', () => {
         default: defineSsrConfig({
           name: 'test-runtime',
           runtime: 'unified',
-          server: { requestTimeoutMs: 20 },
+          // The configured deadline includes development runtime reload work;
+          // keep enough headroom for the Vite-free config compiler while still
+          // exercising the hanging render timeout below.
+          server: {
+            port: 0,
+            requestTimeoutMs: 100,
+            renderError: ({ kind, request }) => {
+              timeoutRenderKind = kind
+              if (request?.pathname === '/timeout') {
+                return { statusCode: 418, body: 'timeout handled' }
+              }
+              return new Promise<never>(() => undefined)
+            },
+          },
           applications: {
             ssr: {
               render: 'ssr',
@@ -125,12 +146,150 @@ describe('managed SSR server lifecycle', () => {
     const timeout = await fetch(`http://127.0.0.1:${port}/timeout`, {
       headers: { accept: 'text/html' },
     })
+    const hangingRenderer = await fetch(
+      `http://127.0.0.1:${port}/timeout-hanging-renderer`,
+      { headers: { accept: 'text/html' } }
+    )
 
     expect(redirect.status).toBe(307)
     expect(redirect.headers.get('location')).toBe(
       `http://127.0.0.1:${port}/target`
     )
-    expect(timeout.status).toBe(504)
+    expect(timeout.status).toBe(418)
+    expect(await timeout.text()).toBe('timeout handled')
+    expect(timeoutRenderKind).toBe('timeout')
+    expect(hangingRenderer.status).toBe(504)
+  })
+
+  it('uses one deadline across request stages and aborts the completed scope', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    let successfulSignal: AbortSignal | undefined
+    const Root = defineComponent({
+      setup() {
+        successfulSignal = useSsrRequestContext().request.signal
+        return () => h('main', 'ready')
+      },
+    })
+    let slow = true
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, requestTimeoutMs: 60 },
+          resolveSiteUrl: async () => {
+            if (slow) await new Promise((resolveWait) => setTimeout(resolveWait, 40))
+            return 'http://localhost'
+          },
+          applications: {
+            deadline: {
+              application: { id: 'deadline', root: Root },
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+              publicConfig: async () => {
+                if (slow) {
+                  await new Promise((resolveWait) => setTimeout(resolveWait, 40))
+                }
+                return {}
+              },
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const { port } = managed.address()
+    const timedOut = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(timedOut.status).toBe(504)
+
+    slow = false
+    const successful = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { accept: 'text/html' },
+    })
+    expect(successful.status).toBe(200)
+    await successful.text()
+    expect(successfulSignal?.aborted).toBe(true)
+  })
+
+  it('keeps valid renders available when observability and cleanup throw', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    const fail = () => {
+      throw new Error('observability failed')
+    }
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: {
+            port: 0,
+            logger: { debug: fail, info: fail, warn: fail, error: fail },
+            onMetrics: fail,
+          },
+          applications: {
+            observability: {
+              application: {
+                id: 'observability',
+                root: defineComponent({
+                  setup: () => () => h('main', 'healthy'),
+                }),
+                cleanup: () => {
+                  throw new Error('cleanup failed')
+                },
+              },
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const { port } = managed.address()
+    const response = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: { accept: 'text/html' },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('<main>healthy</main>')
+  })
+
+  it('serves a production SPA without an SSR canonical origin', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await mkdir(join(root, 'dist', 'client'), { recursive: true })
+    await writeFile(
+      join(root, 'dist', 'client', 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const previousPublicUrl = process.env.PUBLIC_URL
+    delete process.env.PUBLIC_URL
+    try {
+      managed = await createSsrManagedServer({
+        production: true,
+        root,
+        loadRuntime: async () => ({ default: spaConfig() }),
+      })
+      await managed.listen()
+      const { port } = managed.address()
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        headers: { accept: 'text/html' },
+      })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain('vue-ssr-lite-domain')
+    } finally {
+      if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
+      else process.env.PUBLIC_URL = previousPublicUrl
+    }
   })
 
   it('selects applications by host specificity and enforces runtime roles with 421', async () => {
@@ -153,7 +312,7 @@ describe('managed SSR server lifecycle', () => {
         default: defineSsrConfig({
           name: 'host-runtime',
           runtime: 'erp',
-          server: { trustProxy: true },
+          server: { port: 0, trustProxy: true },
           applications: {
             storefront: {
               render: 'ssr',
