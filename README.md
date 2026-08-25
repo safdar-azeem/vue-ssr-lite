@@ -37,6 +37,20 @@ Or:
 yarn add vue-ssr-lite vue-router
 ```
 
+## Supported versions
+
+The pre-v1 line is supported with the following host-owned runtime/tooling:
+
+| Dependency | Supported range |
+| ---------- | --------------- |
+| Node.js    | `>=22.12.0`     |
+| Vue        | `^3.5.0`        |
+| Vue Router | `^4.6.0`        |
+| Vite       | `^7.0.0`        |
+
+Vue, Vue Router, and Vite are peer dependencies supplied by the application.
+Newer major versions are unverified and are not part of the supported contract.
+
 ---
 
 # Minimal Setup
@@ -502,7 +516,7 @@ Common server options:
 | `host`              | Bind address                 |
 | `port`              | HTTP port                    |
 | `trustProxy`        | Trust reverse-proxy headers  |
-| `requestTimeoutMs`  | SSR request timeout          |
+| `requestTimeoutMs`  | One request-wide deadline    |
 | `shutdownTimeoutMs` | Graceful shutdown timeout    |
 | `healthPath`        | Health endpoint              |
 | `readinessPath`     | Readiness endpoint           |
@@ -512,6 +526,14 @@ Common server options:
 | `renderError`       | Custom render-error response |
 
 `PORT` can override the configured port.
+
+`requestTimeoutMs` starts when the application request is accepted and is not
+restarted between configuration, origin, endpoint, cache, template, or render
+stages. The same `request.signal` is aborted on disconnect, deadline expiry,
+and normal response completion so cooperative request work can stop. Logger and
+metrics callbacks are best effort: their failures never replace an HTTP
+response. A custom `renderError` handler is also bounded during failure
+responses, including after a request timeout.
 
 ---
 
@@ -543,6 +565,9 @@ For a public site:
 ```bash
 PUBLIC_URL=https://example.com
 ```
+
+An authoritative production origin is required for public SSR applications
+with SEO enabled. SPA entries do not inherit that SSR-only requirement.
 
 Behind a trusted reverse proxy:
 
@@ -620,19 +645,32 @@ import { vueSsrLite } from 'vue-ssr-lite/vite'
 import {
 	defineSsrConfig,
 	defineSitemap,
+	createSsrManagedServer,
+	createSsrMemoryResponseCache,
 	useSsrDomain,
-	useSsrRequestContext,
 } from 'vue-ssr-lite/server'
 ```
 
-| API                    | Purpose                                |
-| ---------------------- | -------------------------------------- |
-| `defineSsrConfig`      | Configure the server/runtime           |
-| `defineSitemap`        | Provide dynamic sitemap URLs           |
-| `useSsrDomain`         | Read the resolved domain context       |
-| `useSsrRequestContext` | Advanced access to SSR request context |
+| API                            | Purpose                              |
+| ------------------------------ | ------------------------------------ |
+| `defineSsrConfig`              | Configure the server/runtime         |
+| `defineSitemap`                | Provide dynamic sitemap URLs         |
+| `createSsrManagedServer`       | Advanced programmatic server hosting |
+| `createSsrMemoryResponseCache` | Optional in-memory response cache    |
+| `useSsrDomain`                 | Read domain context and build URLs   |
 
-Lower-level browser/server runtime primitives are intended for framework and integration code rather than normal applications.
+Server configuration helpers and their related public types are exported
+explicitly. Asset serving, host matching, HTML transformation, config compiler,
+site-origin enforcement, and raw render mechanics are internal implementation
+details and are not package contracts.
+
+## `vue-ssr-lite/client`
+
+The client entry is intended for generated bootstrap code and advanced custom
+integrations. It explicitly exports `hydrateSsrApplication`,
+`mountSpaApplication`, domain helpers, SSR-safe watchers, and the hydration /
+resolution integration contracts. Normal application code should import from
+`vue-ssr-lite`.
 
 ---
 
@@ -766,6 +804,28 @@ Build another subdomain URL:
 ```ts
 const url = domain.buildSubdomainUrl('billing', '/invoices')
 ```
+
+Implicit URLs use the request's resolved protocol and authority, including a
+non-default development port. Explicit `protocol` and `port` options override
+those request values consistently during SSR and hydration.
+
+---
+
+# Advanced: Vue Teleports
+
+Vue Teleports retain their native SSR target map. Use dedicated simple-id
+containers outside the application mount:
+
+```html
+<div id="app"></div>
+<div id="modals"></div>
+<div id="toasts"></div>
+```
+
+Targets may be `body`, `head`, or a simple id selector such as `#modals`.
+Dedicated id targets must be empty apart from formatting whitespace. Missing,
+unsafe, non-empty, or mount-element targets fail with an actionable template
+error instead of silently placing content in the wrong container.
 
 ---
 
