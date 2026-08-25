@@ -1,16 +1,13 @@
 import './style.css'
 
-import { defineComponent, h } from 'vue'
 import { defineApplication } from '../../../src/index'
-
-const Root = defineComponent({
-  name: 'CleanConsumerRoot',
-  setup() {
-    return () => h('div', 'clean-consumer')
-  },
-})
+import App from './App.vue'
+import HomePage from './HomePage.vue'
 
 export default defineApplication({
-  root: Root,
-  routes: [{ path: '/', component: Root }],
+  root: App,
+  routes: [
+    { path: '/', component: HomePage },
+    { path: '/lazy', component: () => import('./LazyPage.vue') },
+  ],
 })
