@@ -24,7 +24,8 @@ const mimeTypes: Record<string, string> = {
 export const resolveSsrProductionAsset = async (
   clientRoot: string,
   pathname: string,
-  protectedTemplates: readonly string[]
+  protectedTemplates: readonly string[],
+  signal?: AbortSignal
 ): Promise<SsrHttpResponse | null> => {
   try {
     const relativePath = decodeURIComponent(pathname).replace(/^\/+/, '')
@@ -36,7 +37,7 @@ export const resolveSsrProductionAsset = async (
     if (!information.isFile()) return null
     return {
       statusCode: 200,
-      body: await readFile(filePath),
+      body: await readFile(filePath, { signal }),
       headers: {
         'content-type': mimeTypes[extname(filePath)] || 'application/octet-stream',
         'cache-control': pathname.startsWith('/assets/')
