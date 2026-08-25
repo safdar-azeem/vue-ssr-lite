@@ -65,7 +65,8 @@ export const createSsrMemoryResponseCache = (
   }
 
   return {
-    get(key) {
+    get(key, readOptions) {
+      if (readOptions?.signal?.aborted) return null
       const entry = entries.get(key)
       if (!entry) return null
       if (entry.expiresAt <= Date.now()) {
@@ -81,6 +82,7 @@ export const createSsrMemoryResponseCache = (
       response: SsrHttpResponse,
       writeOptions: SsrResponseCacheWriteOptions
     ) {
+      if (writeOptions.signal?.aborted) return
       const ttlMs = Number(writeOptions.ttlMs)
       if (!Number.isFinite(ttlMs) || ttlMs <= 0) return
       remove(key)
@@ -131,6 +133,7 @@ export const resolveSsrResponseCacheKey = async (
   return JSON.stringify([
     'vue-ssr-lite:v1',
     entryId,
+    request.protocol,
     request.host,
     request.pathname,
     request.search,
