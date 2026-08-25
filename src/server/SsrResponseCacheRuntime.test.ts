@@ -61,4 +61,44 @@ describe('SSR response cache controls', () => {
     expect(left).toContain('publication:v3')
     expect(authenticated).toBeNull()
   })
+
+  it.each([
+    ['cookie', 'session=private'],
+    ['Cookie', 'session=private'],
+    ['authorization', 'Bearer private'],
+    ['proxy-authorization', 'Basic private'],
+  ])('bypasses shared caching for a non-empty %s header', async (name, value) => {
+    const strategy = {
+      store: createSsrMemoryResponseCache(),
+      ttlMs: 1_000,
+    }
+    expect(
+      await resolveSsrResponseCacheKey(
+        'storefront',
+        { ...request(), headers: { [name]: value } },
+        strategy
+      )
+    ).toBeNull()
+  })
+
+  it('keeps empty credential headers cacheable', async () => {
+    const strategy = {
+      store: createSsrMemoryResponseCache(),
+      ttlMs: 1_000,
+    }
+    expect(
+      await resolveSsrResponseCacheKey(
+        'storefront',
+        {
+          ...request(),
+          headers: {
+            cookie: ' ',
+            authorization: '',
+            'proxy-authorization': [],
+          },
+        },
+        strategy
+      )
+    ).not.toBeNull()
+  })
 })
