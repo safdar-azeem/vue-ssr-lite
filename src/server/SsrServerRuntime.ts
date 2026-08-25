@@ -29,6 +29,13 @@ import type {
 import { serializeSsrState } from '../SsrSerialization'
 import { resolveSsrProductionAsset } from './SsrAssetRuntime'
 import {
+  assertSupportedSsrViteBase,
+  parseSsrViteManifest,
+  resolveRenderedApplicationAssets,
+  type SsrViteManifest,
+} from '../SsrRenderedAssetRuntime'
+import { resolveRenderedStyleDependencies } from '../vite/SsrViteAssetRuntime'
+import {
   filterSsrCookieHeader,
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
@@ -342,6 +349,31 @@ export const createSsrManagedServer = async (
     initialServerOptions.root,
     initialServerOptions.clientOutDir
   )
+  const hasEnabledSsrApplications =
+    options.production &&
+    initialRuntime.applications.some(
+      (application) =>
+        application.kind === 'ssr' &&
+        (!application.roles?.length ||
+          !initialServerOptions.role ||
+          application.roles.includes(initialServerOptions.role))
+    )
+  let ssrManifest: SsrViteManifest | undefined
+  const viteBase = hasEnabledSsrApplications
+    ? assertSupportedSsrViteBase(initialRuntime.viteBase)
+    : initialRuntime.viteBase || '/'
+  if (hasEnabledSsrApplications) {
+    const manifestPath = resolve(clientRoot, '.vite/ssr-manifest.json')
+    let source: string
+    try {
+      source = await readFile(manifestPath, 'utf8')
+    } catch (error) {
+      throw new Error(
+        `vue-ssr-lite requires Vite's generated SSR manifest for production SSR applications at ${manifestPath}. Ensure build.ssrManifest is enabled. ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+    ssrManifest = parseSsrViteManifest(source, manifestPath)
+  }
 
   // Dev reloads the Vite SSR runtime on every request so HMR is picked up.
   // Coalesce concurrent loads (HMR storms) and keep the last good compile if a
@@ -752,12 +784,29 @@ export const createSsrManagedServer = async (
           },
         })
       }
+      const renderedAssets = options.production
+        ? resolveRenderedApplicationAssets({
+            applicationId: application.id,
+            moduleIds: rendered.renderedModules,
+            base: viteBase,
+            manifest: ssrManifest!,
+          })
+        : options.vite
+          ? await scope.run(() =>
+              resolveRenderedStyleDependencies(
+                options.vite!,
+                application.id,
+                rendered.renderedModules
+              )
+            )
+          : []
       const document = injectSsrHtml(template, {
         applicationId: application.id,
         html: rendered.html,
         teleports: rendered.teleports,
         head: rendered.head,
         state: rendered.hydrationState,
+        assets: renderedAssets,
       })
       safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
       safeSsrLog(
