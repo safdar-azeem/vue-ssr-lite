@@ -6,6 +6,35 @@ import { getSsrStateElementId } from './SsrSerialization'
 import { createTestDomain } from './SsrTestFixtures'
 
 describe('browser hydration cleanup', () => {
+  it('does not remove rendered CSS merely because the router is ready', async () => {
+    document.body.innerHTML = [
+      '<link rel="stylesheet" href="/src/AsyncCard.vue?vue&type=style" data-vue-ssr-lite-rendered-style="async">',
+      '<div id="app"><main>ready</main></div>',
+    ].join('')
+    const state = document.createElement('script')
+    state.id = getSsrStateElementId('async')
+    state.type = 'application/json'
+    state.textContent = JSON.stringify({
+      version: 1,
+      applicationId: 'async',
+      publicConfig: {},
+      domain: createTestDomain('async.test'),
+      application: {},
+    })
+    document.body.append(state)
+    const Root = defineComponent({ setup: () => () => 'ready' })
+
+    await hydrateSsrApplication({
+      id: 'async',
+      root: Root,
+      routes: [{ path: '/', component: Root }],
+    })
+
+    expect(
+      document.querySelector('link[data-vue-ssr-lite-rendered-style="async"]')
+    ).not.toBeNull()
+  })
+
   it('disposes registered plugin state when mounting fails', async () => {
     const dispose = vi.fn()
     document.body.innerHTML = '<div id="app"></div>'
