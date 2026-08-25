@@ -399,19 +399,49 @@ If `public/robots.txt` exists, that file is used instead.
 
 Use `publicConfig` to pass browser-safe server configuration into Vue.
 
-## Server
+## Static server configuration
+
+```ts
+export default defineSsrConfig({
+  publicConfig: {
+    apiUrl: 'https://api.example.com',
+  },
+})
+```
+
+## Server factory
 
 ```ts
 // ssr.config.ts
-import { defineSsrConfig } from 'vue-ssr-lite/server'
+import { defineSsrConfig, requireSsrEnv } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
   publicConfig: () => ({
-    apiUrl: process.env.PUBLIC_API_URL,
-    environment: process.env.NODE_ENV,
+    apiUrl: requireSsrEnv('PUBLIC_API_URL'),
+    environment: requireSsrEnv('NODE_ENV'),
   }),
 })
 ```
+
+Existing zero-argument factories remain supported. For request-aware public
+configuration, use the resolved server request descriptor:
+
+```ts
+export default defineSsrConfig({
+  publicConfig: ({ host, pathname, headers, domain }) => ({
+    apiUrl: resolvePublicApi(host),
+    locale: resolveLocale(headers['accept-language']),
+    tenant: domain.params?.tenant,
+    checkout: pathname.startsWith('/checkout'),
+  }),
+})
+```
+
+The factory runs server-side exactly once per incoming request, after proxy,
+host, application, and domain resolution. Async factories receive the
+request-wide `signal`. The resolved, immutable request snapshot is used for SSR
+or SPA bootstrap and is sent to the browser; the browser does not run the
+factory.
 
 ## Vue
 
@@ -428,7 +458,17 @@ const config = usePublicConfig<PublicConfig>()
 </script>
 ```
 
-`publicConfig` is sent to the browser. Never place passwords, private keys, database credentials, or other secrets inside it.
+`publicConfig` is sent to the browser. Request headers may contain credentials:
+never copy `Authorization`, `Cookie`, `Proxy-Authorization`, private tokens,
+passwords, private keys, database credentials, or other secrets into the
+returned object. Returned configuration must contain JSON-safe values: null,
+booleans, finite numbers, strings, dense arrays, and plain objects composed of
+those values. Negative zero is normalized to zero.
+
+Rendered-response cache keys automatically vary by the resolved public config.
+`responseCache.vary` remains necessary for other public render discriminators
+that affect HTML but are not represented in `publicConfig`. Credential-bearing
+requests continue to bypass the shared response cache.
 
 ---
 
