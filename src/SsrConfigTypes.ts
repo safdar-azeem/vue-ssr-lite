@@ -5,14 +5,17 @@ import type {
   SsrHttpRequest,
   SsrHttpResponse,
   SsrLogger,
+  SsrPublicConfigRequest,
   SsrReadinessProbe,
   SsrRenderMetrics,
   SsrResponseCacheStrategy,
 } from './SsrRuntimeTypes'
 
-export type SsrPublicConfigSource =
-  | Record<string, unknown>
-  | (() => Record<string, unknown> | Promise<Record<string, unknown>>)
+export type SsrPublicConfigFactory = (
+  request: SsrPublicConfigRequest
+) => Record<string, unknown> | Promise<Record<string, unknown>>
+
+export type SsrPublicConfigSource = Record<string, unknown> | SsrPublicConfigFactory
 
 /** How an application owns its apex hostname and subdomains. */
 export type SsrDomainMode = 'root' | 'subdomains' | 'root-and-subdomains'
@@ -20,9 +23,7 @@ export type SsrDomainMode = 'root' | 'subdomains' | 'root-and-subdomains'
 export type SsrRenderMode = 'spa' | 'ssr'
 
 /** How a declared domain param is derived from the request host. */
-export type SsrDomainParamSource =
-  | 'last-subdomain-label'
-  | 'subdomain-or-hostname'
+export type SsrDomainParamSource = 'last-subdomain-label' | 'subdomain-or-hostname'
 
 export interface SsrDomainParamDefinition {
   source: SsrDomainParamSource
@@ -55,9 +56,7 @@ export interface SsrApplicationCookiesConfig {
 
 export type SsrApplicationLoader =
   | SsrApplicationDefinition<any, any>
-  | (() =>
-      | SsrApplicationDefinition<any, any>
-      | Promise<SsrApplicationDefinition<any, any>>)
+  | (() => SsrApplicationDefinition<any, any> | Promise<SsrApplicationDefinition<any, any>>)
 
 /**
  * Path-based application reference. Prefer this in `ssr.config` so Vite can
@@ -172,9 +171,7 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
 
 export type SsrConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfig
 
-export type SsrConfigExport =
-  | SsrConfig
-  | (() => SsrConfig | Promise<SsrConfig>)
+export type SsrConfigExport = SsrConfig | (() => SsrConfig | Promise<SsrConfig>)
 
 /** Serializable domain snapshot attached to every request and hydration state. */
 export interface SsrDomainContext {
