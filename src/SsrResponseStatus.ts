@@ -5,10 +5,7 @@ import type { SsrResponseState } from './SsrRuntimeTypes'
 const runtimeStatus = new WeakSet<SsrResponseState>()
 
 export const isValidResponseStatus = (status: unknown): status is number =>
-  typeof status === 'number' &&
-  Number.isInteger(status) &&
-  status >= 100 &&
-  status <= 599
+  typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
 
 export const validateResponseStatus = (status: unknown): number => {
   if (!isValidResponseStatus(status)) {
@@ -19,10 +16,7 @@ export const validateResponseStatus = (status: unknown): number => {
   return status
 }
 
-export const applyRuntimeResponseStatus = (
-  response: SsrResponseState,
-  status: unknown
-): number => {
+export const applyRuntimeResponseStatus = (response: SsrResponseState, status: unknown): number => {
   const validated = validateResponseStatus(status)
   response.statusCode = validated
   runtimeStatus.add(response)
@@ -39,9 +33,7 @@ export interface SsrResponseStatusSnapshot {
   runtime: boolean
 }
 
-export const snapshotResponseStatus = (
-  response: SsrResponseState
-): SsrResponseStatusSnapshot => ({
+export const snapshotResponseStatus = (response: SsrResponseState): SsrResponseStatusSnapshot => ({
   statusCode: response.statusCode,
   runtime: runtimeStatus.has(response),
 })
@@ -88,8 +80,7 @@ export const resolveResponseStatusForRoute = (
   return applyRouteResponseStatus(response, route)
 }
 
-export const isErrorResponseStatus = (status: number): boolean =>
-  status >= 400 && status <= 599
+export const isErrorResponseStatus = (status: number): boolean => status >= 400 && status <= 599
 
 /** Dynamic SSR status override. Wins over `meta.seo.status` for the current route. */
 export const setResponseStatus = (status: number): number =>
