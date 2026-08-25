@@ -8,6 +8,7 @@ A lightweight Server-Side Rendering (SSR) runtime for **Vue 3**.
 
 - Vue 3 + Vite SSR
 - Automatic browser hydration
+- Request-aware route CSS and module preloads
 - Vue Router support
 - Built-in SEO and head management
 - Route SEO with `meta.seo`
@@ -98,6 +99,14 @@ Global CSS follows the normal Vite convention: import it from the application
 entry. vue-ssr-lite exposes entry-imported styles in the initial SSR document,
 then hands ownership to Vite during hydration so CSS HMR continues to work. Do
 not duplicate the import with a stylesheet link in `index.html`.
+
+Lazy Vue routes need no asset annotations. During SSR, vue-ssr-lite uses the
+modules reported by Vue to include only the rendered route's Vite-managed CSS.
+Production builds resolve those modules through Vite's generated SSR manifest
+and module-preload their client chunks; unrelated lazy routes remain excluded.
+SSR applications support Vite absolute-path and `http(s)` CDN bases. Relative
+Vite bases (`./` or an empty base) are rejected at startup because they cannot
+resolve assets correctly for arbitrary server-rendered route URLs.
 
 ## 4. HTML Entry (`index.html`)
 
