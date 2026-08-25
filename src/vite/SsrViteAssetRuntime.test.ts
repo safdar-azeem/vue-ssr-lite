@@ -6,6 +6,8 @@ import {
   normalizeViteAssetUrl,
   readEagerViteImports,
   resolveApplicationStyleDependencies,
+  resolveRenderedStyleDependencies,
+  runWithSsrViteAssetResolutionContext,
 } from './SsrViteAssetRuntime'
 
 describe('SSR Vite application assets', () => {
@@ -81,7 +83,9 @@ describe('SSR Vite application assets', () => {
     const module = {
       url: '/src/main.ts',
       transformResult: {
-        code: `import '/dashboard/src/base.css'; import('/dashboard/src/LazyPage.ts')`,
+        code: `const example = "import '/dashboard/src/LazyPage.ts'";
+          export { default } from '/dashboard/src/base.css' with { type: 'css' };
+          import('/dashboard/src/LazyPage.ts')`,
         map: null,
       },
       importedModules: new Set([eager, lazy]),
@@ -141,12 +145,15 @@ describe('SSR Vite application assets', () => {
       [optimizedRuntime.url, `import '${stylesheet.url}'`],
       [stylesheet.url, 'export {}'],
     ])
+    let idleCalls = 0
     const environment = {
       transformRequest: async (url: string) => {
         const transformed = code.get(url)
         return transformed == null ? null : { code: transformed, map: null }
       },
-      waitForRequestsIdle: async () => {},
+      waitForRequestsIdle: async () => {
+        idleCalls += 1
+      },
       moduleGraph: {
         getModuleByUrl: async (url: string) =>
           url === entry.url ? entry : undefined,
@@ -161,5 +168,184 @@ describe('SSR Vite application assets', () => {
       resolveApplicationStyleDependencies(server, 'app', entry.url)
     ).resolves.toEqual([{ applicationId: 'app', href: stylesheet.url }])
     expect(optimizedRuntime.transformResult).toBeNull()
+    expect(idleCalls).toBe(0)
+  })
+
+  it('inspects each eager module once when rendered roots share dependency graphs', async () => {
+    const reads = new Map<string, number>()
+    const trackedModule = (
+      url: string,
+      code: string,
+      dependencies: EnvironmentModuleNode[] = []
+    ): EnvironmentModuleNode => {
+      const module = {
+        id: url,
+        url,
+        transformResult: { code, map: null },
+      } as unknown as EnvironmentModuleNode
+      Object.defineProperty(module, 'importedModules', {
+        get: () => {
+          reads.set(url, (reads.get(url) ?? 0) + 1)
+          return new Set(dependencies)
+        },
+      })
+      return module
+    }
+    const stylesheet = trackedModule('/src/shared.css', 'export {}')
+    const first = trackedModule(
+      '/src/First.vue',
+      `import '${stylesheet.url}'`,
+      [stylesheet]
+    )
+    const second = trackedModule(
+      '/src/Second.vue',
+      `import '${stylesheet.url}'`,
+      [stylesheet]
+    )
+    const modules = new Map([
+      [first.id!, first],
+      [second.id!, second],
+      [stylesheet.id!, stylesheet],
+    ])
+    let idleCalls = 0
+    const environment = {
+      transformRequest: async (url: string) => {
+        throw new Error(`Unexpected transform for ${url}`)
+      },
+      waitForRequestsIdle: async () => {
+        idleCalls += 1
+      },
+      moduleGraph: {
+        getModuleById: (id: string) => modules.get(id),
+        getModuleByUrl: async (url: string) => modules.get(url),
+      },
+    }
+    const server = {
+      config: { base: '/', root: '/project' },
+      environments: { client: environment },
+    } as unknown as ViteDevServer
+
+    await expect(
+      resolveRenderedStyleDependencies(server, 'app', [first.id!, second.id!])
+    ).resolves.toEqual([
+      {
+        applicationId: 'app',
+        href: '/src/shared.css',
+        rel: 'stylesheet',
+        temporary: true,
+      },
+    ])
+    expect(Object.fromEntries(reads)).toEqual({
+      '/src/First.vue': 1,
+      '/src/shared.css': 1,
+      '/src/Second.vue': 1,
+    })
+    expect(idleCalls).toBe(0)
+  })
+
+  it('shares graph inspection across application and rendered styles only within one request', async () => {
+    const reads = new Map<string, number>()
+    let currentStylesheet: EnvironmentModuleNode
+    const trackedModule = (
+      url: string,
+      code: () => string,
+      dependencies: () => EnvironmentModuleNode[]
+    ): EnvironmentModuleNode => {
+      const module = { id: url, url } as unknown as EnvironmentModuleNode
+      Object.defineProperties(module, {
+        transformResult: {
+          get: () => ({ code: code(), map: null }),
+        },
+        importedModules: {
+          get: () => {
+            reads.set(url, (reads.get(url) ?? 0) + 1)
+            return new Set(dependencies())
+          },
+        },
+      })
+      return module
+    }
+    const firstStylesheet = trackedModule(
+      '/src/first.css',
+      () => 'export {}',
+      () => []
+    )
+    const nextStylesheet = trackedModule(
+      '/src/next.css',
+      () => 'export {}',
+      () => []
+    )
+    currentStylesheet = firstStylesheet
+    const rendered = trackedModule(
+      '/src/Rendered.vue',
+      () => `import '${currentStylesheet.url}'`,
+      () => [currentStylesheet]
+    )
+    const entry = trackedModule(
+      '/@vue-ssr-lite/client/app',
+      () => `import '${rendered.url}'`,
+      () => [rendered]
+    )
+    const modules = new Map([
+      [entry.id!, entry],
+      [rendered.id!, rendered],
+      [firstStylesheet.id!, firstStylesheet],
+      [nextStylesheet.id!, nextStylesheet],
+    ])
+    let idleCalls = 0
+    const environment = {
+      transformRequest: async (url: string) => modules.get(url)?.transformResult,
+      waitForRequestsIdle: async () => {
+        idleCalls += 1
+      },
+      moduleGraph: {
+        getModuleById: (id: string) => modules.get(id),
+        getModuleByUrl: async (url: string) => modules.get(url),
+      },
+    }
+    const server = {
+      config: { base: '/', root: '/project' },
+      environments: { client: environment },
+    } as unknown as ViteDevServer
+
+    const firstRequest = await runWithSsrViteAssetResolutionContext(async () => ({
+      application: await resolveApplicationStyleDependencies(
+        server,
+        'app',
+        entry.url
+      ),
+      rendered: await resolveRenderedStyleDependencies(server, 'app', [
+        rendered.id!,
+      ]),
+    }))
+
+    expect(firstRequest.application).toEqual([
+      { applicationId: 'app', href: firstStylesheet.url },
+    ])
+    expect(firstRequest.rendered).toEqual([
+      {
+        applicationId: 'app',
+        href: firstStylesheet.url,
+        rel: 'stylesheet',
+        temporary: true,
+      },
+    ])
+    expect(Object.fromEntries(reads)).toEqual({
+      [entry.url]: 1,
+      [rendered.url]: 1,
+      [firstStylesheet.url]: 1,
+    })
+
+    currentStylesheet = nextStylesheet
+    const nextRequest = await runWithSsrViteAssetResolutionContext(() =>
+      resolveApplicationStyleDependencies(server, 'app', entry.url)
+    )
+    expect(nextRequest).toEqual([
+      { applicationId: 'app', href: nextStylesheet.url },
+    ])
+    expect(reads.get(entry.url)).toBe(2)
+    expect(reads.get(rendered.url)).toBe(2)
+    expect(reads.get(nextStylesheet.url)).toBe(1)
+    expect(idleCalls).toBe(0)
   })
 })
