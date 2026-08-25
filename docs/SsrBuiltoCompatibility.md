@@ -13,11 +13,11 @@ The public entry is `src/site/main.ts` + `SiteApp.vue`, mounted from `site.html`
 The package API supports a later Builto migration without Builto-specific runtime branches:
 
 - `site.html` becomes a normal plugin-managed SSR template and the builder remains a SPA entry.
-- Host patterns support `*.localhost`, the production Builto base domain, and verified custom domains; `createExtension` can resolve slug/domain/publication data.
+- Host patterns support `*.localhost`, the production Builto base domain, and verified custom domains; `defineExtension` provides request-isolated integration state for slug/domain/publication data.
 - A catch-all Vue Router route can replace manual history state and provide identical server/browser route replay for home, dynamic pages, blogs/projects, and not-found paths.
 - Named/versioned Apollo caches support different public endpoints and publication versions. Request-scoped clients prevent domains/publications from sharing data.
 - Publication snapshots, draft preview, template registration, section loading, and contact operations remain Builto-owned application logic.
-- `resolveHead`/request context support Builto SEO, Open Graph, canonical origin, favicon, JSON-LD, website-not-found, page-not-found, unpublished, and noindex states.
+- `useSeo`/managed head contributions and request context support Builto SEO, Open Graph, canonical origin, favicon, JSON-LD, website-not-found, page-not-found, unpublished, and noindex states.
 - Draft preview may remain client-only by returning an application shell; no builder authentication cookie needs to enter public SSR.
 - Cache keys can be supplied externally using application + normalized hostname/resolved website + route + publication version + locale. The default package cache remains off.
 
@@ -26,7 +26,12 @@ The package API supports a later Builto migration without Builto-specific runtim
 - **Resolved.** `SiteApp.vue` no longer reads `window` at setup; it is a thin root over the shared runtime and derives location from the router/request context. Section data enters `WebsiteSectionDataState` through `ssrWatch` and the section loaders, never a discarded watcher.
 - **Resolved.** The public shell query is `cache-first`; hydration serves from the restored Apollo cache with no duplicate request (single restore path in `vue-apollo-client`).
 - **Resolved.** The public portfolio template registers an eager renderer, and `WebsiteRenderer` resolves it synchronously; the registry now rejects an SSR template that lacks a synchronous renderer.
-- **Resolved.** Router v5 compatibility is validated. `builto-webBuilder` runs on `vue-router` v5 and its route contract test passes against the package's `>=4 <6` peer range; `erp-app` and the package's own suite exercise v4. Route matching, memory/web history replay and `resolve()` behaviour are identical across both majors for the record shapes used here.
+- **Resolved for the supported package contract.** The generic migration uses
+  Vue Router 4.6, matching the package's `^4.6.0` peer dependency. Earlier
+  experiments with a later router major are not an advertised compatibility
+  guarantee; that major remains unverified until the full SSR build, route
+  replay, hydration, Vite integration, and packaged-consumer matrix is
+  exercised against it.
 - **Resolved.** Home, dynamic pages, blog/project listings and detail slugs, and unknown depths are real route records (`WebsitePublicRoutes.ts`), producing correct 200/404 status naturally. Draft and published data remain isolated; only verified published snapshots are anonymously cacheable.
 - **Resolved.** The builder entry uses a separate application id (`website-builder`) and auth boundary (`admin`); the public client (`website-public`) reads no token on the server. Only the request-scoped, allow-listed preview cookie is forwarded.
 
