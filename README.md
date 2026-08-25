@@ -37,6 +37,18 @@ Or:
 yarn add vue-ssr-lite vue-router
 ```
 
+# Supported Host Versions
+
+vue-ssr-lite is verified against the following host-owned runtime contract:
+
+- Node.js `>=22.12.0`
+- Vue `^3.5.0`
+- Vue Router `^4.6.0`
+- Vite `^7.0.0`
+
+Vue, Vue Router, and Vite are peer dependencies supplied by the consuming
+application. Newer major versions are outside the currently verified contract.
+
 # Minimal Setup
 
 ## 1. Add the Vite plugin
@@ -70,6 +82,8 @@ Replace manual `createApp().mount()` with `defineApplication()`:
 
 ```ts
 // src/main.ts
+import './style.css'
+
 import { defineApplication } from 'vue-ssr-lite'
 import App from './App.vue'
 import { routes } from './router/routes'
@@ -79,6 +93,11 @@ export default defineApplication({
 	routes,
 })
 ```
+
+Global CSS follows the normal Vite convention: import it from the application
+entry. vue-ssr-lite exposes entry-imported styles in the initial SSR document,
+then hands ownership to Vite during hydration so CSS HMR continues to work. Do
+not duplicate the import with a stylesheet link in `index.html`.
 
 ## 4. HTML Entry (`index.html`)
 
