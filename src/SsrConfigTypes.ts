@@ -110,6 +110,7 @@ export interface SsrConfigServerOptions {
   port?: number
   trustProxy?: boolean
   clientOutDir?: string
+  /** One deadline for the complete application request. Defaults to 15 seconds. */
   requestTimeoutMs?: number
   shutdownTimeoutMs?: number
   healthPath?: string
@@ -118,7 +119,7 @@ export interface SsrConfigServerOptions {
   resolutionDeadlineMs?: number
   diagnostics?: boolean
   logger?: SsrLogger
-  onMetrics?: (metrics: SsrRenderMetrics) => void
+  onMetrics?: (metrics: SsrRenderMetrics) => void | Promise<void>
   renderError?: (
     context: SsrErrorRenderContext
   ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
@@ -179,6 +180,13 @@ export type SsrConfigExport =
 export interface SsrDomainContext {
   /** Selected application id (the `applications` object key). */
   entry: string
+  /** Normalized request authority, including the active port when present. */
+  authority: string
+  /** Protocol resolved by the managed server (including trusted proxy policy). */
+  protocol: 'http' | 'https'
+  /** Active request port, or an empty string for the protocol default. */
+  port: string
+  /** Hostname-only value used for domain and host matching. */
   hostname: string
   /** Active environment apex for the selected application. */
   baseDomain: string
