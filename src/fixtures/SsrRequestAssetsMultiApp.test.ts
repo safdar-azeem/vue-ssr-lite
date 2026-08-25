@@ -10,6 +10,7 @@ import {
   createSsrManagedServer,
   type SsrManagedServer,
 } from '../server/SsrServerRuntime'
+import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 
 const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -76,7 +77,8 @@ describe('request-aware multi-application assets', () => {
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: () => devServer!.ssrLoadModule(SSR_RUNTIME_VIRTUAL_ID),
+      loadRuntime: () =>
+        importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
     })
     await managedServer.listen()
     const [website, admin] = await Promise.all([
@@ -118,7 +120,12 @@ describe('request-aware multi-application assets', () => {
     expect(adminJs).toBeTruthy()
 
     devServer = await createFixtureViteServer()
-    const runtime = await devServer.ssrLoadModule(SSR_RUNTIME_VIRTUAL_ID)
+    const runtime = await importSsrViteModule<{
+      default: () => Promise<{
+        server?: Record<string, unknown>
+        [key: string]: unknown
+      }>
+    }>(devServer, SSR_RUNTIME_VIRTUAL_ID)
     const loadedConfig = await runtime.default()
     managedServer = await createSsrManagedServer({
       production: true,
