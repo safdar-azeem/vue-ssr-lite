@@ -1,6 +1,6 @@
 {
   "name": "vue-ssr-lite",
-  "version": "0.2.18",
+  "version": "1.0.0",
   "description": "A Server-Side Rendering (SSR) runtime for Vue 3",
   "license": "MIT",
   "type": "module",
