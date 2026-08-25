@@ -1,11 +1,7 @@
 /** Server/configuration APIs. Implementation runtimes are intentionally private. */
 export { defineSsrConfig } from './SsrConfigRuntime'
 export { defineSitemap } from './server/SsrSitemapConfig'
-export type {
-  SitemapContext,
-  SitemapEntry,
-  SitemapProvider,
-} from './extensions/seo/sitemap'
+export type { SitemapContext, SitemapEntry, SitemapProvider } from './extensions/seo/sitemap'
 
 /** Advanced programmatic hosting and cache integrations. */
 export {
@@ -34,10 +30,7 @@ export {
 
 /** Universal advanced helpers are mirrored here for server-only modules. */
 export { createDomainUrl, useSsrDomain } from './SsrDomainRuntime'
-export type {
-  SsrCreateDomainUrlOptions,
-  SsrDomainApi,
-} from './SsrDomainRuntime'
+export type { SsrCreateDomainUrlOptions, SsrDomainApi } from './SsrDomainRuntime'
 export { useSsrRequestContext } from './SsrRequestContext'
 
 export type {
@@ -54,6 +47,7 @@ export type {
   SsrDomainParamDefinition,
   SsrDomainParamSource,
   SsrMultiApplicationConfig,
+  SsrPublicConfigFactory,
   SsrPublicConfigSource,
   SsrRenderMode,
   SsrSingleApplicationConfig,
@@ -67,6 +61,10 @@ export type {
   SsrHttpRequest,
   SsrHttpResponse,
   SsrLogger,
+  SsrPublicConfigDomain,
+  SsrPublicConfigHeaders,
+  SsrPublicConfigHeaderValue,
+  SsrPublicConfigRequest,
   SsrReadinessProbe,
   SsrRenderMetrics,
   SsrResponseCache,
