@@ -37,22 +37,6 @@ Or:
 yarn add vue-ssr-lite vue-router
 ```
 
-## Supported versions
-
-The pre-v1 line is supported with the following host-owned runtime/tooling:
-
-| Dependency | Supported range |
-| ---------- | --------------- |
-| Node.js    | `>=22.12.0`     |
-| Vue        | `^3.5.0`        |
-| Vue Router | `^4.6.0`        |
-| Vite       | `^7.0.0`        |
-
-Vue, Vue Router, and Vite are peer dependencies supplied by the application.
-Newer major versions are unverified and are not part of the supported contract.
-
----
-
 # Minimal Setup
 
 ## 1. Add the Vite plugin
