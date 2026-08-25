@@ -169,6 +169,13 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         resolve: {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
         },
+        optimizeDeps: {
+          // The generated client is virtual, so Vite's startup scanner cannot
+          // discover this framework-owned hydration dependency. Declare only
+          // that stable boundary up front to keep its optimizer restart out of
+          // the first HTML request without traversing consumer or lazy code.
+          include: ['vue-ssr-lite/client'],
+        },
         ssr: {
           // Keep the published runtime on its intentional Node package boundary.
           // Its Vue and Vue Router imports resolve through host-owned peers, so
