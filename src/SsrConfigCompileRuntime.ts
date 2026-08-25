@@ -39,7 +39,10 @@ import {
   validateSsrHostEntries,
 } from './server/SsrHostRuntime'
 import { prepareSsrHtmlTemplate } from './server/SsrHtmlRuntime'
-import { generateSsrDevelopmentStylesheetHandoff } from './SsrApplicationAssetRuntime'
+import {
+  generateSsrDevelopmentRenderedStylesheetHandoff,
+  generateSsrDevelopmentStylesheetHandoff,
+} from './SsrApplicationAssetRuntime'
 
 export { defineSsrConfig }
 
@@ -95,6 +98,8 @@ export interface SsrCompiledConfig {
   server: SsrResolvedServerOptions
   readiness?: SsrReadinessProbe[]
   development: boolean
+  /** Vite's resolved client `base`, carried by the generated SSR runtime. */
+  viteBase?: string
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
   sitemapProvider?: import('./extensions/seo/sitemap').SitemapProvider
 }
@@ -560,7 +565,8 @@ export const generateSsrRuntimeModule = (
   root: string,
   configPath: string | undefined,
   entries: SsrViteApplicationEntry[],
-  sitemapPath?: string
+  sitemapPath?: string,
+  viteBase = '/'
 ): string => {
   const importLines: string[] = configPath
     ? [`import __ssrUserConfig from ${JSON.stringify(absoluteImportPath(root, configPath))}`]
@@ -584,7 +590,8 @@ export const generateSsrRuntimeModule = (
           : `import ${alias} from ${JSON.stringify(definitionPath)}`
       )
       bindLines.push(
-        `  applications[${JSON.stringify(entry.id)}] = { ...applications[${JSON.stringify(entry.id)}], app: ${alias} }`
+        `  const { application: __ssrConfiguredApplication${index}, ...__ssrApplicationConfig${index} } = applications[${JSON.stringify(entry.id)}]`,
+        `  applications[${JSON.stringify(entry.id)}] = { ...__ssrApplicationConfig${index}, app: ${alias} }`
       )
     })
   return [
@@ -597,14 +604,15 @@ export const generateSsrRuntimeModule = (
     sitemapPath
       ? '  config.sitemap = __ssrSitemap?.default ?? __ssrSitemap'
       : '',
+    `  const viteBase = ${JSON.stringify(viteBase)}`,
     '  if (config?.applications) {',
     '    const applications = { ...config.applications }',
     ...bindLines,
-    '    return { ...config, applications }',
+    '    return { ...config, applications, __vueSsrLiteViteBase: viteBase }',
     '  }',
     firstSsrAlias
-      ? `  return { ...config, app: ${firstSsrAlias} }`
-      : '  return config',
+      ? `  const { application: __ssrConfiguredApplication, ...__ssrApplicationConfig } = config\n  return { ...__ssrApplicationConfig, app: ${firstSsrAlias}, __vueSsrLiteViteBase: viteBase }`
+      : '  return { ...config, __vueSsrLiteViteBase: viteBase }',
     '}',
     '',
     'export default resolveConfig',
@@ -627,6 +635,9 @@ export const generateSsrClientModule = (
     `import { ${mountFunction} } from 'vue-ssr-lite/client'`,
     ...(entry.kind === 'ssr'
       ? generateSsrDevelopmentStylesheetHandoff(entry.id)
+      : []),
+    ...(entry.kind === 'ssr'
+      ? generateSsrDevelopmentRenderedStylesheetHandoff(entry.id)
       : []),
     'const definition = typeof loadApplication === "function"',
     '  ? await loadApplication()',
@@ -764,7 +775,14 @@ export const compileSsrConfig = async (
     root: options.root,
     development,
   })
-  const loadedRecord = raw as SsrConfig & { sitemap?: unknown }
+  const loadedRecord = raw as SsrConfig & {
+    sitemap?: unknown
+    __vueSsrLiteViteBase?: unknown
+  }
+  const viteBase =
+    typeof loadedRecord.__vueSsrLiteViteBase === 'string'
+      ? loadedRecord.__vueSsrLiteViteBase
+      : undefined
   const sitemapPath = options.root
     ? await resolveSitemapConfigPath(options.root)
     : undefined
@@ -859,6 +877,7 @@ export const compileSsrConfig = async (
     applications,
     defaultApplicationId: config.defaultApplicationId,
     development,
+    viteBase,
     readiness: config.readiness,
     resolveSiteUrl,
     sitemapProvider,
