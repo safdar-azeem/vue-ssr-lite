@@ -79,7 +79,8 @@ const isSsrConfigFile = (filePath: string, configPath?: string): boolean => {
 
 export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let root = resolve(options.root || process.cwd())
-  let base = '/'
+  let resolvedBase = '/'
+  let configuredBuildBase: string | undefined
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
   let clientOutDir = DEFAULT_CLIENT_OUT_DIR
@@ -92,8 +93,10 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
 
   const stripViteBase = (id: string): string => {
     const cleanId = id.split(/[?#]/, 1)[0]
-    if (base === '/' || !base.startsWith('/')) return cleanId
-    const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base
+    if (resolvedBase === '/' || !resolvedBase.startsWith('/')) return cleanId
+    const normalizedBase = resolvedBase.endsWith('/')
+      ? resolvedBase.slice(0, -1)
+      : resolvedBase
     return cleanId === normalizedBase
       ? '/'
       : cleanId.startsWith(`${normalizedBase}/`)
@@ -148,6 +151,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     sharedDuringBuild: true,
     async config(userConfig, environment) {
       root = resolve(options.root || userConfig.root || process.cwd())
+      if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
       const resolved = await ensureEntries()
       const input = Object.fromEntries(
         resolved.applications.map((entry) => [
@@ -172,6 +176,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           ? undefined
           : {
               manifest: true,
+              ssrManifest: true,
               outDir: resolvedOutDir,
               rollupOptions: { input },
             },
@@ -179,7 +184,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     configResolved(config) {
       root = config.root
-      base = config.base
+      // Vite resolves full URL bases to their effective pathname for dev
+      // routing. Keep this distinct from the configured production build base.
+      resolvedBase = config.base
       resolveClientModule = config.createResolver()
     },
     configureServer(server) {
@@ -218,7 +225,8 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           root,
           absoluteConfig,
           resolved.applications,
-          await resolveSitemapConfigPath(root)
+          await resolveSitemapConfigPath(root),
+          configuredBuildBase ?? resolvedBase
         )
       }
       if (!id.startsWith(RESOLVED_CLIENT_PREFIX)) return
@@ -282,7 +290,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
                   clientUrl
                 ),
                 {
-                  base,
+                  base: resolvedBase,
                   htmlPath: context.path,
                 }
               )
