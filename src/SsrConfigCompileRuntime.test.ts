@@ -42,8 +42,16 @@ describe('defineSsrConfig application domains', () => {
   it('uses application keys as ids and requires routing for multiple apps', () => {
     const normalized = normalizeSsrConfig({
       applications: {
-        website: { app: './src/website/main.ts', host: 'example.com' },
-        store: { app: './src/store/main.ts', host: '*.shop.example.com' },
+        website: {
+          app: './src/website/main.ts',
+          template: './index.html',
+          host: 'example.com',
+        },
+        store: {
+          app: './src/store/main.ts',
+          template: './store.html',
+          host: '*.shop.example.com',
+        },
       },
     })
     expect(normalized.applications.website.id).toBe('website')
@@ -56,6 +64,50 @@ describe('defineSsrConfig application domains', () => {
         },
       })
     ).toThrow(/needs host routing/)
+  })
+
+  it('rejects canonical template collisions while allowing distinct templates', () => {
+    expect(() =>
+      normalizeSsrConfig(
+        {
+          applications: {
+            website: {
+              app: './src/website/main.ts',
+              template: './index.html',
+              host: 'example.com',
+            },
+            admin: {
+              app: './src/admin/main.ts',
+              template: 'index.html',
+              host: 'admin.example.com',
+            },
+          },
+        },
+        { root: '/workspace/project' }
+      )
+    ).toThrow(
+      'Applications "website" and "admin" resolve to the same HTML template: /workspace/project/index.html'
+    )
+
+    expect(() =>
+      normalizeSsrConfig(
+        {
+          applications: {
+            website: {
+              app: './src/website/main.ts',
+              template: './index.html',
+              host: 'example.com',
+            },
+            admin: {
+              app: './src/admin/main.ts',
+              template: './admin.html',
+              host: 'admin.example.com',
+            },
+          },
+        },
+        { root: '/workspace/project' }
+      )
+    ).not.toThrow()
   })
 
   it('rejects ambiguous single and multi-app declarations', () => {
