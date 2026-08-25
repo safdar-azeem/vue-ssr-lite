@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { Plugin, ViteDevServer } from 'vite'
+import type { Plugin, ResolveFn, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
 import {
   extractSsrViteEntries,
@@ -14,6 +14,10 @@ import {
 } from '../SsrConfigCompileRuntime'
 import { resolveSitemapConfigPath } from '../server/SsrSitemapConfig'
 import { prepareSsrHtmlTemplate } from '../server/SsrHtmlRuntime'
+import {
+  createSsrStylesheetLinkTags,
+  resolveApplicationStyleDependencies,
+} from './SsrViteAssetRuntime'
 
 export type { SsrViteApplicationEntry }
 
@@ -79,6 +83,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
   let clientOutDir = DEFAULT_CLIENT_OUT_DIR
+  let resolveClientModule: ResolveFn | undefined
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
   const publicClients = new Map<string, SsrViteApplicationEntry>()
 
@@ -175,6 +180,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     configResolved(config) {
       root = config.root
       base = config.base
+      resolveClientModule = config.createResolver()
     },
     configureServer(server) {
       void ensureEntries().then(() => {
@@ -225,7 +231,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     transformIndexHtml: {
       order: 'pre',
-      handler(html, context) {
+      async handler(html, context) {
         const filename = normalizePath(context.filename)
         const entry = entries?.applications.find(
           (candidate) =>
@@ -239,23 +245,57 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         )
         // Replace only the application's normal Vite bootstrap. Other module
         // scripts (analytics, verification, widgets, etc.) remain consumer-owned.
-        const definitionPath = normalizePath(resolve(root, entry.definition))
+        const definitionPath = normalizePath(
+          (await resolveClientModule?.(
+            entry.definition,
+            resolve(root, 'index.html')
+          )) ?? resolve(root, entry.definition)
+        ).split(/[?#]/, 1)[0]
+        const applicationSources = new Set<string>()
+        const scripts = [...prepared.matchAll(MODULE_SRC_SCRIPT_RE)]
+        await Promise.all(
+          scripts.map(async (script) => {
+            const source = script[1]
+            const cleanSource = source.split(/[?#]/, 1)[0]
+            const sourcePath = normalizePath(
+              (await resolveClientModule?.(source, context.filename)) ??
+                (cleanSource.startsWith('/')
+                  ? resolve(root, `.${cleanSource}`)
+                  : resolve(root, cleanSource))
+            ).split(/[?#]/, 1)[0]
+            if (sourcePath === definitionPath) applicationSources.add(source)
+          })
+        )
         const withoutManualEntry = prepared.replace(
           MODULE_SRC_SCRIPT_RE,
           (script, source: string) => {
-            const cleanSource = source.split(/[?#]/, 1)[0]
-            const sourcePath = cleanSource.startsWith('/')
-              ? resolve(root, `.${cleanSource}`)
-              : resolve(root, cleanSource)
-            return normalizePath(sourcePath) === definitionPath ? '' : script
+            return applicationSources.has(source) ? '' : script
           }
         )
+        const stylesheetTags =
+          entry.kind === 'ssr' && context.server
+            ? createSsrStylesheetLinkTags(
+                withoutManualEntry,
+                await resolveApplicationStyleDependencies(
+                  context.server,
+                  entry.id,
+                  clientUrl
+                ),
+                {
+                  base,
+                  htmlPath: context.path,
+                }
+              )
+            : []
         if (withoutManualEntry.includes(clientUrl)) {
-          return withoutManualEntry
+          return stylesheetTags.length
+            ? { html: withoutManualEntry, tags: stylesheetTags }
+            : withoutManualEntry
         }
         return {
           html: withoutManualEntry,
           tags: [
+            ...stylesheetTags,
             {
               tag: 'script',
               attrs: { type: 'module', src: clientUrl },
