@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { defineSsrConfig } from '../SsrConfigRuntime'
 import { useSsrRequestContext } from '../SsrRequestContext'
+import { createSsrMemoryResponseCache } from './SsrResponseCacheRuntime'
 import { createSsrManagedServer, type SsrManagedServer } from './SsrServerRuntime'
 
 let managed: SsrManagedServer | undefined
@@ -284,12 +285,86 @@ describe('managed SSR server lifecycle', () => {
       const response = await fetch(`http://127.0.0.1:${port}/`, {
         headers: { accept: 'text/html' },
       })
+      const explicitTemplate = await fetch(
+        `http://127.0.0.1:${port}/index.html`,
+        { headers: { accept: 'text/html' } }
+      )
       expect(response.status).toBe(200)
       expect(await response.text()).toContain('vue-ssr-lite-domain')
+      expect(explicitTemplate.status).toBe(200)
+      expect(await explicitTemplate.text()).toContain('vue-ssr-lite-domain')
     } finally {
       if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
       else process.env.PUBLIC_URL = previousPublicUrl
     }
+  })
+
+  it('never reads or writes the shared response cache for raw credential headers', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    let renders = 0
+    const Root = defineComponent({
+      setup() {
+        const request = useSsrRequestContext().request
+        renders += 1
+        return () =>
+          h(
+            'main',
+            `render:${renders};forwarded-cookie:${request.cookie || 'none'}`
+          )
+      },
+    })
+    const responseStore = createSsrMemoryResponseCache()
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          applications: {
+            cached: {
+              application: { id: 'cached', root: Root },
+              template: 'site.html',
+              cacheControl: 'public, max-age=60',
+              responseCache: {
+                store: responseStore,
+                ttlMs: 60_000,
+              },
+              domain: { development: 'localhost', customDomains: true },
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const { port } = managed.address()
+    const url = `http://127.0.0.1:${port}/`
+    const navigate = (headers: Record<string, string> = {}) =>
+      fetch(url, { headers: { accept: 'text/html', ...headers } })
+
+    const first = await navigate()
+    expect(await first.text()).toContain('render:1')
+    const cached = await navigate()
+    expect(await cached.text()).toContain('render:1')
+    expect(cached.headers.get('server-timing')).toBe('cache;desc="hit"')
+
+    const cookie = await navigate({ cookie: 'session=private' })
+    expect(await cookie.text()).toContain(
+      'render:2;forwarded-cookie:none'
+    )
+    const authorization = await navigate({ authorization: 'Bearer private' })
+    expect(await authorization.text()).toContain('render:3')
+    const proxyAuthorization = await navigate({
+      'proxy-authorization': 'Basic private',
+    })
+    expect(await proxyAuthorization.text()).toContain('render:4')
+
+    const stillPublic = await navigate()
+    expect(await stillPublic.text()).toContain('render:1')
+    expect(renders).toBe(4)
   })
 
   it('selects applications by host specificity and enforces runtime roles with 421', async () => {
