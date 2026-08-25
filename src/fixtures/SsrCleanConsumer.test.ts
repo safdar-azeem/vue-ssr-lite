@@ -28,6 +28,7 @@ import {
   resolveSsrConfigPath,
 } from '../SsrConfigCompileRuntime'
 import { vueSsrLite } from '../vite/SsrVitePlugin'
+import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { defineSsrConfig } from '../SsrConfigRuntime'
 import {
   createSsrManagedServer,
@@ -232,7 +233,7 @@ describe('zero-config clean consumer fixture', () => {
     expect(browserEntry?.code).toContain('hydrateSsrApplication')
     expect(browserEntry?.code).toContain('/src/main.ts')
 
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
@@ -286,7 +287,7 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
@@ -369,7 +370,7 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     const clientGraph = devServer.environments.client.moduleGraph
     const hasGeneratedClientEntry = () =>
       [...clientGraph.urlToModuleMap.values()].some((module) =>
@@ -446,7 +447,7 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
@@ -605,7 +606,7 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: true,
       root: fixtureRoot,
@@ -841,7 +842,7 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await devServer.ssrLoadModule('/src/main.ts')
+    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: true,
       root: fixtureRoot,
