@@ -89,7 +89,7 @@ export interface SsrResolutionController extends SsrRequestResolution {
    * `signal`. Returns `true` when everything settled within the deadline.
    */
   drain(deadlineMs: number, signal?: AbortSignal): Promise<boolean>
-  /** Clear all state. Called once per request after the final pass. */
+  /** Clear all state and stop accepting work. Called after the final pass. */
   dispose(): void
 }
 
@@ -114,6 +114,7 @@ export const createSsrResolutionController = (
   const tracked = new Set<TrackedWork>()
   let pass = 0
   let passRequested = false
+  let disposed = false
 
   const controller: SsrResolutionController = {
     server,
@@ -121,7 +122,7 @@ export const createSsrResolutionController = (
       return pass
     },
     track: <T>(work: Promise<T>): Promise<T> => {
-      if (!server || !isThenable(work)) return work
+      if (!server || disposed || !isThenable(work)) return work
       const entry: TrackedWork = { promise: work, settled: false }
       tracked.add(entry)
       // Mark settled without swallowing the original rejection for callers that
@@ -137,15 +138,20 @@ export const createSsrResolutionController = (
       return work
     },
     requestAdditionalPass: () => {
-      if (server) passRequested = true
+      if (server && !disposed) passRequested = true
     },
     beginPass: (nextPass: number) => {
+      if (disposed) return
       pass = nextPass
       passRequested = false
     },
     pendingWork: () =>
-      [...tracked].filter((entry) => !entry.settled).map((entry) => entry.promise),
-    additionalPassRequested: () => passRequested,
+      disposed
+        ? []
+        : [...tracked]
+            .filter((entry) => !entry.settled)
+            .map((entry) => entry.promise),
+    additionalPassRequested: () => !disposed && passRequested,
     drain: async (deadlineMs: number, signal?: AbortSignal): Promise<boolean> => {
       const settleAll = async (): Promise<boolean> => {
         // Work tracked while awaiting (a resolving promise starting the next
@@ -180,6 +186,7 @@ export const createSsrResolutionController = (
       }
     },
     dispose: () => {
+      disposed = true
       tracked.clear()
       passRequested = false
       pass = 0
