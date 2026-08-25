@@ -8,6 +8,40 @@ import type { SsrRequestResolution, SsrResolutionController } from './SsrRequest
 export type SsrHeaderValue = string | string[] | undefined
 export type SsrHeaders = Record<string, SsrHeaderValue>
 
+export type SsrPublicConfigHeaderValue =
+  | string
+  | readonly string[]
+  | undefined
+export type SsrPublicConfigHeaders = Readonly<
+  Record<string, SsrPublicConfigHeaderValue>
+>
+export type SsrPublicConfigDomain = Readonly<
+  Omit<import('./SsrConfigTypes').SsrDomainContext, 'params'> & {
+    params: Readonly<Record<string, string>>
+  }
+>
+
+/**
+ * Server-only request facts available while resolving browser-visible public
+ * configuration. Routing, proxy trust, application selection, and domain
+ * resolution have already completed. `publicConfig` is intentionally absent.
+ */
+export interface SsrPublicConfigRequest {
+  readonly requestId: string
+  readonly url: string
+  readonly host: string
+  readonly protocol: 'http' | 'https'
+  readonly method: string
+  readonly headers: SsrPublicConfigHeaders
+  /** Cookie header after the selected application's allow/deny filtering. */
+  readonly cookie?: string
+  readonly signal: AbortSignal
+  readonly domain: SsrPublicConfigDomain
+  readonly pathname: string
+  readonly search: string
+  readonly entryId: string
+}
+
 export interface SsrResponseState {
   statusCode: number
   headers: Record<string, string>
