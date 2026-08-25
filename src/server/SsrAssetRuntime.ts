@@ -29,9 +29,16 @@ export const resolveSsrProductionAsset = async (
 ): Promise<SsrHttpResponse | null> => {
   try {
     const relativePath = decodeURIComponent(pathname).replace(/^\/+/, '')
-    if (!relativePath || protectedTemplates.includes(relativePath)) return null
-    const filePath = resolve(clientRoot, relativePath)
-    const rootPrefix = clientRoot.endsWith(sep) ? clientRoot : `${clientRoot}${sep}`
+    if (!relativePath) return null
+    const canonicalRoot = resolve(clientRoot)
+    const filePath = resolve(canonicalRoot, relativePath)
+    const protectedPaths = new Set(
+      protectedTemplates.map((template) => resolve(canonicalRoot, template))
+    )
+    if (protectedPaths.has(filePath)) return null
+    const rootPrefix = canonicalRoot.endsWith(sep)
+      ? canonicalRoot
+      : `${canonicalRoot}${sep}`
     if (!filePath.startsWith(rootPrefix)) return null
     const information = await stat(filePath)
     if (!information.isFile()) return null
