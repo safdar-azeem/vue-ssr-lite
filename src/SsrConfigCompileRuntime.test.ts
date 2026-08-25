@@ -426,6 +426,8 @@ describe('defineSsrConfig application domains', () => {
       'import { shopSsrApplication as __ssrApp0 } from "/app/src/ShopSsrApplication.ts"'
     )
     expect(runtime).toContain('app: __ssrApp0')
+    expect(runtime).toContain('const viteBase = "/"')
+    expect(runtime).toContain('__vueSsrLiteViteBase: viteBase')
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
 
     const spaClient = generateSsrClientModule('/app', entries.applications[0])
