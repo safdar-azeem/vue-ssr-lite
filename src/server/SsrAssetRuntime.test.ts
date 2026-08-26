@@ -21,6 +21,37 @@ afterEach(async () => {
 })
 
 describe('production SSR asset routing', () => {
+  it('rejects the complete private .vite namespace before filesystem access', async () => {
+    const fileSystem = {
+      realpath: vi.fn(),
+      stat: vi.fn(),
+    }
+    const privatePaths = [
+      { pathname: '/.vite/manifest.json' },
+      { pathname: '/.vite/ssr-manifest.json' },
+      { pathname: '/.vite/other-private-file.json' },
+      { pathname: '/%2evite/manifest.json' },
+      { pathname: '/.%76ite/ssr-manifest.json' },
+      { pathname: '/.VITE/case-insensitive-alias.json' },
+      { pathname: '/app/.vite/manifest.json', viteBase: '/app/' },
+      { pathname: '/app/%2e%76ite%2fssr-manifest.json', viteBase: '/app/' },
+    ]
+
+    for (const probe of privatePaths) {
+      await expect(
+        resolveSsrProductionAsset({
+          clientRoot: '/client',
+          protectedTemplates: [],
+          fileSystem: fileSystem as any,
+          ...probe,
+        }),
+        probe.pathname
+      ).resolves.toBeNull()
+    }
+    expect(fileSystem.realpath).not.toHaveBeenCalled()
+    expect(fileSystem.stat).not.toHaveBeenCalled()
+  })
+
   it('protects canonical template paths while serving genuine static files', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-assets-'))
     await mkdir(join(root, 'shells'), { recursive: true })
