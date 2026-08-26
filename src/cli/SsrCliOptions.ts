@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises'
+import { access, realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { resolveSsrConfigPath } from '../SsrConfigCompileRuntime'
 
@@ -52,7 +52,10 @@ export const parseSsrCliArguments = async (
       'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--hmr-port 31001]'
     )
   }
-  const root = resolve(readFlag(args, '--root') || process.cwd())
+  // Vite's watcher and custom-base module URLs resolve filesystem paths to
+  // their canonical form. Use that same root throughout the CLI so a symlink
+  // such as macOS's /tmp -> /private/tmp cannot split lifecycle ownership.
+  const root = await realpath(resolve(readFlag(args, '--root') || process.cwd()))
   const serverOutput = resolve(
     root,
     readFlag(args, '--server-output') || DEFAULT_SERVER_OUTPUT
