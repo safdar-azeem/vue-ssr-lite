@@ -5,7 +5,11 @@ import { RouterView, type Router } from 'vue-router'
 import { defineApplication } from './index'
 import { useSeo } from './extensions/seo/useSeo'
 import { createSsrApplication } from './SsrApplicationRuntime'
-import { resolveResponseStatusForRoute, setResponseStatus } from './SsrResponseStatus'
+import {
+  resolveResponseStatusForRoute,
+  setResponseRedirect,
+  setResponseStatus,
+} from './SsrResponseStatus'
 import { createTestRenderRequest } from './SsrTestFixtures'
 
 const flushHead = async () => {
@@ -216,6 +220,205 @@ describe('reactive useSeo() in the browser', () => {
     expect(document.title).toBe('Stale home')
     created.hydration.dispose()
     created.app.unmount()
+  })
+})
+
+describe('scoped whole-object useSeo status', () => {
+  it('reacts, outranks route status, and resets after navigation/unmount', async () => {
+    const status = ref(404)
+    const created = await mountClient(
+      {
+        id: 'scoped-status',
+        root: defineComponent({ setup: () => () => h(RouterView) }),
+        routes: [
+          {
+            path: '/article',
+            meta: { seo: { status: 410 } },
+            component: defineComponent({
+              setup() {
+                useSeo(computed(() => ({ title: `Status ${status.value}`, status: status.value })))
+                return () => h('main', 'article')
+              },
+            }),
+          },
+          {
+            path: '/',
+            component: defineComponent({
+              setup() {
+                useSeo({ title: 'Home' })
+                return () => h('main', 'home')
+              },
+            }),
+          },
+        ],
+        seo: { siteUrl: 'https://ex.test' },
+      },
+      '/article'
+    )
+    expect(created.context.response.statusCode).toBe(404)
+    expect(document.title).toBe('Status 404')
+    status.value = 200
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+    expect(document.title).toBe('Status 200')
+    await created.router!.push('/')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+    expect(document.title).toBe('Home')
+    created.hydration.dispose()
+    created.app.unmount()
+  })
+
+  it('replays a persistent layout status across child navigation and history', async () => {
+    const status = ref(404)
+    const Layout = defineComponent({
+      setup() {
+        useSeo(computed(() => ({ title: 'Persistent shell', status: status.value })))
+        return () => h(RouterView)
+      },
+    })
+    const Page = (label: string) => defineComponent(() => () => h('main', label))
+    const Imperative = defineComponent({
+      setup() {
+        setResponseStatus(418)
+        return () => h('main', 'override')
+      },
+    })
+    const created = await mountClient(
+      {
+        id: 'persistent-status',
+        root: defineComponent({ setup: () => () => h(RouterView) }),
+        routes: [
+          {
+            path: '/shell',
+            component: Layout,
+            children: [
+              { path: 'one', component: Page('one') },
+              {
+                path: 'two',
+                component: Page('two'),
+                meta: { seo: { status: 410 } },
+              },
+              { path: 'override', component: Imperative },
+            ],
+          },
+          { path: '/outside', component: Page('outside') },
+        ],
+        seo: { siteUrl: 'https://ex.test' },
+      },
+      '/shell/one'
+    )
+
+    expect(created.context.response.statusCode).toBe(404)
+    await created.router!.push('/shell/two')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(404)
+
+    status.value = 200
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+
+    created.router!.back()
+    await waitForPath(created.router!, '/shell/one')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+    created.router!.forward()
+    await waitForPath(created.router!, '/shell/two')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+
+    await created.router!.push('/shell/override')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(418)
+    status.value = 404
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(418)
+
+    await created.router!.push('/outside')
+    await flushHead()
+    expect(created.context.response.statusCode).toBe(200)
+    created.hydration.dispose()
+    created.app.unmount()
+  })
+
+  it('keeps setResponseRedirect as a non-throwing browser no-op', async () => {
+    const created = await mountClient({
+      id: 'browser-redirect-noop',
+      root: defineComponent({
+        setup() {
+          setResponseRedirect('javascript:alert(1)')
+          return () => h('main', 'still here')
+        },
+      }),
+      seo: { siteUrl: 'https://ex.test' },
+    })
+    expect(created.context.response.redirect).toBeNull()
+    expect(document.body.textContent).toContain('still here')
+    created.hydration.dispose()
+    created.app.unmount()
+  })
+})
+
+describe('browser HTML attribute reconciliation', () => {
+  it('updates and clears owned attributes without touching template attributes', async () => {
+    document.documentElement.removeAttribute('lang')
+    document.documentElement.removeAttribute('dir')
+    document.documentElement.setAttribute('data-theme', 'dark')
+    const language = ref<string | null>('ar')
+    const direction = ref<string | null>('rtl')
+    const created = await mountClient({
+      id: 'html-attributes',
+      root: defineComponent({ setup: () => () => h(RouterView) }),
+      routes: [
+        {
+          path: '/',
+          component: defineComponent({
+            setup() {
+              useSeo({ htmlAttributes: { lang: 'en', dir: 'ltr' } })
+              return () => h('main', 'English')
+            },
+          }),
+        },
+        {
+          path: '/arabic',
+          component: defineComponent({
+            setup() {
+              useSeo(computed(() => ({
+                htmlAttributes: { lang: language.value, dir: direction.value },
+              })))
+              return () => h('main', 'Arabic')
+            },
+          }),
+        },
+      ],
+      seo: { siteUrl: 'https://ex.test' },
+    })
+
+    expect(document.documentElement.getAttribute('lang')).toBe('en')
+    expect(document.documentElement.getAttribute('dir')).toBe('ltr')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+
+    await created.router!.push('/arabic')
+    await flushHead()
+    expect(document.documentElement.getAttribute('lang')).toBe('ar')
+    expect(document.documentElement.getAttribute('dir')).toBe('rtl')
+
+    language.value = 'fa'
+    direction.value = 'ltr'
+    await flushHead()
+    expect(document.documentElement.getAttribute('lang')).toBe('fa')
+    expect(document.documentElement.getAttribute('dir')).toBe('ltr')
+
+    language.value = null
+    direction.value = null
+    await flushHead()
+    expect(document.documentElement.hasAttribute('lang')).toBe(false)
+    expect(document.documentElement.hasAttribute('dir')).toBe(false)
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+
+    created.hydration.dispose()
+    created.app.unmount()
+    document.documentElement.removeAttribute('data-theme')
   })
 })
 
