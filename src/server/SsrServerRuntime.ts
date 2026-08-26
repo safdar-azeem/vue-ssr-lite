@@ -14,6 +14,8 @@ import {
   requiresProductionSeoOrigin,
   resolveServerSiteOrigin,
 } from './SsrSiteOriginRuntime'
+import { resolveSiteSeoForRequest, SeoProviderFailure } from '../extensions/seo/SeoEndpoints'
+import { isPrivateSeoMode } from '../extensions/seo/types'
 import type {
   SsrHeaders,
   SsrEndpointTools,
@@ -283,7 +285,16 @@ const sendResponse = (
   response: ServerResponse,
   result: SsrHttpResponse
 ) => {
-  response.writeHead(result.statusCode, result.headers ?? {})
+  const headers = result.headers ?? {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) {
+      throw new Error(`[vue-ssr-lite] Invalid response header name "${name}".`)
+    }
+    if (/[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error(`[vue-ssr-lite] Response header "${name}" contains control characters.`)
+    }
+  }
+  response.writeHead(result.statusCode, headers)
   endResponse(request, response, result.body ?? '')
 }
 
@@ -893,6 +904,27 @@ export const createSsrManagedServer = async (
           allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
         })
       )
+      const needsSiteSeo =
+        isHtmlNavigation(request, pathname) ||
+        pathname === '/robots.txt' ||
+        pathname === '/sitemap.xml' ||
+        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
+      if (needsSiteSeo) {
+        const siteSeoResolution = await scope.run(() =>
+          resolveSiteSeoForRequest(
+            renderRequest,
+            entry.id,
+            renderRequest.siteOrigin!,
+            entry.siteSeo
+          )
+        )
+        if (siteSeoResolution?.status === 'not-found') {
+          return sendResponse(request, response, {
+            statusCode: siteSeoResolution.responseStatus ?? 404,
+            headers: { 'cache-control': 'private, no-store' },
+          })
+        }
+      }
       const endpointTools: SsrEndpointTools = {
         signal: scope.signal,
         logger: createSafeSsrLogger(serverOptions.logger),
@@ -940,7 +972,10 @@ export const createSsrManagedServer = async (
         })
       }
 
-      const responseCache = entry.kind === 'ssr' ? entry.responseCache : undefined
+      const privateSeoHtml =
+        entry.kind === 'ssr' && isPrivateSeoMode(entry.application?.seo)
+      const responseCache =
+        entry.kind === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
       let responseCacheKey: string | null = null
       try {
         responseCacheKey = await scope.run(() =>
@@ -1026,6 +1061,9 @@ export const createSsrManagedServer = async (
         if (target.protocol !== 'http:' && target.protocol !== 'https:') {
           throw new Error('SSR redirects must use HTTP or HTTPS.')
         }
+        if (target.username || target.password || /[\u0000-\u001f\u007f]/.test(redirect.location)) {
+          throw new Error('SSR redirects must not contain credentials or control characters.')
+        }
         if (!redirect.allowExternal && target.origin !== new URL(renderRequest.url).origin) {
           throw new Error('Cross-origin redirect requires allowExternal: true.')
         }
@@ -1063,21 +1101,28 @@ export const createSsrManagedServer = async (
       })
       safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
       safeSsrLog(serverOptions.logger, 'info', 'ssr.render.complete', rendered.metrics as any)
+      const responseHeaders: Record<string, string> = {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': entry.cacheControl || 'private, no-store',
+        vary: 'Host, X-Forwarded-Host',
+        'server-timing': [
+          `context;dur=${rendered.metrics.contextDurationMs.toFixed(1)}`,
+          `route;dur=${rendered.metrics.routeDurationMs.toFixed(1)}`,
+          `render;dur=${rendered.metrics.renderDurationMs.toFixed(1)}`,
+        ].join(', '),
+        ...rendered.response.headers,
+        ...htmlSecurityHeaders,
+      }
+      if (privateSeoHtml) {
+        for (const name of Object.keys(responseHeaders)) {
+          if (name.toLowerCase() === 'cache-control') delete responseHeaders[name]
+        }
+        responseHeaders['cache-control'] = 'private, no-store'
+      }
       const result: SsrHttpResponse = {
         statusCode: rendered.response.statusCode,
         body: document,
-        headers: {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': entry.cacheControl || 'private, no-store',
-          vary: 'Host, X-Forwarded-Host',
-          'server-timing': [
-            `context;dur=${rendered.metrics.contextDurationMs.toFixed(1)}`,
-            `route;dur=${rendered.metrics.routeDurationMs.toFixed(1)}`,
-            `render;dur=${rendered.metrics.renderDurationMs.toFixed(1)}`,
-          ].join(', '),
-          ...rendered.response.headers,
-          ...htmlSecurityHeaders,
-        },
+        headers: responseHeaders,
       }
       if (
         responseCache &&
@@ -1085,7 +1130,11 @@ export const createSsrManagedServer = async (
         isSsrResponseCacheable(result, renderRequest, responseCache)
       ) {
         try {
-          const tags = await scope.run(() => responseCache.tags?.(renderRequest) ?? [])
+          const consumerTags = await scope.run(() => responseCache.tags?.(renderRequest) ?? [])
+          const tags = [
+            ...consumerTags,
+            ...(renderRequest.siteSeoMeta?.cacheTags ?? []),
+          ]
           await scope.run(() =>
             responseCache.store.set(responseCacheKey!, result, {
               ttlMs: responseCache.ttlMs,
@@ -1121,7 +1170,12 @@ export const createSsrManagedServer = async (
       let timeout =
         error instanceof SsrRequestTimeoutError ||
         scope.signal.reason instanceof SsrRequestTimeoutError
-      let statusCode = timeout ? 504 : 500
+      const seoProviderFailure =
+        error instanceof SeoProviderFailure ||
+        pathname === '/robots.txt' ||
+        pathname === '/sitemap.xml' ||
+        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
+      let statusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
       if (definition.server.renderError) {
         try {
           const renderedError = await runBoundedErrorRenderer(
