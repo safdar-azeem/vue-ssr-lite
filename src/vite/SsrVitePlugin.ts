@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { Plugin, ResolveFn, ViteDevServer } from 'vite'
+import type { Plugin, ResolveFn, Rollup, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
 import {
   extractSsrViteEntries,
@@ -63,6 +64,39 @@ const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
 
 /**
+ * Rollup resolves `[hash]` (including a length-qualified `[hash:8]`) from an
+ * asset's content when it applies an `assetFileNames` string template. The
+ * final filename is intentionally not inspected: a literal hash-looking name
+ * does not establish that Rollup derived the URL from the asset content.
+ *
+ * A callback has no public post-render provenance describing which template it
+ * selected for an individual asset. Re-running a consumer callback here could
+ * yield a different result or introduce side effects, so callback-based asset
+ * names stay conservative.
+ */
+const hasContentHashedAssetFileNames = (
+  assetFileNames: unknown
+): assetFileNames is string =>
+  typeof assetFileNames === 'string' &&
+  (assetFileNames.includes('[hash]') || assetFileNames.includes('[hash:'))
+
+const createAssetRevisionIdentity = (
+  asset: Pick<
+    Rollup.PreRenderedAsset,
+    'names' | 'originalFileNames' | 'source'
+  >
+): string => {
+  const digest = createHash('sha256')
+  digest.update(typeof asset.source === 'string' ? 'string\0' : 'bytes\0')
+  digest.update(asset.source)
+  digest.update('\0names\0')
+  digest.update(JSON.stringify(asset.names))
+  digest.update('\0originals\0')
+  digest.update(JSON.stringify(asset.originalFileNames))
+  return digest.digest('hex')
+}
+
+/**
  * Vite path-resolves string `build.ssr` entries. Accept both the bare virtual id
  * and a root-prefixed filesystem form of the same id.
  */
@@ -91,6 +125,10 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let resolveClientModule: ResolveFn | undefined
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
   const publicClients = new Map<string, SsrViteApplicationEntry>()
+  const revisionedAssetIdentitiesByNamingCallback = new WeakMap<
+    (asset: Rollup.PreRenderedAsset) => string,
+    Set<string>
+  >()
 
   const clientPublicUrl = (applicationId: string): string =>
     `${SSR_CLIENT_PUBLIC_PREFIX}${applicationId}`
@@ -153,6 +191,20 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     // Keep one plugin instance across client/SSR environment config clones so
     // virtual-module state stays consistent during production builds.
     sharedDuringBuild: true,
+    outputOptions(outputOptions) {
+      const assetFileNames = outputOptions.assetFileNames
+      if (!hasContentHashedAssetFileNames(assetFileNames)) return null
+      const revisionedAssetIdentities = new Set<string>()
+      const trackedAssetFileNames = (asset: Rollup.PreRenderedAsset): string => {
+        revisionedAssetIdentities.add(createAssetRevisionIdentity(asset))
+        return assetFileNames
+      }
+      revisionedAssetIdentitiesByNamingCallback.set(
+        trackedAssetFileNames,
+        revisionedAssetIdentities
+      )
+      return { ...outputOptions, assetFileNames: trackedAssetFileNames }
+    },
     async config(userConfig, environment) {
       root = resolve(options.root || userConfig.root || process.cwd())
       if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
@@ -248,9 +300,24 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (!entry) return
       return generateSsrClientModule(root, entry)
     },
-    generateBundle(_outputOptions, bundle) {
+    generateBundle(outputOptions, bundle) {
       if (this.environment.config.consumer !== 'client') return
       const immutable: string[] = []
+      const revisionedAssetIdentities =
+        typeof outputOptions.assetFileNames === 'function'
+          ? revisionedAssetIdentitiesByNamingCallback.get(
+              outputOptions.assetFileNames
+            )
+          : undefined
+      const outputAssetIdentityCounts = new Map<string, number>()
+      for (const output of Object.values(bundle)) {
+        if (output.type !== 'asset') continue
+        const identity = createAssetRevisionIdentity(output)
+        outputAssetIdentityCounts.set(
+          identity,
+          (outputAssetIdentityCounts.get(identity) ?? 0) + 1
+        )
+      }
       for (const output of Object.values(bundle)) {
         // Rollup exposes the pre-substitution placeholder filename for chunks.
         // It differs from the final filename only when Rollup actually replaced
@@ -261,6 +328,25 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         if (
           output.type === 'chunk' &&
           output.preliminaryFileName !== output.fileName
+        ) {
+          immutable.push(output.fileName)
+        }
+        // Rollup invokes the tracked naming callback only for assets whose
+        // individual filename is derived through the hashed assetFileNames
+        // template. Explicit fileName assets bypass it. Require a unique
+        // identity match as well, so an ambiguous same-source output stays
+        // conservatively cached. Manifest intersection during serving remains
+        // the final guard against public-directory copies.
+        const assetIdentity =
+          output.type === 'asset'
+            ? createAssetRevisionIdentity(output)
+            : undefined
+        if (
+          output.type === 'asset' &&
+          output.originalFileNames.length &&
+          assetIdentity &&
+          revisionedAssetIdentities?.has(assetIdentity) &&
+          outputAssetIdentityCounts.get(assetIdentity) === 1
         ) {
           immutable.push(output.fileName)
         }
