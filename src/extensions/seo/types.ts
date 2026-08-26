@@ -1,101 +1,218 @@
 import type { ComputedRef, Ref } from 'vue'
-import type {
-  ManagedHeadLinkEntry,
-  ManagedHeadMetaEntry,
-} from '../../SsrManagedHead'
+import type { SsrDomainContext } from '../../SsrConfigTypes'
+import type { ManagedHeadLinkEntry, ManagedHeadMetaEntry } from '../../SsrManagedHead'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 export type JsonObject = { [key: string]: JsonValue }
-
 export type SeoResolvable<T> = T | Ref<T> | ComputedRef<T> | (() => T)
-
 export type SeoMetaEntry = ManagedHeadMetaEntry
 export type SeoLinkEntry = ManagedHeadLinkEntry
 
-/** Core plain serializable SEO data contract. */
-export interface SeoInput {
+export interface SeoImageInput {
+  key?: string
+  url: string
+  secureUrl?: string
+  type?: string
+  width?: number
+  height?: number
+  alt?: string
+}
+
+export interface SeoMediaInput {
+  key?: string
+  url: string
+  secureUrl?: string
+  type?: string
+  width?: number
+  height?: number
+}
+
+export type SeoImageValue = string | SeoImageInput | readonly (string | SeoImageInput)[]
+export type SeoMediaValue = string | SeoMediaInput | readonly (string | SeoMediaInput)[]
+
+export interface SeoOpenGraphInput {
+  type?: string
   title?: string
   description?: string
-  image?: string
-  canonical?: string | false
+  url?: string
+  siteName?: string
+  locale?: string
+  localeAlternate?: readonly string[]
+  determiner?: 'a' | 'an' | 'the' | '' | 'auto'
+  image?: SeoImageValue
+  audio?: SeoMediaValue
+  video?: SeoMediaValue
+}
+
+export type SeoOpenGraphDefaults = Omit<SeoOpenGraphInput, 'url'>
+
+export interface SeoTwitterInput {
+  card?: 'summary' | 'summary_large_image' | 'app' | 'player'
+  site?: string
+  creator?: string
+  title?: string
+  description?: string
+  image?: string | SeoImageInput
+}
+
+export interface SeoRobotsInput {
+  nosnippet?: boolean
+  noimageindex?: boolean
+  maxSnippet?: number
+  maxImagePreview?: 'none' | 'standard' | 'large'
+  maxVideoPreview?: number
+  notranslate?: boolean
+  indexifembedded?: boolean
+  unavailableAfter?: string | Date
+  noarchive?: boolean
+  additional?: Record<string, string | number | boolean>
+}
+
+export interface SeoPageInput {
+  title?: string | null
+  description?: string | null
+  image?: string | null
+  canonical?: string | false | null
   index?: boolean
   follow?: boolean
-  openGraph?: {
-    type?: string
-    title?: string
-    description?: string
-    image?: string
-    url?: string
-  }
-  twitter?: {
-    card?: string
-    title?: string
-    description?: string
-    image?: string
-  }
-  robots?: {
-    maxSnippet?: number
-    maxImagePreview?: 'none' | 'standard' | 'large'
-    noarchive?: boolean
-    nosnippet?: boolean
-  }
-  structuredData?: JsonObject | JsonObject[]
-  meta?: SeoMetaEntry[]
-  links?: SeoLinkEntry[]
-}
-
-/** Composable input schema supporting Vue reactivity. */
-export interface UseSeoInput {
-  title?: SeoResolvable<string | undefined>
-  description?: SeoResolvable<string | undefined>
-  image?: SeoResolvable<string | undefined>
-  canonical?: SeoResolvable<string | false | undefined>
-  index?: SeoResolvable<boolean | undefined>
-  follow?: SeoResolvable<boolean | undefined>
-  openGraph?: SeoResolvable<SeoInput['openGraph']>
-  twitter?: SeoResolvable<SeoInput['twitter']>
-  robots?: SeoResolvable<SeoInput['robots']>
-  structuredData?: SeoResolvable<JsonObject | JsonObject[] | undefined>
-  meta?: SeoResolvable<SeoMetaEntry[] | undefined>
-  links?: SeoResolvable<SeoLinkEntry[] | undefined>
-}
-
-/** Route-level metadata schema. */
-export interface SeoRouteInput extends SeoInput {
-  sitemap?: boolean
   status?: number
+  openGraph?: SeoOpenGraphInput | null
+  twitter?: SeoTwitterInput | null
+  robots?: SeoRobotsInput | null
+  alternates?: { languages?: Record<string, string | null> } | null
+  structuredData?: JsonObject | readonly JsonObject[] | null
+  structuredDataMode?: 'merge' | 'replace'
+  meta?: readonly SeoMetaEntry[] | null
+  links?: readonly SeoLinkEntry[] | null
+  htmlAttributes?: { lang?: string | null; dir?: 'ltr' | 'rtl' | 'auto' | null }
 }
 
-/** Global application configuration schema. */
-export interface SeoApplicationConfig extends SeoInput {
+/** Backward-compatible name for the plain page SEO input. */
+export type SeoInput = SeoPageInput
+
+export interface SeoApplicationConfig {
   enabled?: boolean
-  siteName?: string
-  titleTemplate?: string
+  title?: string | null
+  siteName?: string | null
+  titleTemplate?: string | null
+  description?: string | null
+  image?: string | null
+  index?: boolean
+  follow?: boolean
+  openGraph?: SeoOpenGraphDefaults | null
+  twitter?: SeoTwitterInput | null
+  robots?: SeoRobotsInput | null
+  structuredData?: JsonObject | readonly JsonObject[] | null
+  structuredDataMode?: 'merge' | 'replace'
+  meta?: readonly SeoMetaEntry[] | null
+  links?: readonly SeoLinkEntry[] | null
+  htmlAttributes?: SeoPageInput['htmlAttributes']
   siteUrl?: string
   trailingSlash?: boolean
   mode?: 'public' | 'private'
-  /**
-   * Allow `http://` public production origins. Default is https-only.
-   * Use only for intentional local or unusual production environments.
-   */
   allowHttpOrigin?: boolean
-  robotsTxt?: {
-    disallow?: string[]
-    allow?: string[]
-  }
+  robotsTxt?: RobotsConfig
+  canonical?: never
+  status?: never
+  sitemap?: never
+  alternates?: never
 }
+
+export interface SeoSiteDefaults {
+  title?: string | null
+  siteName?: string | null
+  titleTemplate?: string | null
+  description?: string | null
+  image?: string | null
+  index?: boolean
+  follow?: boolean
+  openGraph?: SeoOpenGraphDefaults | null
+  twitter?: SeoTwitterInput | null
+  robots?: SeoRobotsInput | null
+  structuredData?: JsonObject | readonly JsonObject[] | null
+  structuredDataMode?: 'merge' | 'replace'
+  meta?: readonly SeoMetaEntry[] | null
+  links?: readonly SeoLinkEntry[] | null
+  htmlAttributes?: SeoPageInput['htmlAttributes']
+  alternates?: never
+}
+
+export interface SeoRouteInput extends SeoPageInput {
+  sitemap?: boolean
+}
+
+export interface SeoServerContext {
+  applicationId: string
+  siteOrigin: string
+  domain: Readonly<SsrDomainContext>
+  signal: AbortSignal
+}
+export type SiteSeoContext = SeoServerContext
+
+export interface SeoEndpointContext extends SeoServerContext {
+  pathname: string
+  search: string
+}
+export type SiteRobotsContext = SeoEndpointContext
+
+export interface SeoProviderMeta {
+  revision?: string | number
+  cacheTags?: readonly string[]
+}
+export interface SeoEndpointResultMeta extends SeoProviderMeta {
+  lastModified?: string | Date
+  cacheControl?: string
+}
+
+export type SiteSeoResolution =
+  | ({ status: 'resolved'; defaults: SeoSiteDefaults } & SeoProviderMeta)
+  | { status: 'not-found'; responseStatus?: 404 | 421 }
+export type SiteSeoResolver = (
+  context: SiteSeoContext
+) => SiteSeoResolution | Promise<SiteSeoResolution>
+export interface SiteSeoConfig { resolve: SiteSeoResolver }
+
+export interface RobotsGroup {
+  userAgents: string | readonly string[]
+  allow?: readonly string[]
+  disallow?: readonly string[]
+  directives?: Record<string, string | number | boolean>
+}
+export interface RobotsLegacyConfig {
+  groups?: never
+  allow?: string | readonly string[]
+  disallow?: string | readonly string[]
+  sitemaps?: readonly string[]
+}
+export interface RobotsGroupsConfig {
+  groups: readonly RobotsGroup[]
+  sitemaps?: readonly string[]
+  allow?: never
+  disallow?: never
+}
+export type RobotsConfig = RobotsLegacyConfig | RobotsGroupsConfig
+
+export type SiteRobotsResolution =
+  | ({ status: 'resolved'; config: RobotsConfig } & SeoEndpointResultMeta)
+  | { status: 'not-found'; responseStatus?: 404 | 421 }
+export type SiteRobotsResolver = (
+  context: SiteRobotsContext
+) => SiteRobotsResolution | Promise<SiteRobotsResolution>
+export interface SiteRobotsConfig { resolve: SiteRobotsResolver }
+
+export type UseSeoInput = {
+  [K in keyof SeoPageInput]?: SeoResolvable<SeoPageInput[K]>
+}
+export type UseSeoSource =
+  | UseSeoInput
+  | SeoResolvable<SeoPageInput | null | undefined>
 
 declare module 'vue-router' {
-  interface RouteMeta {
-    seo?: SeoRouteInput
-  }
+  interface RouteMeta { seo?: SeoRouteInput }
 }
 
-export const isSeoEnabled = (
-  config: SeoApplicationConfig | undefined
-): boolean => config?.enabled !== false
-
-export const isPrivateSeoMode = (
-  config: SeoApplicationConfig | undefined
-): boolean => config?.mode === 'private'
+export const isSeoEnabled = (config: SeoApplicationConfig | undefined): boolean =>
+  config?.enabled !== false
+export const isPrivateSeoMode = (config: SeoApplicationConfig | undefined): boolean =>
+  config?.mode === 'private'
