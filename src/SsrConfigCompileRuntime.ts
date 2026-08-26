@@ -76,6 +76,8 @@ export interface SsrCompiledApplication {
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
   publicConfigFactory?: SsrPublicConfigFactory
+  siteSeo?: SsrApplicationConfig['siteSeo']
+  siteRobots?: SsrApplicationConfig['siteRobots']
   applicationModule?: SsrApplicationModuleRef
   domain: {
     development: string
@@ -156,6 +158,8 @@ export interface SsrNormalizedApplicationConfig {
   cacheControl?: string
   responseCache?: SsrApplicationConfig['responseCache']
   publicConfig?: SsrApplicationConfig['publicConfig']
+  siteSeo?: SsrApplicationConfig['siteSeo']
+  siteRobots?: SsrApplicationConfig['siteRobots']
 }
 
 /** Runtime-only shape for already-loaded legacy/programmatic modules. */
@@ -341,6 +345,8 @@ const normalizeApplication = (
     cacheControl: input.cacheControl,
     responseCache: input.responseCache,
     publicConfig: input.publicConfig,
+    siteSeo: input.siteSeo,
+    siteRobots: input.siteRobots,
   }
 }
 
@@ -371,6 +377,8 @@ export const normalizeSsrConfig = (
       'cacheControl',
       'responseCache',
       'publicConfig',
+      'siteSeo',
+      'siteRobots',
     ] as const
     const configRecord = config as unknown as Record<string, unknown>
     const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
@@ -791,6 +799,8 @@ export const compileSsrConfig = async (
         ? {}
         : { ...((app.publicConfig as Record<string, unknown>) || {}) },
       publicConfigFactory,
+      siteSeo: app.siteSeo,
+      siteRobots: app.siteRobots,
       applicationModule,
       domain: {
         development: developmentDomain
@@ -814,6 +824,8 @@ export const compileSsrConfig = async (
           root: options.root || process.cwd(),
           sitemapProvider,
           existingEndpoints: compiled.endpoints,
+          siteSeo: app.siteSeo,
+          siteRobots: app.siteRobots,
           resolveSiteUrl: (request) =>
             resolveServerSiteOrigin({
               siteUrl: application.seo?.siteUrl,
