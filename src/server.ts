@@ -1,7 +1,38 @@
 /** Server/configuration APIs. Implementation runtimes are intentionally private. */
 export { defineSsrConfig } from './SsrConfigRuntime'
 export { defineSitemap } from './server/SsrSitemapConfig'
-export type { SitemapContext, SitemapEntry, SitemapProvider } from './extensions/seo/sitemap'
+export type {
+  SitemapContext,
+  SitemapEntriesResult,
+  SitemapEntry,
+  SitemapImageEntry,
+  SitemapNewsEntry,
+  SitemapNotFoundResult,
+  SitemapProvider,
+  SitemapProviderResult,
+  SitemapShardCollection,
+  SitemapSource,
+  SitemapVideoEntry,
+} from './extensions/seo/sitemap'
+export type {
+  RobotsConfig,
+  RobotsGroup,
+  RobotsGroupsConfig,
+  RobotsLegacyConfig,
+  SeoEndpointContext,
+  SeoEndpointResultMeta,
+  SeoProviderMeta,
+  SeoServerContext,
+  SeoSiteDefaults,
+  SiteRobotsConfig,
+  SiteRobotsContext,
+  SiteRobotsResolution,
+  SiteRobotsResolver,
+  SiteSeoConfig,
+  SiteSeoContext,
+  SiteSeoResolution,
+  SiteSeoResolver,
+} from './extensions/seo/types'
 
 /** Advanced programmatic hosting and cache integrations. */
 export {
