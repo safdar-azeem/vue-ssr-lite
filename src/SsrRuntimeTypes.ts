@@ -1,5 +1,6 @@
 import type { ExtensionDefinition } from './core/extensions/ExtensionDefinition'
 import type { SeoApplicationConfig } from './extensions/seo/types'
+import type { SeoProviderMeta, SeoSiteDefaults } from './extensions/seo/types'
 import type { App, Component, Plugin } from 'vue'
 import type { Router, RouterHistory, RouteRecordRaw, RouterScrollBehavior } from 'vue-router'
 import type { SsrHydrationContext, SsrHydrationController } from './SsrHydrationRuntime'
@@ -79,6 +80,10 @@ export interface SsrRenderRequest<TPublicConfig = unknown> {
   domain: import('./SsrConfigTypes').SsrDomainContext
   /** Authoritative public origin for this request, when already resolved. */
   siteOrigin?: string
+  /** Internal/public hydration-safe request-resolved site SEO snapshot. */
+  siteSeo?: SeoSiteDefaults
+  /** Server-only provider hints; never serialized into hydration state. */
+  siteSeoMeta?: SeoProviderMeta
 }
 
 export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = unknown> {
@@ -89,6 +94,8 @@ export interface SsrHydrationState<TApplicationState = unknown, TPublicConfig = 
   application: TApplicationState
   /** Authoritative public origin resolved during SSR. */
   siteOrigin?: string
+  /** Validated public site defaults resolved on the server. */
+  siteSeo?: SeoSiteDefaults
   /**
    * Serializable state contributed by installed application plugins, keyed by
    * an opaque plugin identifier. `vue-ssr-lite` never inspects the values.
