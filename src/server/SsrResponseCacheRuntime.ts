@@ -137,6 +137,9 @@ export const resolveSsrResponseCacheKey = async (
   const publicConfigVariation = createHash('sha256')
     .update(serializeSsrState(request.publicConfig))
     .digest('base64url')
+  const siteSeoVariation = createHash('sha256')
+    .update(serializeSsrState(request.siteSeo ?? null))
+    .digest('base64url')
   return JSON.stringify([
     'vue-ssr-lite:v2',
     entryId,
@@ -146,6 +149,8 @@ export const resolveSsrResponseCacheKey = async (
     request.search,
     publicConfigVariation,
     variation,
+    request.siteOrigin ?? '',
+    siteSeoVariation,
   ])
 }
 
