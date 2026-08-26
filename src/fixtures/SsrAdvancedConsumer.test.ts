@@ -31,8 +31,10 @@ describe('advanced consumer fixture', () => {
       createTestRenderRequest('ex.test', {
         url: 'https://ex.test/',
         siteOrigin: 'https://ex.test',
+        siteSeo: { title: 'Advanced tenant', siteName: 'Advanced' },
       })
     )
+    expect(rendered.head.title).toBe('Advanced tenant')
     expect(serializeManagedHead(rendered.head)).toContain('x-analytics-id')
     expect(serializeManagedHead(rendered.head)).toContain('UA-123456')
   })
