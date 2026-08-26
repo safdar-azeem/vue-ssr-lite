@@ -1305,6 +1305,82 @@ describe('managed SSR server lifecycle', () => {
     expect(renders).toBe(2)
   })
 
+  it('keeps private SEO HTML outside the shared response cache', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    const cacheGet = vi.fn(async () => null)
+    const cacheSet = vi.fn(async () => undefined)
+    const shouldCache = vi.fn(() => true)
+    let renders = 0
+    const Root = defineComponent({
+      setup() {
+        const rendered = ++renders
+        useSeo({ title: `Private render ${rendered}` })
+        return () => h('main', `private-render:${rendered}`)
+      },
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0 },
+          applications: {
+            private: {
+              application: {
+                id: 'private',
+                root: Root,
+                seo: { mode: 'private' },
+              },
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+              cacheControl: 'public, max-age=60',
+              responseCache: {
+                store: {
+                  get: cacheGet,
+                  set: cacheSet,
+                  invalidate: async () => 0,
+                },
+                ttlMs: 60_000,
+                shouldCache,
+              },
+            },
+          },
+        }),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const navigate = (path = '/') =>
+      fetch(`${origin}${path}`, { headers: { accept: 'text/html' } })
+
+    const first = await navigate()
+    const firstBody = await first.text()
+    const second = await navigate()
+    const secondBody = await second.text()
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(200)
+    expect(first.headers.get('cache-control')).toBe('private, no-store')
+    expect(second.headers.get('cache-control')).toBe('private, no-store')
+    expect(firstBody).toContain('private-render:1')
+    expect(secondBody).toContain('private-render:2')
+    expect(firstBody).toContain('noindex, nofollow')
+    expect(cacheGet).not.toHaveBeenCalled()
+    expect(cacheSet).not.toHaveBeenCalled()
+    expect(shouldCache).not.toHaveBeenCalled()
+    expect(renders).toBe(2)
+
+    const robots = await navigate('/robots.txt')
+    expect(robots.status).toBe(200)
+    expect(await robots.text()).toContain('Disallow: /')
+    expect(cacheGet).not.toHaveBeenCalled()
+    expect(cacheSet).not.toHaveBeenCalled()
+    expect(shouldCache).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['NaN instead of null', { value: Number.NaN }],
     ['undefined property instead of omission', { flag: undefined }],
