@@ -1,4 +1,5 @@
 import type { SsrApplicationDefinition } from './SsrRuntimeTypes'
+import type { SiteRobotsConfig, SiteSeoConfig } from './extensions/seo/types'
 import type {
   SsrEndpointDefinition,
   SsrErrorRenderContext,
@@ -101,6 +102,10 @@ export interface SsrApplicationConfig {
    * Transport-only — the library does not interpret GraphQL, REST, etc.
    */
   publicConfig?: SsrPublicConfigSource
+  /** Server-only, site-stable tenant SEO resolution. */
+  siteSeo?: SiteSeoConfig
+  /** Server-only dynamic robots.txt resolution. */
+  siteRobots?: SiteRobotsConfig
 }
 
 export interface SsrConfigServerOptions {
@@ -167,6 +172,8 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
   cacheControl?: never
   responseCache?: never
   publicConfig?: never
+  siteSeo?: never
+  siteRobots?: never
 }
 
 export type SsrConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfig
