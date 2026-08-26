@@ -482,6 +482,7 @@ describe('zero-config clean consumer fixture', () => {
       build: {
         outDir: productionOutDir,
         emptyOutDir: true,
+        assetsInlineLimit: 0,
       },
     })
 
@@ -492,6 +493,7 @@ describe('zero-config clean consumer fixture', () => {
       file?: string
       isEntry?: boolean
       css?: string[]
+      assets?: string[]
     }>
     const ssrManifest = JSON.parse(
       await readFile(join(productionOutDir, '.vite/ssr-manifest.json'), 'utf8')
@@ -527,6 +529,10 @@ describe('zero-config clean consumer fixture', () => {
         (entry) => entry.isEntry && entry.file?.endsWith('.js')
       )
     ).toBe(true)
+    const importedAsset = Object.values(manifest)
+      .flatMap((entry) => entry.assets ?? [])
+      .find((asset) => asset.endsWith('.svg'))
+    expect(importedAsset).toBeTruthy()
 
     const Root = defineComponent({
       setup: () => () => h('main', 'production-clean-consumer'),
@@ -575,10 +581,10 @@ describe('zero-config clean consumer fixture', () => {
     expect(stylesheetResponse.headers.get('content-length')).toBe(
       String(emittedStylesheet.byteLength)
     )
-    // Rollup does not expose hash-substitution provenance for OutputAsset, so
-    // CSS stays conservative instead of relying on its hash-looking filename.
+    // The build plugin records Vite-owned extracted stylesheet outputs in its
+    // immutable metadata; the server still verifies manifest ownership.
     expect(stylesheetResponse.headers.get('cache-control')).toBe(
-      'public, max-age=3600'
+      'public, max-age=31536000, immutable'
     )
     expect(Buffer.from(await stylesheetResponse.arrayBuffer())).toEqual(
       emittedStylesheet
@@ -594,6 +600,18 @@ describe('zero-config clean consumer fixture', () => {
       'public, max-age=31536000, immutable'
     )
     expect(Buffer.from(await entryResponse.arrayBuffer())).toEqual(emittedEntry)
+
+    const importedAssetResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}/products/${importedAsset}`
+    )
+    expect(importedAssetResponse.status).toBe(200)
+    expect(importedAssetResponse.headers.get('content-type')).toBe(
+      'image/svg+xml; charset=utf-8'
+    )
+    expect(importedAssetResponse.headers.get('cache-control')).toBe(
+      'public, max-age=31536000, immutable'
+    )
+    expect((await importedAssetResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
 
     await managedServer.close()
     managedServer = undefined
@@ -669,6 +687,7 @@ describe('zero-config clean consumer fixture', () => {
       build: {
         outDir: productionOutDir,
         emptyOutDir: true,
+        assetsInlineLimit: 0,
         rollupOptions: {
           output: {
             entryFileNames: 'assets/[name].js',
@@ -681,12 +700,25 @@ describe('zero-config clean consumer fixture', () => {
 
     const manifest = JSON.parse(
       await readFile(join(productionOutDir, '.vite/manifest.json'), 'utf8')
-    ) as Record<string, { file?: string; isEntry?: boolean }>
+    ) as Record<string, {
+      file?: string
+      isEntry?: boolean
+      css?: string[]
+      assets?: string[]
+    }>
     const stableEntry = Object.values(manifest).find(
       (entry) => entry.isEntry && entry.file?.endsWith('.js')
     )?.file
     expect(stableEntry).toBeTruthy()
     expect(stableEntry).not.toMatch(/-[A-Za-z0-9_-]{6,}\.js$/)
+    const stableCss = Object.values(manifest)
+      .flatMap((entry) => entry.css ?? [])
+      .find((asset) => asset.endsWith('.css'))
+    const stableImportedAsset = Object.values(manifest)
+      .flatMap((entry) => entry.assets ?? [])
+      .find((asset) => asset.endsWith('.svg'))
+    expect(stableCss).toBeTruthy()
+    expect(stableImportedAsset).toBeTruthy()
 
     const cacheMetadata = parseSsrProductionAssetMetadata(
       await readFile(
@@ -695,6 +727,8 @@ describe('zero-config clean consumer fixture', () => {
       )
     )
     expect(cacheMetadata.has(stableEntry!)).toBe(false)
+    expect(cacheMetadata.has(stableCss!)).toBe(false)
+    expect(cacheMetadata.has(stableImportedAsset!)).toBe(false)
 
     const Root = defineComponent({
       setup: () => () => h('main', 'stable-output-consumer'),
@@ -716,18 +750,144 @@ describe('zero-config clean consumer fixture', () => {
       }),
     })
     await managedServer.listen()
-    const assetResponse = await fetch(
+    const entryResponse = await fetch(
       `http://127.0.0.1:${managedServer.address().port}/products/${stableEntry}`
     )
 
-    expect(assetResponse.status).toBe(200)
-    expect(assetResponse.headers.get('content-type')).toBe(
+    expect(entryResponse.status).toBe(200)
+    expect(entryResponse.headers.get('content-type')).toBe(
       'text/javascript; charset=utf-8'
     )
-    expect(assetResponse.headers.get('cache-control')).toBe(
+    expect(entryResponse.headers.get('cache-control')).toBe(
       'public, max-age=3600'
     )
-    expect((await assetResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
+    expect((await entryResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
+
+    const cssResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}/products/${stableCss}`
+    )
+    expect(cssResponse.status).toBe(200)
+    expect(cssResponse.headers.get('content-type')).toBe('text/css; charset=utf-8')
+    expect(cssResponse.headers.get('cache-control')).toBe('public, max-age=3600')
+    expect((await cssResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
+
+    const importedAssetResponse = await fetch(
+      `http://127.0.0.1:${managedServer.address().port}/products/${stableImportedAsset}`
+    )
+    expect(importedAssetResponse.status).toBe(200)
+    expect(importedAssetResponse.headers.get('content-type')).toBe(
+      'image/svg+xml; charset=utf-8'
+    )
+    expect(importedAssetResponse.headers.get('cache-control')).toBe(
+      'public, max-age=3600'
+    )
+    expect((await importedAssetResponse.arrayBuffer()).byteLength).toBeGreaterThan(0)
+  })
+
+  it('excludes explicitly named manifest assets from revision metadata', async () => {
+    productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
+    const explicitAssets = [
+      {
+        fileName: 'assets/manual-stable.css',
+        name: 'manual-stable.css',
+        originalFileName: 'src/manual-stable.css',
+        source: 'body { color: red }',
+      },
+      {
+        fileName: 'assets/manual-ABCDEF12.svg',
+        name: 'manual.svg',
+        originalFileName: 'src/manual.svg',
+        source: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>',
+      },
+    ] as const
+    let explicitReferences: string[] = []
+    await build({
+      root: fixtureRoot,
+      configFile: join(fixtureRoot, 'vite.config.ts'),
+      base: '/products/',
+      plugins: [
+        {
+          name: 'test-explicit-output-assets',
+          enforce: 'pre',
+          buildStart() {
+            explicitReferences = explicitAssets.map((asset) =>
+              this.emitFile({ type: 'asset', ...asset })
+            )
+          },
+          transform(code, id) {
+            if (!id.endsWith('/src/main.ts')) return
+            return `${code}\nglobalThis.__explicitAssetUrls = [${explicitReferences
+              .map((reference) => `import.meta.ROLLUP_FILE_URL_${reference}`)
+              .join(', ')}]`
+          },
+          generateBundle(_options, bundle) {
+            const entry = Object.values(bundle).find(
+              (output) => output.type === 'chunk' && output.isEntry
+            )
+            const metadata = (
+              entry as typeof entry & {
+                viteMetadata?: { importedAssets: Set<string> }
+              }
+            )?.viteMetadata
+            if (!metadata) this.error('Missing Vite entry asset metadata.')
+            for (const { fileName } of explicitAssets) {
+              metadata.importedAssets.add(fileName)
+            }
+          },
+        },
+      ],
+      build: { outDir: productionOutDir, emptyOutDir: true },
+    })
+
+    const manifest = JSON.parse(
+      await readFile(join(productionOutDir, '.vite/manifest.json'), 'utf8')
+    ) as Record<string, { assets?: string[] }>
+    const manifestAssets = new Set(
+      Object.values(manifest).flatMap((entry) => entry.assets ?? [])
+    )
+    const cacheMetadata = parseSsrProductionAssetMetadata(
+      await readFile(
+        join(productionOutDir, SSR_PRODUCTION_ASSET_METADATA_PATH),
+        'utf8'
+      )
+    )
+    for (const { fileName } of explicitAssets) {
+      expect(manifestAssets.has(fileName)).toBe(true)
+      expect(cacheMetadata.has(fileName)).toBe(false)
+      expect((await readFile(join(productionOutDir, fileName))).byteLength).toBeGreaterThan(0)
+    }
+
+    const Root = defineComponent({
+      setup: () => () => h('main', 'explicit-asset-output-consumer'),
+    })
+    managedServer = await createSsrManagedServer({
+      production: true,
+      root: fixtureRoot,
+      loadRuntime: async () => ({
+        default: {
+          ...defineSsrConfig({
+            server: { port: 0, clientOutDir: productionOutDir },
+            resolveSiteUrl: () => 'https://example.com',
+            application: { root: Root },
+            template: './index.html',
+            domain: {
+              production: 'localhost',
+              customDomains: true,
+            },
+          } as any),
+          __vueSsrLiteViteBase: '/products/',
+        },
+      }),
+    })
+    await managedServer.listen()
+    for (const { fileName } of explicitAssets) {
+      const response = await fetch(
+        `http://127.0.0.1:${managedServer.address().port}/products/${fileName}`
+      )
+      expect(response.status).toBe(200)
+      expect(response.headers.get('cache-control')).toBe('public, max-age=3600')
+      expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(0)
+    }
   })
 
   it('excludes explicit hash-looking chunk filenames from revision metadata', async () => {
