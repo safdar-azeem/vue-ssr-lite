@@ -237,6 +237,7 @@ export const renderSsrApplication = async <
       domain: request.domain,
       application: created.context.state,
       siteOrigin: created.context.siteOrigin,
+      siteSeo: request.siteSeo,
       plugins: created.hydration.collect(),
     }
     const stateBytes = byteLength(serializeSsrState(hydrationState))
