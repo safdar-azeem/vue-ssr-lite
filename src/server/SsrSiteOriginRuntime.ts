@@ -33,13 +33,20 @@ export interface ResolveServerSiteOriginOptions {
 export const resolveServerSiteOrigin = async (
   options: ResolveServerSiteOriginOptions
 ): Promise<string> => {
-  const resolved = options.resolveSiteUrl
-    ? await options.resolveSiteUrl(options.request)
-    : undefined
   const fallbackOrigin = `${options.request.protocol}://${options.request.host}`
+  if (options.resolveSiteUrl) {
+    const resolved = await options.resolveSiteUrl(options.request)
+    return resolveCanonicalOrigin({
+      requestOrigin: resolved,
+      fallbackOrigin,
+      production: options.production,
+      requireProductionOrigin: options.requireProductionOrigin,
+      allowHttpOrigin: options.allowHttpOrigin,
+    })
+  }
   return resolveCanonicalOrigin({
     siteUrl: options.siteUrl,
-    requestOrigin: options.publicUrl || resolved,
+    requestOrigin: options.publicUrl,
     fallbackOrigin,
     production: options.production,
     requireProductionOrigin: options.requireProductionOrigin,
@@ -58,11 +65,11 @@ export const assertProductionSeoOriginConfigured = (options: {
   allowHttpOrigin?: boolean
 }): void => {
   const originOptions = { allowHttpOrigin: options.allowHttpOrigin }
+  if (options.resolveSiteUrl) return
   if (options.siteUrl) {
     assertPublicProductionOrigin(options.siteUrl, 'seo.siteUrl', originOptions)
     return
   }
-  if (options.resolveSiteUrl) return
   const publicUrl = readPublicUrl()
   if (publicUrl) {
     assertPublicProductionOrigin(publicUrl, 'PUBLIC_URL', originOptions)
