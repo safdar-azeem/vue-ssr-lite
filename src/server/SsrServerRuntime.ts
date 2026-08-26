@@ -28,6 +28,7 @@ import {
 } from '../SsrAssetMetadata'
 import {
   isExpectedUnavailableAssetError,
+  isSsrPrivateProductionAssetPath,
   isSsrProductionAssetNotModified,
   parseSsrClientAssetManifest,
   resolveSsrProductionAsset,
@@ -408,16 +409,83 @@ const runViteMiddleware = (
   response: ServerResponse
 ) =>
   new Promise<void>((resolveMiddleware, reject) => {
-    vite.middlewares(request, response, (error?: Error) => {
+    let settled = false
+    const cleanup = () => {
+      response.off('finish', onResponseComplete)
+      response.off('close', onResponseComplete)
+    }
+    const settle = (error?: Error) => {
+      if (settled) return
+      settled = true
+      cleanup()
       if (error) reject(error)
       else resolveMiddleware()
-    })
+    }
+    const onResponseComplete = () => settle()
+    response.once('finish', onResponseComplete)
+    response.once('close', onResponseComplete)
+    try {
+      vite.middlewares(request, response, (error?: Error) => settle(error))
+    } catch (error) {
+      settle(error instanceof Error ? error : new Error(String(error)))
+    }
   })
+
+const waitForStartedViteOptimizerWork = async (vite: ViteDevServer): Promise<void> => {
+  const optimizers = Object.values(vite.environments ?? {}).flatMap((environment) =>
+    environment.depsOptimizer ? [environment.depsOptimizer] : []
+  )
+  const settle = async (pending: Promise<void>[]) => {
+    // Observe every started batch before reporting a failure. Promise.all
+    // would short-circuit on the first rejection and could otherwise let
+    // teardown close Vite underneath another still-running optimizer batch.
+    const results = await Promise.allSettled(pending)
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    )
+    return rejected
+      ? { rejected: true as const, reason: rejected.reason }
+      : { rejected: false as const }
+  }
+
+  // Phase 1 waits for the scan promises that already exist. The scan can add
+  // entries to metadata.discovered while it is pending, so that collection
+  // must not be snapshotted until every scan has settled.
+  const scanResult = await settle(
+    optimizers
+      .map((optimizer) => optimizer.scanProcessing)
+      .filter((work): work is Promise<void> => Boolean(work))
+  )
+
+  // Phase 2 observes the optimizer processing promises created by the scan,
+  // including dependencies that were absent when shutdown began.
+  const processingResult = await settle(
+    optimizers
+      .flatMap((optimizer) =>
+        Object.values(optimizer.metadata.discovered ?? {}).map(
+          (dependency) => dependency.processing
+        )
+      )
+      .filter((work): work is Promise<void> => Boolean(work))
+  )
+
+  if (scanResult.rejected) throw scanResult.reason
+  if (processingResult.rejected) throw processingResult.reason
+}
 
 export const createSsrManagedServer = async (
   options: SsrManagedServerOptions
 ): Promise<SsrManagedServer> => {
   let shuttingDown = false
+  let shutdownPromise: Promise<void> | undefined
+  let activeRequestCount = 0
+  let resolveRequestsDrained: (() => void) | undefined
+  const waitForRequestsDrained = (): Promise<void> =>
+    activeRequestCount === 0
+      ? Promise.resolve()
+      : new Promise((resolveDrained) => {
+          resolveRequestsDrained = resolveDrained
+        })
   const initialRuntime = await resolveRuntime(await options.loadRuntime(), options)
   const initialServerOptions = initialRuntime.server
   const host = initialServerOptions.host
@@ -607,6 +675,7 @@ export const createSsrManagedServer = async (
   )
 
   const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
+    activeRequestCount += 1
     const startedAt = Date.now()
     const requestId =
       String(request.headers['x-request-id'] || '').trim() ||
@@ -621,8 +690,18 @@ export const createSsrManagedServer = async (
     const cancelClosedResponse = () => {
       if (!response.writableEnded) scope.cancel()
     }
+    const closeIdleAfterResponse = () => {
+      response.off('finish', closeIdleAfterResponse)
+      response.off('close', closeIdleAfterResponse)
+      // A connection carrying legitimate in-flight work was not idle when
+      // shutdown began. Once its response finishes or closes it is safe to
+      // reap resulting keep-alive sockets without disturbing application work.
+      if (shuttingDown) nodeServer.closeIdleConnections?.()
+    }
     request.once('aborted', cancelDisconnectedRequest)
     response.once('close', cancelClosedResponse)
+    response.once('finish', closeIdleAfterResponse)
+    response.once('close', closeIdleAfterResponse)
 
     try {
       const definition = await scope.run(loadDefinition)
@@ -667,6 +746,23 @@ export const createSsrManagedServer = async (
             message: 'A required dependency is unavailable.',
           })
         }
+      }
+
+      // Reserved Vite/framework metadata is never an application route. Make
+      // this decision at the HTTP boundary so HTML Accept headers and browser
+      // navigation hints cannot turn an unresolved private asset into the
+      // SPA/SSR document fallback. Check both the raw path (for filesystem
+      // security) and WHATWG-normalized pathname (for encoded dot segments).
+      if (
+        options.production &&
+        (isSsrPrivateProductionAssetPath(rawAssetPathname, viteBase) ||
+          isSsrPrivateProductionAssetPath(pathname, viteBase))
+      ) {
+        return sendJson(request, response, 404, {
+          status: 'error',
+          service: definition.name,
+          message: 'Resource not found.',
+        })
       }
 
       const incomingHost = resolveSsrForwardedHost(
@@ -1088,6 +1184,11 @@ export const createSsrManagedServer = async (
       request.off('aborted', cancelDisconnectedRequest)
       response.off('close', cancelClosedResponse)
       scope.dispose()
+      activeRequestCount -= 1
+      if (activeRequestCount === 0) {
+        resolveRequestsDrained?.()
+        resolveRequestsDrained = undefined
+      }
     }
   }
 
@@ -1096,6 +1197,91 @@ export const createSsrManagedServer = async (
       ? runWithSsrViteAssetResolutionContext(() => handleRequest(request, response))
       : handleRequest(request, response)
   )
+
+  const close = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise
+    shuttingDown = true
+    shutdownPromise = (async () => {
+      const timeoutMs = initialServerOptions.shutdownTimeoutMs
+      let forced: ReturnType<typeof setTimeout> | undefined
+      let viteClosePromise: Promise<void> | undefined
+      const closeVite = (): Promise<void> => {
+        if (!options.vite) return Promise.resolve()
+        if (!viteClosePromise) {
+          // Promise.resolve().then() also captures a synchronous throw from a
+          // Vite close implementation while preserving one invocation.
+          viteClosePromise = Promise.resolve().then(() => options.vite!.close())
+        }
+        return viteClosePromise
+      }
+      const nodeClose = new Promise<void>((resolveClose, rejectClose) => {
+        nodeServer.close((error) => {
+          if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') {
+            resolveClose()
+          } else {
+            rejectClose(error)
+          }
+        })
+        // close() stops new accepts first. Explicitly draining idle keep-alive
+        // sockets preserves active requests while avoiding needless shutdown
+        // delay on platforms where close() does not reap them immediately.
+        nodeServer.closeIdleConnections?.()
+      })
+      const gracefulClose = (async () => {
+        // Do not close Vite underneath an application request that is still
+        // using its transforms or ModuleRunner. Vite/HMR sockets are not part
+        // of this managed HTTP request count.
+        await waitForRequestsDrained()
+        // On a cold start Vite may have already moved from dependency scanning
+        // into an optimizer batch. Cancelling at that boundary can leave
+        // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
+        // only the work Vite has already exposed as pending, then use its
+        // normal close API for environments, ModuleRunner, HMR, and WebSockets.
+        let shutdownError: unknown
+        let hasShutdownError = false
+        if (options.vite) {
+          try {
+            await waitForStartedViteOptimizerWork(options.vite)
+          } catch (error) {
+            shutdownError = error
+            hasShutdownError = true
+          }
+          // Vite owns its environments, ModuleRunner, HMR, and WebSocket
+          // server. Its cleanup is mandatory even when an optimizer batch
+          // failed; report the optimizer failure only after cleanup is owned.
+          try {
+            await closeVite()
+          } catch (error) {
+            if (!hasShutdownError) {
+              shutdownError = error
+              hasShutdownError = true
+            }
+          }
+        }
+        await nodeClose
+        if (hasShutdownError) throw shutdownError
+      })()
+      try {
+        await Promise.race([
+          gracefulClose,
+          new Promise<never>((_resolve, reject) => {
+            forced = setTimeout(() => {
+              nodeServer.closeAllConnections?.()
+              // A stuck optimizer drain must not leave Vite-owned resources
+              // unclosed after the shutdown deadline. This is a forced
+              // timeout path; normal application work still drains before
+              // the regular closeVite() call above.
+              void closeVite().catch(() => undefined)
+              reject(new Error('SSR server graceful shutdown timed out.'))
+            }, timeoutMs)
+          }),
+        ])
+      } finally {
+        if (forced) clearTimeout(forced)
+      }
+    })()
+    return shutdownPromise
+  }
 
   return {
     nodeServer,
@@ -1116,29 +1302,6 @@ export const createSsrManagedServer = async (
           resolveListen()
         })
       }),
-    close: async () => {
-      if (shuttingDown) return
-      shuttingDown = true
-      const timeoutMs = initialServerOptions.shutdownTimeoutMs
-      let forced: ReturnType<typeof setTimeout> | undefined
-      try {
-        await Promise.race([
-          Promise.all([
-            new Promise<void>((resolveClose, rejectClose) => {
-              nodeServer.close((error) => (error ? rejectClose(error) : resolveClose()))
-            }),
-            options.vite?.close(),
-          ]),
-          new Promise<never>((_resolve, reject) => {
-            forced = setTimeout(() => {
-              nodeServer.closeAllConnections?.()
-              reject(new Error('SSR server graceful shutdown timed out.'))
-            }, timeoutMs)
-          }),
-        ])
-      } finally {
-        if (forced) clearTimeout(forced)
-      }
-    },
+    close,
   }
 }
