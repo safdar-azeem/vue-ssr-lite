@@ -12,6 +12,9 @@ export const normalizeSiteOrigin = (
   value: string,
   label = 'site origin'
 ): string => {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`[vue-ssr-lite] ${label} must not contain control characters.`)
+  }
   let parsed: URL
   try {
     parsed = new URL(value)
@@ -23,6 +26,9 @@ export const normalizeSiteOrigin = (
   }
   if (!parsed.hostname) {
     throw new Error(`[vue-ssr-lite] ${label} must include a hostname.`)
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`[vue-ssr-lite] ${label} must not contain credentials.`)
   }
   return parsed.origin
 }
