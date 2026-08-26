@@ -151,11 +151,18 @@ Common options:
 
 # SEO
 
-SEO can be defined in three places:
+SEO is composed from four public layers:
 
 1. Application defaults with `defineApplication({ seo })`
-2. Route metadata with `meta.seo`
-3. Page/component SEO with `useSeo()`
+2. Request-resolved site defaults with server-only `siteSeo`
+3. Matched route records, parent to child, with `meta.seo`
+4. Active page/component layers with `useSeo()` in registration order
+
+Later layers win for singleton fields. `null` clears an inherited string,
+nested object, or collection where the field type permits it. Metadata, links,
+structured data, Open Graph media, and hreflang use identity-aware composition
+rather than a generic deep merge. A lower-level custom managed-head extension
+can intentionally override the completed SEO contribution.
 
 ## Global SEO
 
@@ -170,7 +177,10 @@ export default defineApplication({
     titleTemplate: '%s | My Store',
     description: 'My online store.',
     image: 'https://example.com/social.png',
+    index: true,
+    follow: true,
     siteUrl: 'https://example.com',
+    htmlAttributes: { lang: 'en', dir: 'ltr' },
   },
 })
 ```
@@ -189,6 +199,66 @@ Common options:
 | `mode`          | `public` or `private`             |
 | `enabled`       | Enable/disable built-in SEO       |
 | `robotsTxt`     | robots.txt rules                  |
+
+Application and request-resolved site defaults cannot own page identities:
+`canonical`, `status`, `sitemap`, first-class `alternates.languages`, or
+`openGraph.url`. Their generic `meta` and `links` arrays also cannot recreate a
+canonical, hreflang link, or `og:url`. A global `rel="alternate"` without
+`hreflang` remains valid for RSS/Atom feeds.
+
+## Request-resolved site SEO
+
+Website builders and multi-tenant applications can resolve public site
+defaults once per server request:
+
+```ts
+// ssr.config.ts
+import { defineSsrConfig, type SiteSeoResolution } from 'vue-ssr-lite/server'
+
+export default defineSsrConfig({
+  resolveSiteUrl: async (request) => lookupAuthoritativeOrigin(request),
+
+  siteSeo: {
+    resolve: async ({ applicationId, siteOrigin, domain, signal }): Promise<SiteSeoResolution> => {
+      const site = await database.sites.byDomain(domain.hostname, { signal })
+      if (!site) return { status: 'not-found', responseStatus: 404 }
+
+      return {
+        status: 'resolved',
+        defaults: {
+          siteName: site.name,
+          title: site.defaultTitle,
+          titleTemplate: site.titleTemplate,
+          description: site.description,
+          image: site.socialImage,
+          index: site.published,
+          follow: site.published,
+          structuredData: site.structuredData,
+        },
+        revision: site.seoRevision,
+        cacheTags: [`site:${site.id}`],
+      }
+    },
+  },
+})
+```
+
+For multi-application configuration, put `siteSeo` on the relevant
+`applications.<id>` entry. `SiteSeoContext` is deliberately site-stable: it
+contains `applicationId`, `siteOrigin`, `domain`, and `signal`, but no pathname,
+search, or `publicConfig`.
+
+The resolver never runs in the browser. Its validated public defaults are
+serialized into hydration state, restored exactly, and retained across
+same-origin SPA navigation. Moving to another tenant/origin requires a full
+document navigation. Provider revision and cache tags remain server-only.
+
+Return `status: 'not-found'` for an unknown tenant. It fails closed with HTTP
+404 (or explicitly 421), emits no normal tenant snapshot or canonical, skips
+sitemap/robots tenant providers, and bypasses normal response caching. An
+existing but unpublished tenant instead returns `status: 'resolved'` with
+`index: false` and/or `follow: false`. Resolver errors and aborts are failures,
+not tenant-not-found results.
 
 ## Route SEO
 
@@ -234,11 +304,12 @@ const props = defineProps<{
   }
 }>()
 
-useSeo({
-  title: computed(() => props.product.name),
-  description: computed(() => props.product.description),
-  image: computed(() => props.product.image),
-})
+useSeo(computed(() => ({
+  title: props.product.name,
+  description: props.product.description,
+  image: props.product.image,
+  status: props.product ? 200 : 404,
+})))
 </script>
 ```
 
@@ -255,27 +326,83 @@ useSeo({
 
   openGraph: {
     type: 'product',
+    url: '/products/item',
+    siteName: 'My Store',
+    locale: 'en_US',
+    localeAlternate: ['fr_FR'],
+    image: [
+      { key: 'primary', url: '/product.png', width: 1200, height: 630, alt: 'Product' },
+      { url: '/detail.png' },
+    ],
   },
 
   twitter: {
     card: 'summary_large_image',
+    site: '@store',
+    creator: '@author',
+  },
+
+  alternates: {
+    languages: {
+      en: '/products/item',
+      fr: '/fr/produits/item',
+      'x-default': '/products/item',
+    },
   },
 })
 ```
 
-Values can be plain values, refs, computed refs, or getters.
+`useSeo()` accepts a plain object, `Ref<SeoPageInput>`, computed ref, or a
+whole-object getter. Individual fields can also be plain values, refs,
+computed refs, or getters. Application/data code owns fetching; SEO consumes
+the already-resolved reactive object.
+
+Active layers are scoped to their component. Reactive updates, KeepAlive
+activation/deactivation, unmount, route navigation, Back, and Forward all
+recalculate the effective head and declarative status.
+
+Clearing examples:
+
+```ts
+useSeo({
+  title: null,             // clear an inherited title
+  openGraph: null,         // clear inherited OG fields
+  meta: null,              // clear the inherited generic meta collection
+  links: null,
+  structuredData: null,
+  alternates: {
+    languages: { fr: null }, // remove the inherited French hreflang
+  },
+})
+```
+
+First-class hreflang is page/route/component-only. Site-wide
+`htmlAttributes.lang` sets document language; it is not a hreflang set.
 
 ## Structured Data
 
 ```ts
 useSeo({
-  structuredData: {
-    '@context': 'https://schema.org',
-    '@type': 'Product',
-    name: 'Example Product',
-  },
+  structuredData: [
+    {
+      '@context': 'https://schema.org',
+      '@id': 'https://example.com/products/example#product',
+      '@type': 'Product',
+      name: 'Example Product',
+    },
+    { '@type': 'BreadcrumbList', itemListElement: [] },
+  ],
 })
 ```
+
+JSON-LD remains schema-generic. Blocks append by default; a later block with
+the same `@id` replaces that identity, while unkeyed blocks remain independent.
+Use `structuredDataMode: 'replace'` to replace lower layers explicitly.
+Serialization protects against script breakout.
+
+Open Graph `image`, `audio`, and `video` values are repeatable. An explicit
+`key` replaces an earlier item with the same key; unkeyed entries always append,
+even when their URLs match. The page-level `image` is the primary fallback.
 
 ## Custom Meta and Link Tags
 
@@ -315,17 +442,64 @@ For a static route:
 For dynamic data:
 
 ```ts
-import { setResponseStatus, useSeo } from 'vue-ssr-lite'
+import { computed } from 'vue'
+import { useSeo } from 'vue-ssr-lite'
 
 const article = await fetchArticle()
 
-if (!article) {
-  setResponseStatus(404)
-  useSeo({ title: 'Article Not Found' })
-}
+useSeo(computed(() => article
+  ? { title: article.title, status: 200 }
+  : { title: 'Article Not Found', status: 404 }
+))
 ```
 
-4xx and 5xx SSR responses are automatically marked `noindex` when built-in SEO is enabled.
+Status precedence is framework/route status, deepest matched route
+`meta.seo.status`, active `useSeo({ status })` layers, imperative
+`setResponseStatus()`, then an actual redirect response. Use
+`setResponseStatus()` for imperative Core HTTP logic and when SEO is disabled.
+
+Use the Core redirect helper for redirects:
+
+```ts
+import { setResponseRedirect } from 'vue-ssr-lite'
+
+setResponseRedirect('/new-location', { status: 308 })
+setResponseRedirect('https://external.example/path', {
+  status: 302,
+  allowExternal: true,
+})
+```
+
+The default status is 302 and external redirects are rejected unless allowed.
+Only credential-free HTTP(S) locations without control characters are valid.
+The helper records server response state; it is a no-op in the browser and
+never performs Router navigation. Generic headers remain available through
+`useSsrRequestContext().response.headers`; there is no `setResponseHeader()`.
+
+404 and 410 responses retain their real status, become `noindex` without an
+invented `nofollow`, omit automatic canonical/structured data, stay out of
+static sitemaps, and bypass normal page caching. 5xx and redirects similarly
+suppress normal indexable output. A 3xx status without a redirect is rejected.
+
+## Canonical and `og:url`
+
+Core resolves one authoritative site origin:
+
+```text
+resolveSiteUrl(request) → seo.siteUrl → PUBLIC_URL → validated development fallback
+```
+
+When configured, `resolveSiteUrl()` is authoritative; `PUBLIC_URL` cannot
+override it. Missing/invalid resolution fails closed in public production. The
+same origin drives canonical, `og:url`, hreflang, sitemap URLs, and robots
+sitemap lines. Canonical and `openGraph.url` must remain same-origin and use
+credential-free HTTP(S).
+
+`canonical` is page-owned. A string sets it; `false` suppresses it; `null`
+clears an inherited value. On a successful normal page, omission follows the
+normal current-page canonical behavior. Explicit page `openGraph.url` wins,
+then effective canonical, then the normalized current page URL. Explicit
+`canonical: false` or `null` prevents automatic `og:url` derivation.
 
 ---
 
@@ -346,11 +520,17 @@ For dynamic routes such as `/blog/:slug`, create:
 import { defineSitemap, type SitemapContext } from 'vue-ssr-lite/server'
 
 export default defineSitemap(async (context: SitemapContext) => {
-  const articles = await loadPublishedArticles()
+  const articles = await loadPublishedArticles(context.domain.hostname, {
+    signal: context.signal,
+  })
 
   return articles.map((article) => ({
-    loc: `/blog/${article.slug}`,
+    loc: `${context.siteOrigin}/blog/${article.slug}`,
     lastmod: article.updatedAt,
+    changefreq: 'weekly',
+    priority: 0.7,
+    alternates: article.localizedUrls,
+    images: article.image ? [{ loc: article.image }] : undefined,
   }))
 })
 ```
@@ -361,8 +541,63 @@ Supported entry shape:
 {
   loc: '/blog/example',
   lastmod: new Date(),
+  changefreq: 'weekly',
+  priority: 0.8,
+  alternates: { en: '/blog/example', fr: '/fr/blog/example' },
+  images: [{ loc: 'https://cdn.example/image.jpg' }],
+  videos: [{
+    thumbnailLoc: 'https://cdn.example/thumb.jpg',
+    title: 'Example video',
+    description: 'Example description',
+    playerLoc: 'https://video.example/player',
+  }],
+  news: {
+    publication: { name: 'Example News', language: 'en' },
+    publicationDate: new Date(),
+    title: 'Example article',
+  },
 }
 ```
+
+Dynamic providers declare published, canonical/indexable records; the framework
+does not render every dynamic page. Page `loc` and hreflang URLs are same-origin
+by default. Approved image/video media may be cross-origin. Entries are
+deduplicated and XML-escaped. Invalid schemes, credentials, extension data, or
+cross-tenant page URLs fail the response atomically.
+
+Each sitemap file is limited to 50,000 URLs and 50 MB uncompressed. Each page
+supports at most 1,000 images, each sitemap at most 1,000 News entries, and each
+video must meet the required URL/text/date/duration/tag bounds.
+
+## Large sharded sitemaps
+
+Large providers return a replayable shard collection:
+
+```ts
+export default defineSitemap(async (context) => ({
+  kind: 'sharded',
+  revision: await currentSitemapRevision(context.domain.hostname),
+  shardCount: await countSitemapShards(context.domain.hostname),
+  lastModified: new Date(),
+  cacheControl: 'public, max-age=300',
+  getShard: async (shardContext, shardNumber) =>
+    streamPublishedPages(shardContext.domain.hostname, shardNumber, {
+      signal: shardContext.signal,
+    }),
+}))
+```
+
+`/sitemap.xml` becomes the index. Shard numbers are 1-based:
+`/sitemap-1.xml` calls `getShard(context, 1)`. Revision is mandatory, content
+must be deterministic for that revision, and only one shard is held/serialized
+at a time. Every shard independently satisfies URL, byte, and extension limits.
+
+Bare arrays/iterables remain compatible for small sites. Return
+`{ kind: 'entries', entries, revision, lastModified, cacheControl }` when a
+non-sharded sitemap needs HTTP metadata. A provider can return
+`{ status: 'not-found', responseStatus: 404 | 421 }` when `siteSeo` is absent.
+When `siteSeo` exists, it is the authoritative tenant gate and is resolved
+before sitemap or robots providers.
 
 If `public/sitemap.xml` exists, the physical file is used instead.
 
@@ -385,11 +620,55 @@ export default defineApplication({
 
   seo: {
     robotsTxt: {
-      disallow: ['/admin/', '/private/'],
+      groups: [
+        { userAgents: '*', allow: ['/'], disallow: ['/admin/', '/private/'] },
+        { userAgents: 'Googlebot', allow: ['/public-search/'] },
+      ],
+      sitemaps: ['https://example.com/sitemap.xml'],
     },
   },
 })
 ```
+
+Legacy `allow`/`disallow` shorthand remains supported and normalizes to one
+`User-agent: *` group. Do not mix shorthand with `groups`.
+
+Website builders can resolve robots policy per tenant on the server:
+
+```ts
+export default defineSsrConfig({
+  siteRobots: {
+    resolve: async ({ domain, siteOrigin, pathname, search, signal }) => ({
+      status: 'resolved',
+      config: {
+        groups: [{ userAgents: '*', allow: ['/'], disallow: ['/admin'] }],
+        sitemaps: [`${siteOrigin}/sitemap.xml`],
+      },
+      revision: await robotsRevision(domain.hostname, { signal }),
+      cacheControl: 'public, max-age=300',
+    }),
+  },
+})
+```
+
+`SiteRobotsContext` includes endpoint pathname/search but not `publicConfig`.
+Resolution order is private mode, dynamic `siteRobots`, static `robotsTxt`, then
+the public wildcard default. Private mode skips the resolver and emits
+`Disallow: /`. This is crawler guidance, not authentication or access control.
+
+Supplementary meta robots directives support `nosnippet`, `noimageindex`,
+`maxSnippet`, `maxImagePreview`, `maxVideoPreview`, `notranslate`,
+`indexifembedded`, `unavailableAfter`, and `noarchive`. `additional` is a
+validated future escape hatch; first-class directive names are reserved.
+Control characters and invalid names are rejected.
+
+Sitemap and robots result metadata maps `revision` to ETag, `lastModified` to
+Last-Modified, and validated `cacheControl` to Cache-Control. Conditional
+If-None-Match and If-Modified-Since requests return 304 when appropriate.
+`SeoProviderMeta` on `siteSeo` is not endpoint HTTP metadata.
+Provider exceptions fail the endpoint with a non-cacheable service error;
+request aborts stop provider/shard work and prevent cache writes. Invalid or
+oversized sitemap output is never returned partially.
 
 If `public/robots.txt` exists, that file is used instead.
 
@@ -465,10 +744,14 @@ returned object. Returned configuration must contain JSON-safe values: null,
 booleans, finite numbers, strings, dense arrays, and plain objects composed of
 those values. Negative zero is normalized to zero.
 
-Rendered-response cache keys automatically vary by the resolved public config.
-`responseCache.vary` remains necessary for other public render discriminators
-that affect HTML but are not represented in `publicConfig`. Credential-bearing
-requests continue to bypass the shared response cache.
+Rendered-response cache keys automatically vary by application, protocol,
+host, pathname, search, resolved public config, authoritative site origin, and
+the deterministic validated site SEO snapshot. Consumers do not need
+`responseCache.vary` for SEO correctness. Use it only for an additional public
+render discriminator outside those framework-owned inputs. Credential-bearing
+requests continue to bypass the shared response cache. Tenant-not-found,
+redirected, private, error, failed, and aborted responses are not normal page
+cache entries.
 
 ---
 
@@ -495,6 +778,13 @@ or:
 ```bash
 PUBLIC_URL=https://example.com
 ```
+
+Custom-domain applications should configure server-only `resolveSiteUrl()`.
+Its validated result is authoritative and outranks both `seo.siteUrl` and
+`PUBLIC_URL`. The runtime honors trusted-proxy protocol/host information only
+when `server.trustProxy` is enabled; the resolver must validate host ownership.
+Public production requests fail closed if an authoritative resolver returns a
+missing, malformed, insecure, credentialed, or unbound origin.
 
 ---
 
@@ -626,19 +916,21 @@ import {
   useSeo,
   usePublicConfig,
   useSiteOrigin,
+  setResponseRedirect,
   setResponseStatus,
   defineExtension,
 } from 'vue-ssr-lite'
 ```
 
-| API                 | Purpose                              |
-| ------------------- | ------------------------------------ |
-| `defineApplication` | Define the universal Vue application |
-| `useSeo`            | Set reactive SEO/head data           |
-| `usePublicConfig`   | Read browser-safe server config      |
-| `useSiteOrigin`     | Read resolved public origin          |
-| `setResponseStatus` | Set SSR HTTP status                  |
-| `defineExtension`   | Create an advanced runtime extension |
+| API                   | Purpose                              |
+| --------------------- | ------------------------------------ |
+| `defineApplication`   | Define the universal Vue application |
+| `useSeo`              | Set reactive SEO/head data           |
+| `usePublicConfig`     | Read browser-safe server config      |
+| `useSiteOrigin`       | Read resolved public origin          |
+| `setResponseStatus`   | Set imperative SSR HTTP status       |
+| `setResponseRedirect` | Set a validated server redirect      |
+| `defineExtension`     | Create an advanced runtime extension |
 
 ## `vue-ssr-lite/vite`
 
@@ -906,6 +1198,8 @@ responseCache: {
 
 Requests with non-empty `Cookie`, `Authorization`, or `Proxy-Authorization`
 headers bypass the shared response cache, whether or not cookies are forwarded.
+Site SEO snapshot hashing and authoritative origin variation are automatic;
+`vary` is only for additional non-SEO public dimensions.
 
 ---
 
