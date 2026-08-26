@@ -4,6 +4,7 @@ import * as publicApi from './index'
 const UNIVERSAL_EXPORTS = [
   'defineApplication',
   'defineExtension',
+  'setResponseRedirect',
   'setResponseStatus',
   'usePublicConfig',
   'useSeo',
