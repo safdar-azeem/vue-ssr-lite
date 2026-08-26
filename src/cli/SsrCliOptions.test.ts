@@ -1,14 +1,17 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { parseSsrCliArguments } from './SsrCliOptions'
 
 let root = ''
+let alias = ''
 
 afterEach(async () => {
+  if (alias) await rm(alias, { recursive: true, force: true })
   if (root) await rm(root, { recursive: true, force: true })
   root = ''
+  alias = ''
 })
 
 describe('parseSsrCliArguments', () => {
@@ -22,7 +25,9 @@ describe('parseSsrCliArguments', () => {
 
     expect(options.command).toBe('start')
     expect(options.config).toBeUndefined()
-    expect(options.serverOutput).toBe(resolve(root, 'dist/server/SsrRuntime.js'))
+    expect(options.serverOutput).toBe(
+      resolve(await realpath(root), 'dist/server/SsrRuntime.js')
+    )
   })
 
   it('start accepts a custom --server-output path', async () => {
@@ -39,7 +44,7 @@ describe('parseSsrCliArguments', () => {
       'out/runtime.mjs',
     ])
 
-    expect(options.serverOutput).toBe(custom)
+    expect(options.serverOutput).toBe(await realpath(custom))
     expect(options.config).toBeUndefined()
   })
 
@@ -66,6 +71,16 @@ describe('parseSsrCliArguments', () => {
     const options = await parseSsrCliArguments(['build', '--root', root])
 
     expect(options.command).toBe('build')
-    expect(options.config).toBe(resolve(root, 'ssr.config.mjs'))
+    expect(options.config).toBe(resolve(await realpath(root), 'ssr.config.mjs'))
+  })
+
+  it('canonicalizes a symlinked project root before Vite owns lifecycle resources', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-root-'))
+    alias = `${root}-alias`
+    await symlink(root, alias)
+
+    const options = await parseSsrCliArguments(['dev', '--root', alias])
+
+    expect(options.root).toBe(await realpath(root))
   })
 })
