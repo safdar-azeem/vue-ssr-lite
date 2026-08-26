@@ -5,8 +5,14 @@ import {
   type ExtensionRuntime,
 } from '../../core/extensions/ExtensionRuntime'
 import { useSsrRequestContext } from '../../SsrRequestContext'
-import { registerSeoLayer, removeSeoLayer, resolveUseSeoInput, type SeoState } from './state'
-import type { UseSeoInput } from './types'
+import {
+  recomputeSeoResponseStatus,
+  registerSeoLayer,
+  removeSeoLayer,
+  resolveUseSeoInput,
+  type SeoState,
+} from './state'
+import type { UseSeoSource } from './types'
 
 type RequestWithRuntime = {
   [SSR_EXTENSION_RUNTIME]?: ExtensionRuntime
@@ -23,7 +29,7 @@ const warn = (message: string) => {
   if (!isSsrProduction()) console.warn(message)
 }
 
-export const useSeo = (input: UseSeoInput): void => {
+export const useSeo = (input: UseSeoSource): void => {
   const instance = getCurrentInstance()
   if (!instance || instance.isUnmounted) {
     warn(SETUP_WARNING)
@@ -50,7 +56,16 @@ export const useSeo = (input: UseSeoInput): void => {
   }
 
   const layer = registerSeoLayer(state, input)
+  const syncStatus = () => {
+    const route = runtime.getRoute()
+    recomputeSeoResponseStatus(
+      state,
+      (context as ReturnType<typeof useSsrRequestContext>).response,
+      route
+    )
+  }
   const invalidate = () => {
+    syncStatus()
     if (layer.active) context.managedHead?.invalidate()
   }
   invalidate()
@@ -63,6 +78,7 @@ export const useSeo = (input: UseSeoInput): void => {
 
   onDeactivated(() => {
     layer.active = false
+    syncStatus()
     context.managedHead?.invalidate()
   })
   onActivated(() => {
@@ -72,6 +88,7 @@ export const useSeo = (input: UseSeoInput): void => {
   onUnmounted(() => {
     stop()
     removeSeoLayer(state, layer)
+    syncStatus()
     context.managedHead?.invalidate()
   })
 }
