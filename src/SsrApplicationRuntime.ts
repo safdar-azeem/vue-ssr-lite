@@ -10,6 +10,10 @@ import {
   SSR_EXTENSION_RUNTIME,
 } from './core/extensions/ExtensionRuntime'
 import { resolveBuiltInExtensions } from './extensions/resolveBuiltInExtensions'
+import {
+  recomputeSeoResponseStatus,
+  type SeoState,
+} from './extensions/seo/state'
 import { isPrivateSeoMode, isSeoEnabled } from './extensions/seo/types'
 import {
   isSsrProduction,
@@ -195,7 +199,10 @@ export const createSsrApplication = async <
     resolution,
   }
   const extensionRuntime = createExtensionRuntime(
-    resolveBuiltInExtensions(definition),
+    resolveBuiltInExtensions(
+      definition,
+      options.hydrationState?.siteSeo ?? options.request.siteSeo
+    ),
     definition.extensions ?? [],
     {
       applicationId: definition.id,
@@ -203,7 +210,9 @@ export const createSsrApplication = async <
       production,
       getRoute: () => router?.currentRoute.value ?? null,
       getSiteOrigin: () => siteOrigin,
+      getPathname: () => router?.currentRoute.value.path ?? context.url.pathname,
       getResponseStatus: () => context.response.statusCode,
+      getRedirected: () => Boolean(context.response.redirect),
       managedHead,
     }
   )
@@ -221,6 +230,8 @@ export const createSsrApplication = async <
       router.afterEach((to, _from, failure) => {
         if (failure) return
         resolveResponseStatusForRoute(context.response, to)
+        const seoState = extensionRuntime.getState<SeoState>('seo')
+        if (seoState) recomputeSeoResponseStatus(seoState, context.response, to)
         if (!options.server) managedHead.invalidate()
       })
     }
