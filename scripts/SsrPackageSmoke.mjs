@@ -96,7 +96,34 @@ const writeSsrConfig = (consumerRoot, revision) =>
     `import { defineSsrConfig } from 'vue-ssr-lite/server'
 
 export default defineSsrConfig({
-  server: { port: Number(process.env.SMOKE_PORT || 4173) },
+  server: {
+    port: Number(process.env.SMOKE_PORT || 4173),
+    logger: { error: (event, details) => console.error(event, details) },
+  },
+  siteSeo: {
+    resolve: async ({ domain, siteOrigin, signal }) => {
+      if (signal.aborted) throw signal.reason
+      return {
+        status: 'resolved',
+        defaults: {
+          siteName: 'Packed Tenant',
+          titleTemplate: '%s | Packed Tenant',
+          description: 'Packed tenant defaults for ' + domain.hostname,
+        },
+        revision: 'packed-site-seo-v1',
+      }
+    },
+  },
+  siteRobots: {
+    resolve: async ({ siteOrigin }) => ({
+      status: 'resolved',
+      config: {
+        groups: [{ userAgents: '*', allow: ['/'], disallow: ['/private'] }],
+        sitemaps: [siteOrigin + '/sitemap.xml'],
+      },
+      revision: 'packed-robots-v1',
+    }),
+  },
   publicConfig: ({ host, pathname, headers, domain }) => ({
     host,
     pathname,
@@ -134,7 +161,13 @@ export default defineConfig({
   await writeSsrConfig(consumerRoot, 'before-hmr')
   await writeFile(
     join(sourceRoot, 'Home.vue'),
-    '<template><section id="home-page">packed-home</section></template>\n',
+    `<script setup>
+import { computed } from 'vue'
+import { useSeo } from 'vue-ssr-lite'
+useSeo(computed(() => ({ description: 'Packed reactive home' })))
+</script>
+<template><section id="home-page">packed-home</section></template>
+`,
     'utf8'
   )
   await writeFile(
@@ -144,7 +177,12 @@ export default defineConfig({
   )
   await writeFile(
     join(sourceRoot, 'NotFound.vue'),
-    '<template><section id="not-found-page">packed-not-found</section></template>\n',
+    `<script setup>
+import { useSeo } from 'vue-ssr-lite'
+useSeo({ status: 404 })
+</script>
+<template><section id="not-found-page">packed-not-found</section></template>
+`,
     'utf8'
   )
   await writeFile(
@@ -218,7 +256,7 @@ export default defineApplication({
     {
       path: '/:pathMatch(.*)*',
       component: NotFound,
-      meta: { forceLight: true, seo: { title: 'Not Found', status: 404 } },
+      meta: { forceLight: true, seo: { title: 'Not Found' } },
     },
   ],
   seo: { siteUrl: 'https://packed-smoke.test' },
@@ -335,7 +373,10 @@ const stopCli = async (state) => {
 const assertResponse = async (origin, path, status, markers) => {
   const response = await fetch(`${origin}${path}`)
   const html = await response.text()
-  assert(response.status === status, `${path} returned ${response.status}, expected ${status}.`)
+  assert(
+    response.status === status,
+    `${path} returned ${response.status}, expected ${status}. Body: ${html.slice(0, 1000)}`
+  )
   for (const marker of markers) {
     assert(html.includes(marker), `${path} did not contain ${marker}.`)
   }
@@ -441,7 +482,7 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       'route.meta did not update after client navigation.'
     )
     assert(
-      dom.window.document.title === 'About',
+      dom.window.document.title === 'About | Packed Tenant',
       'managed SEO state did not update after client navigation.'
     )
     assertWarningFree(warnings.join('\n'), 'production hydration/navigation')
@@ -614,6 +655,13 @@ const main = async () => {
       cwd: consumerRoot,
       env: { ...process.env, PUBLIC_URL: 'https://packed-smoke.test' },
     })
+    const builtClient = await readMjsTree(join(consumerRoot, 'dist', 'client'))
+    assert(
+      !builtClient.includes('packed-site-seo-v1') &&
+        !builtClient.includes('packed-robots-v1') &&
+        !builtClient.includes('Packed tenant defaults for'),
+      'server-only siteSeo/siteRobots resolver data leaked into the client bundle.'
+    )
 
     const productionPort = await reservePort()
     const production = await startCli(consumerRoot, 'start', productionPort)
@@ -640,10 +688,14 @@ const main = async () => {
       const lazyCss = [...lazyHtml.matchAll(/href=["']([^"']+\.css)["']/g)]
       assert(homeCss.length >= 1, 'production HTML lacks entry CSS.')
       assert(lazyCss.length > homeCss.length, 'production lazy route lacks request-specific CSS.')
-      await assertResponse(origin, '/sitemap.xml', 200, [
-        '<loc>https://packed-smoke.test/</loc>',
-        '<loc>https://packed-smoke.test/about</loc>',
-      ])
+      try {
+        await assertResponse(origin, '/sitemap.xml', 200, [
+          '<loc>https://packed-smoke.test/</loc>',
+          '<loc>https://packed-smoke.test/about</loc>',
+        ])
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : error}\n${production.output()}`)
+      }
       await assertResponse(origin, '/robots.txt', 200, [
         'Sitemap: https://packed-smoke.test/sitemap.xml',
       ])
