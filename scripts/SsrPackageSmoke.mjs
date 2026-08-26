@@ -9,6 +9,7 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -111,6 +112,7 @@ export default defineSsrConfig({
 const writeFixture = async (consumerRoot) => {
   const sourceRoot = join(consumerRoot, 'src')
   await mkdir(sourceRoot, { recursive: true })
+  await mkdir(join(consumerRoot, 'public'), { recursive: true })
   await writeFile(
     join(consumerRoot, 'index.html'),
     '<!doctype html><html><head></head><body><div id="app"></div></body></html>\n',
@@ -122,7 +124,10 @@ const writeFixture = async (consumerRoot) => {
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 
-export default defineConfig({ plugins: [vue(), vueSsrLite()] })
+export default defineConfig({
+  plugins: [vue(), vueSsrLite()],
+  build: { assetsInlineLimit: 0 },
+})
 `,
     'utf8'
   )
@@ -147,7 +152,21 @@ export default defineConfig({ plugins: [vue(), vueSsrLite()] })
     '<template><section id="lazy-page">packed-lazy</section></template><style>#lazy-page{color:rgb(4,5,6)}</style>\n',
     'utf8'
   )
-  await writeFile(join(sourceRoot, 'style.css'), '#routed-app{color:rgb(1,2,3)}\n', 'utf8')
+  await writeFile(
+    join(sourceRoot, 'style.css'),
+    "#routed-app{color:rgb(1,2,3);background-image:url('./logo.svg')}\n",
+    'utf8'
+  )
+  await writeFile(
+    join(sourceRoot, 'logo.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#123456" /></svg>\n',
+    'utf8'
+  )
+  await writeFile(
+    join(consumerRoot, 'public', 'application-production1.css'),
+    '#public-asset{color:rgb(7,8,9)}\n',
+    'utf8'
+  )
   await writeFile(
     join(sourceRoot, 'App.vue'),
     `<script setup>
@@ -240,9 +259,9 @@ const waitForServer = async (origin, processState) => {
   throw new Error(`server readiness timed out\n${processState.output()}`)
 }
 
-const startCli = async (consumerRoot, command, port) => {
+const startCli = async (consumerRoot, command, port, runtimeRoot = consumerRoot) => {
   const cli = join(consumerRoot, 'node_modules/vue-ssr-lite/dist/cli.mjs')
-  const child = spawn(process.execPath, [cli, command, '--root', consumerRoot], {
+  const child = spawn(process.execPath, [cli, command, '--root', runtimeRoot], {
     cwd: consumerRoot,
     env: {
       ...process.env,
@@ -610,6 +629,13 @@ const main = async () => {
         'id="lazy-page">packed-lazy',
         'id="public-config-path">/lazy',
       ])
+      const productionManifest = await readJson(
+        join(consumerRoot, 'dist', 'client', '.vite', 'manifest.json')
+      )
+      const importedAsset = Object.values(productionManifest)
+        .flatMap((entry) => entry.assets || [])
+        .find((asset) => asset.endsWith('.svg'))
+      assert(importedAsset, 'production manifest did not contain the imported SVG asset.')
       const homeCss = [...homeHtml.matchAll(/href=["']([^"']+\.css)["']/g)]
       const lazyCss = [...lazyHtml.matchAll(/href=["']([^"']+\.css)["']/g)]
       assert(homeCss.length >= 1, 'production HTML lacks entry CSS.')
@@ -632,6 +658,10 @@ const main = async () => {
       const publicCssPath = homeCss[0][1]
       const publicCss = await fetch(`${origin}${publicCssPath}`)
       assert(publicCss.status === 200, 'production public CSS did not remain available.')
+      assert(
+        publicCss.headers.get('cache-control') === 'public, max-age=31536000, immutable',
+        'production revisioned entry CSS did not receive immutable caching.'
+      )
       const publicCssEtag = publicCss.headers.get('etag')
       assert(publicCssEtag, 'production public CSS did not include an ETag.')
       await publicCss.arrayBuffer()
@@ -641,10 +671,184 @@ const main = async () => {
         headers: { 'if-none-match': publicCssEtag },
       })
       assert(publicCssNotModified.status === 304, 'production public CSS ETag request failed.')
+      for (const [, lazyCssPath] of lazyCss) {
+        const lazyCssResponse = await fetch(`${origin}${lazyCssPath}`)
+        assert(
+          lazyCssResponse.status === 200,
+          'production revisioned lazy CSS did not remain available.'
+        )
+        assert(
+          lazyCssResponse.headers.get('cache-control') ===
+            'public, max-age=31536000, immutable',
+          'production revisioned lazy CSS did not receive immutable caching.'
+        )
+        await lazyCssResponse.arrayBuffer()
+      }
+      const importedAssetResponse = await fetch(`${origin}/${importedAsset}`)
+      assert(importedAssetResponse.status === 200, 'production imported SVG did not remain available.')
+      assert(
+        importedAssetResponse.headers.get('cache-control') ===
+          'public, max-age=31536000, immutable',
+        'production revisioned imported SVG did not receive immutable caching.'
+      )
+      await importedAssetResponse.arrayBuffer()
+      const mutablePublicCss = await fetch(`${origin}/application-production1.css`)
+      assert(mutablePublicCss.status === 200, 'production public CSS fixture did not remain available.')
+      assert(
+        mutablePublicCss.headers.get('cache-control') === 'public, max-age=3600',
+        'mutable public CSS unexpectedly received immutable caching.'
+      )
+      await mutablePublicCss.arrayBuffer()
       await assertProductionHydration(consumerRoot, homeHtml, origin)
       assertWarningFree(production.output(), 'production SSR')
     } finally {
       await stopCli(production)
+    }
+
+    await writeFile(
+      join(consumerRoot, 'vite.config.mjs'),
+      `import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { vueSsrLite } from 'vue-ssr-lite/vite'
+
+export default defineConfig({
+  plugins: [vue(), vueSsrLite()],
+  build: {
+    assetsInlineLimit: 0,
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
+  },
+})
+`,
+      'utf8'
+    )
+    await execFile(process.execPath, [cli, 'build', '--root', consumerRoot], {
+      cwd: consumerRoot,
+      env: { ...process.env, PUBLIC_URL: 'https://packed-smoke.test' },
+    })
+    const stableManifest = await readJson(
+      join(consumerRoot, 'dist', 'client', '.vite', 'manifest.json')
+    )
+    const stableEntry = Object.values(stableManifest).find(
+      (entry) => entry.isEntry && entry.file?.endsWith('.js')
+    )?.file
+    const stableCss = Object.values(stableManifest)
+      .flatMap((entry) => entry.css || [])
+      .find((asset) => asset.endsWith('.css'))
+    const stableImportedAsset = Object.values(stableManifest)
+      .flatMap((entry) => entry.assets || [])
+      .find((asset) => asset.endsWith('.svg'))
+    assert(stableEntry, 'stable-output manifest did not contain the entry JavaScript.')
+    assert(stableCss, 'stable-output manifest did not contain extracted CSS.')
+    assert(stableImportedAsset, 'stable-output manifest did not contain the imported SVG asset.')
+
+    const stablePort = await reservePort()
+    const stableProduction = await startCli(consumerRoot, 'start', stablePort)
+    try {
+      const stableOrigin = `http://127.0.0.1:${stablePort}`
+      for (const asset of [stableEntry, stableCss, stableImportedAsset]) {
+        const response = await fetch(`${stableOrigin}/${asset}`)
+        assert(response.status === 200, `stable Vite asset ${asset} did not remain available.`)
+        assert(
+          response.headers.get('cache-control') === 'public, max-age=3600',
+          `stable Vite asset ${asset} unexpectedly received immutable caching.`
+        )
+        await response.arrayBuffer()
+      }
+      assertWarningFree(stableProduction.output(), 'stable-output production SSR')
+    } finally {
+      await stopCli(stableProduction)
+    }
+
+    await writeFile(
+      join(consumerRoot, 'vite.config.mjs'),
+      `import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { vueSsrLite } from 'vue-ssr-lite/vite'
+
+const explicitAssets = [
+  {
+    fileName: 'assets/manual-stable.css',
+    name: 'manual-stable.css',
+    originalFileName: 'src/manual-stable.css',
+    source: 'body { color: red }',
+  },
+  {
+    fileName: 'assets/manual-ABCDEF12.svg',
+    name: 'manual.svg',
+    originalFileName: 'src/manual.svg',
+    source: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>',
+  },
+]
+
+const explicitAssetPlugin = () => {
+  let references = []
+  return {
+    name: 'packed-explicit-output-assets',
+    enforce: 'pre',
+    buildStart() {
+      references = explicitAssets.map((asset) => this.emitFile({ type: 'asset', ...asset }))
+    },
+    transform(code, id) {
+      if (!id.endsWith('/src/main.ts')) return
+      return code + '\\nglobalThis.__explicitAssetUrls = ['
+        + references.map((reference) => 'import.meta.ROLLUP_FILE_URL_' + reference).join(', ')
+        + ']'
+    },
+    generateBundle(_options, bundle) {
+      const entry = Object.values(bundle).find((output) => output.type === 'chunk' && output.isEntry)
+      if (!entry?.viteMetadata) throw new Error('Missing Vite entry asset metadata.')
+      for (const { fileName } of explicitAssets) entry.viteMetadata.importedAssets.add(fileName)
+    },
+  }
+}
+
+export default defineConfig({
+  plugins: [explicitAssetPlugin(), vue(), vueSsrLite()],
+  build: { assetsInlineLimit: 0 },
+})
+`,
+      'utf8'
+    )
+    await execFile(process.execPath, [cli, 'build', '--root', consumerRoot], {
+      cwd: consumerRoot,
+      env: { ...process.env, PUBLIC_URL: 'https://packed-smoke.test' },
+    })
+    const explicitAssetNames = [
+      'assets/manual-stable.css',
+      'assets/manual-ABCDEF12.svg',
+    ]
+    const explicitManifest = await readJson(
+      join(consumerRoot, 'dist', 'client', '.vite', 'manifest.json')
+    )
+    const explicitManifestAssets = new Set(
+      Object.values(explicitManifest).flatMap((entry) => entry.assets || [])
+    )
+    for (const asset of explicitAssetNames) {
+      assert(explicitManifestAssets.has(asset), `explicit Vite asset ${asset} was not manifest-owned.`)
+    }
+
+    const explicitPort = await reservePort()
+    const explicitProduction = await startCli(consumerRoot, 'start', explicitPort)
+    try {
+      const explicitOrigin = `http://127.0.0.1:${explicitPort}`
+      for (const asset of explicitAssetNames) {
+        const response = await fetch(`${explicitOrigin}/${asset}`)
+        assert(response.status === 200, `explicit Vite asset ${asset} did not remain available.`)
+        assert(
+          response.headers.get('cache-control') === 'public, max-age=3600',
+          `explicit Vite asset ${asset} unexpectedly received immutable caching.`
+        )
+        await response.arrayBuffer()
+      }
+      assertWarningFree(explicitProduction.output(), 'explicit-output production SSR')
+    } finally {
+      await stopCli(explicitProduction)
     }
 
     await writeFile(
@@ -657,16 +861,28 @@ export default defineSsrConfig({
 `,
       'utf8'
     )
+    await writeFile(
+      join(consumerRoot, 'vite.config.mjs'),
+      `import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { vueSsrLite } from 'vue-ssr-lite/vite'
+
+export default defineConfig({ base: '/app/', plugins: [vue(), vueSsrLite()] })
+`,
+      'utf8'
+    )
+    const customBaseAlias = join(temporaryRoot, 'consumer-custom-base-alias')
+    await symlink(consumerRoot, customBaseAlias, 'dir')
     for (let run = 1; run <= 10; run += 1) {
       const port = await reservePort()
-      const spaDev = await startCli(consumerRoot, 'dev', port)
+      const spaDev = await startCli(consumerRoot, 'dev', port, customBaseAlias)
       try {
-        await assertResponse(`http://127.0.0.1:${port}`, '/', 200, [
+        await assertResponse(`http://127.0.0.1:${port}`, '/app/', 200, [
           'vue-ssr-lite-domain',
         ])
       } finally {
         const shutdownMs = await stopCli(spaDev)
-        console.log(`[vue-ssr-lite] SPA shutdown run ${run}: ${shutdownMs}ms`)
+        console.log(`[vue-ssr-lite] custom-base SPA shutdown run ${run}: ${shutdownMs}ms`)
       }
     }
   } finally {
