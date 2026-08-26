@@ -95,6 +95,34 @@ describe('SSR response cache controls', () => {
     expect(parts[7]).toBe('publication:v3')
   })
 
+  it('automatically varies by authoritative site origin and validated site SEO snapshot', async () => {
+    const strategy = { store: createSsrMemoryResponseCache(), ttlMs: 1_000 }
+    const base = request('platform.test')
+    const tenantA = await resolveSsrResponseCacheKey('storefront', {
+      ...base,
+      siteOrigin: 'https://a.example',
+      siteSeo: { title: 'Tenant A' },
+    }, strategy)
+    const tenantB = await resolveSsrResponseCacheKey('storefront', {
+      ...base,
+      siteOrigin: 'https://b.example',
+      siteSeo: { title: 'Tenant B' },
+    }, strategy)
+    const changedA = await resolveSsrResponseCacheKey('storefront', {
+      ...base,
+      siteOrigin: 'https://a.example',
+      siteSeo: { title: 'Tenant A v2' },
+    }, strategy)
+    const stableA = await resolveSsrResponseCacheKey('storefront', {
+      ...base,
+      siteOrigin: 'https://a.example',
+      siteSeo: { title: 'Tenant A' },
+    }, strategy)
+    expect(tenantA).not.toBe(tenantB)
+    expect(tenantA).not.toBe(changedA)
+    expect(stableA).toBe(tenantA)
+  })
+
   it.each([
     ['cookie', 'session=private'],
     ['Cookie', 'session=private'],
