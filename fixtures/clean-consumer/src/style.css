@@ -2,6 +2,10 @@ html {
   background: rgb(1 2 3);
 }
 
+.clean-app {
+  background-image: url('./logo.svg');
+}
+
 body {
   margin: 0;
 }
