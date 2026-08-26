@@ -11,19 +11,47 @@ export type {
   JsonObject,
   JsonPrimitive,
   JsonValue,
+  RobotsConfig,
+  RobotsGroup,
+  RobotsGroupsConfig,
+  RobotsLegacyConfig,
   SeoApplicationConfig,
+  SeoEndpointContext,
+  SeoEndpointResultMeta,
+  SeoImageInput,
+  SeoImageValue,
   SeoInput,
   SeoLinkEntry,
+  SeoMediaInput,
+  SeoMediaValue,
   SeoMetaEntry,
+  SeoOpenGraphDefaults,
+  SeoOpenGraphInput,
+  SeoPageInput,
+  SeoProviderMeta,
   SeoResolvable,
+  SeoRobotsInput,
   SeoRouteInput,
+  SeoServerContext,
+  SeoSiteDefaults,
+  SeoTwitterInput,
+  SiteRobotsConfig,
+  SiteRobotsContext,
+  SiteRobotsResolution,
+  SiteRobotsResolver,
+  SiteSeoConfig,
+  SiteSeoContext,
+  SiteSeoResolution,
+  SiteSeoResolver,
   UseSeoInput,
+  UseSeoSource,
 } from './extensions/seo/types'
 export { useSeo } from './extensions/seo/useSeo'
 export { usePublicConfig } from './SsrPublicConfig'
 /** Authoritative public origin for application-owned absolute URLs. */
 export { useSiteOrigin } from './SsrRequestContext'
-export { setResponseStatus } from './SsrResponseStatus'
+export { setResponseRedirect, setResponseStatus } from './SsrResponseStatus'
+export type { SsrResponseRedirectOptions } from './SsrResponseStatus'
 export type { SsrApplicationDefinition } from './SsrRuntimeTypes'
 
 /** Define the universal Vue application used by server and browser runtimes. */
