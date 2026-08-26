@@ -15,7 +15,9 @@ export interface ExtensionRuntimeOptions {
   production: boolean
   getRoute: () => RouteLocationNormalizedLoaded | null
   getSiteOrigin: () => string
+  getPathname?: () => string
   getResponseStatus: () => number
+  getRedirected?: () => boolean
   managedHead: ManagedHeadController
 }
 
@@ -70,6 +72,7 @@ export interface ExtensionRuntime {
   readonly disposed: boolean
   getState<TState = unknown>(name: string): TState | undefined
   has(name: string): boolean
+  getRoute(): RouteLocationNormalizedLoaded | null
   setup(): void
   dispose(): void
 }
@@ -101,8 +104,14 @@ export const createExtensionRuntime = (
     get siteOrigin() {
       return options.getSiteOrigin()
     },
+    get pathname() {
+      return options.getPathname?.() ?? '/'
+    },
     get responseStatus() {
       return options.getResponseStatus()
+    },
+    get redirected() {
+      return options.getRedirected?.() ?? false
     },
     contributeHead(contribution) {
       options.managedHead.contribute(definition.name, contribution)
@@ -121,6 +130,9 @@ export const createExtensionRuntime = (
     },
     has(name) {
       return active.some((entry) => entry.definition.name === name)
+    },
+    getRoute() {
+      return options.getRoute()
     },
     setup() {
       for (const definition of extensions) {
