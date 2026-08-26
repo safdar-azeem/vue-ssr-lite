@@ -106,6 +106,32 @@ const decodeAssetPath = (
   return relativePath
 }
 
+const isPrivateBuildMetadataPath = (relativePath: string): boolean =>
+  relativePath.split('/', 1)[0].toLowerCase() === '.vite'
+
+/**
+ * Identify reserved production build metadata before normal document routing
+ * can treat an unresolved asset as an application navigation. This uses the
+ * same base/path decoding rules as the asset resolver, but intentionally only
+ * needs to classify the first path segment.
+ */
+export const isSsrPrivateProductionAssetPath = (
+  pathname: string,
+  viteBase?: string
+): boolean => {
+  const strippedPath = stripViteBase(pathname, viteBase).replace(/^\/+/, '')
+  const firstSegment = strippedPath.split('/', 1)[0]
+  if (!firstSegment) return false
+  try {
+    return (
+      decodeURIComponent(firstSegment).replace(/^\/+/, '').split('/', 1)[0].toLowerCase() ===
+      '.vite'
+    )
+  } catch {
+    return false
+  }
+}
+
 const normalizeManifestAssetPath = (value: string): string => {
   if (
     !value ||
@@ -249,6 +275,10 @@ export const resolveSsrProductionAsset = async (
     options.signal?.throwIfAborted()
     const relativePath = decodeAssetPath(options.pathname, options.viteBase)
     if (!relativePath) return null
+    // Vite manifests and vue-ssr-lite's build metadata are server inputs, not
+    // browser assets. Keep the complete reserved namespace out of generic
+    // static serving before any filesystem lookup or response metadata work.
+    if (isPrivateBuildMetadataPath(relativePath)) return null
 
     const canonicalRoot = await fileSystem.realpath(resolve(options.clientRoot))
     options.signal?.throwIfAborted()
