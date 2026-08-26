@@ -148,7 +148,7 @@ describe('SSR HTML runtime', () => {
 
   it('merges declared HTML attributes without dropping template attributes', () => {
     const template = prepareSsrHtmlTemplate(
-      '<html lang="en" data-shell="public"><head></head><body><div id="app"></div></body></html>'
+      '<html lang="de" data-shell="public"><head></head><body><div id="app"></div></body></html>'
     )
     const html = injectSsrHtml(template, {
       applicationId: 'public',
@@ -156,7 +156,7 @@ describe('SSR HTML runtime', () => {
       teleports: {},
       head: {
         tags: [],
-        htmlAttributes: { lang: 'ur', dir: 'rtl' },
+        htmlAttributes: { lang: 'en', dir: 'ltr' },
       },
       state: {
         version: 1,
@@ -178,10 +178,10 @@ describe('SSR HTML runtime', () => {
       },
     })
 
-    expect(html).toContain('lang="ur"')
-    expect(html).toContain('dir="rtl"')
+    expect(html).toContain('lang="en"')
+    expect(html).toContain('dir="ltr"')
     expect(html).toContain('data-shell="public"')
-    expect(html).not.toContain('lang="en"')
+    expect(html).not.toContain('lang="de"')
   })
 
   it('injects every Vue Teleport target into its dedicated container', () => {
