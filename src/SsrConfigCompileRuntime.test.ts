@@ -25,10 +25,14 @@ describe('defineSsrConfig application domains', () => {
   })
 
   it('applies flat single-app overrides without repeating defaults', () => {
+    const siteSeo = { resolve: async () => ({ status: 'resolved' as const, defaults: { title: 'Tenant' } }) }
+    const siteRobots = { resolve: async () => ({ status: 'resolved' as const, config: {} }) }
     const normalized = normalizeSsrConfig({
       app: './src/platform/main.ts',
       mount: '#website',
       server: { trustProxy: true },
+      siteSeo,
+      siteRobots,
     })
     expect(normalized.applications.app).toMatchObject({
       application: { module: './src/platform/main.ts' },
@@ -37,6 +41,8 @@ describe('defineSsrConfig application domains', () => {
       render: 'ssr',
     })
     expect(normalized.server?.trustProxy).toBe(true)
+    expect(normalized.applications.app.siteSeo).toBe(siteSeo)
+    expect(normalized.applications.app.siteRobots).toBe(siteRobots)
   })
 
   it('uses application keys as ids and requires routing for multiple apps', () => {
@@ -119,6 +125,12 @@ describe('defineSsrConfig application domains', () => {
         },
       })
     ).toThrow(/single-application field `app` with applications/)
+    expect(() => normalizeSsrConfig({
+      siteSeo: { resolve: async () => ({ status: 'not-found' as const }) },
+      applications: {
+        website: { app: './src/website/main.ts', host: 'example.com' },
+      },
+    } as any)).toThrow(/single-application field `siteSeo` with applications/)
   })
 
   it('compiles app-centric domains and resolves context params', async () => {
