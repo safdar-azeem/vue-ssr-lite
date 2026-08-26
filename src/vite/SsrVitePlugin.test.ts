@@ -488,11 +488,23 @@ export default {
       css?: string[]
       isDynamicEntry?: boolean
     }>
+    const immutable = JSON.parse(
+      await readFile(join(outDir, '.vite', 'vue-ssr-lite-assets.json'), 'utf8')
+    ) as { version: number; immutable: string[] }
+    expect(immutable.version).toBe(1)
+    const entryCss = Object.values(manifest)
+      .flatMap((entry) => entry.css ?? [])
+      .find((file) => file.includes('website-'))
+    expect(entryCss).toBeDefined()
+    expect(immutable.immutable).toContain(entryCss)
     const lazyEntry = Object.entries(manifest).find(([id]) =>
       id.endsWith('/src/website/LazyPage.ts') || id === 'src/website/LazyPage.ts'
     )?.[1]
     expect(lazyEntry?.isDynamicEntry).toBe(true)
     expect(lazyEntry?.css?.some((file) => file.endsWith('.css'))).toBe(true)
+    for (const lazyCss of lazyEntry?.css ?? []) {
+      expect(immutable.immutable).toContain(lazyCss)
+    }
     for (const lazyCss of lazyEntry?.css ?? []) {
       expect(builtWebsite).not.toContain(lazyCss)
     }
