@@ -15,6 +15,11 @@ describe('canonical origin and path', () => {
     expect(normalizeSiteOrigin('https://ex.com/p?q=1#h')).toBe('https://ex.com')
   })
 
+  it('rejects credentials and control characters in authoritative origins', () => {
+    expect(() => normalizeSiteOrigin('https://user:pass@example.com')).toThrow(/credentials/)
+    expect(() => normalizeSiteOrigin('https://example.com\n.evil.test')).toThrow(/control/)
+  })
+
   it('strips query and hash from canonical paths', () => {
     expect(normalizeCanonicalPath('/about?utm=1#team')).toBe('/about')
     expect(normalizeCanonicalPath('/about/', false)).toBe('/about')
