@@ -142,7 +142,7 @@ export const serializeManagedHeadTag = (tag: ManagedHeadTag): string => {
     return `<title ${marked}>${escapeSsrHtml(tag.textContent)}</title>`
   }
   const attributes = Object.entries(tag.attrs)
-    .filter(([, value]) => value != null && value !== '')
+    .filter(([, value]) => value != null)
     .map(([name, value]) => `${name}="${escapeSsrHtml(value)}"`)
     .join(' ')
   if (tag.tag === 'script') {
@@ -208,10 +208,12 @@ const createHeadElement = (
   return element
 }
 
+const defaultOwnedHtmlAttributes = new WeakMap<Element, Set<string>>()
+
 export const reconcileManagedHead = (
   documentHead: HTMLElement,
   snapshot: ManagedHeadSnapshot,
-  options: { hydrate?: boolean } = {}
+  options: { hydrate?: boolean; ownedHtmlAttributes?: Set<string> } = {}
 ) => {
   const documentRef = documentHead.ownerDocument
   const existing = new Map<string, Element>()
@@ -246,6 +248,33 @@ export const reconcileManagedHead = (
   if (title != null && documentRef.title !== title) {
     documentRef.title = title
   }
+
+  const documentElement = documentRef.documentElement
+  let ownedHtmlAttributes = options.ownedHtmlAttributes
+  if (!ownedHtmlAttributes) {
+    ownedHtmlAttributes = defaultOwnedHtmlAttributes.get(documentElement)
+    if (!ownedHtmlAttributes) {
+      ownedHtmlAttributes = new Set<string>()
+      defaultOwnedHtmlAttributes.set(documentElement, ownedHtmlAttributes)
+    }
+  }
+  const nextOwnedHtmlAttributes = new Set<string>()
+  for (const [rawName, value] of Object.entries(snapshot.htmlAttributes ?? {})) {
+    const name = rawName.toLowerCase()
+    if (value == null) {
+      if (ownedHtmlAttributes.has(name)) documentElement.removeAttribute(name)
+      continue
+    }
+    if (documentElement.getAttribute(name) !== value) {
+      documentElement.setAttribute(name, value)
+    }
+    nextOwnedHtmlAttributes.add(name)
+  }
+  for (const name of ownedHtmlAttributes) {
+    if (!nextOwnedHtmlAttributes.has(name)) documentElement.removeAttribute(name)
+  }
+  ownedHtmlAttributes.clear()
+  for (const name of nextOwnedHtmlAttributes) ownedHtmlAttributes.add(name)
 
   void options.hydrate
 }
@@ -294,13 +323,17 @@ export const createManagedHeadController = (
   let scheduled = false
   let disposed = false
   let hydrated = false
+  const ownedHtmlAttributes = new Set<string>()
 
   const snapshot = () => collectManagedHeadSnapshot(sources)
 
   const flush = () => {
     scheduled = false
     if (disposed || server || typeof document === 'undefined') return
-    reconcileManagedHead(document.head, snapshot(), { hydrate: hydrated })
+    reconcileManagedHead(document.head, snapshot(), {
+      hydrate: hydrated,
+      ownedHtmlAttributes,
+    })
   }
 
   return {
@@ -321,7 +354,10 @@ export const createManagedHeadController = (
     hydrate(documentHead) {
       if (server || disposed) return
       hydrated = true
-      reconcileManagedHead(documentHead, snapshot(), { hydrate: true })
+      reconcileManagedHead(documentHead, snapshot(), {
+        hydrate: true,
+        ownedHtmlAttributes,
+      })
     },
     dispose() {
       disposed = true
