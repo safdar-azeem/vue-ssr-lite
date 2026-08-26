@@ -12,6 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -227,7 +228,10 @@ const waitForServer = async (origin, processState) => {
     }
     try {
       const response = await fetch(origin)
-      if (response.status > 0) return
+      if (response.status > 0) {
+        await response.arrayBuffer()
+        return
+      }
     } catch {
       // The socket is not listening yet.
     }
@@ -250,28 +254,63 @@ const startCli = async (consumerRoot, command, port) => {
   })
   let stdout = ''
   let stderr = ''
-  const state = { child, exited: false, output: () => `${stdout}\n${stderr}` }
+  let resolveExit
+  const exit = new Promise((resolveChildExit) => {
+    resolveExit = resolveChildExit
+  })
+  const state = {
+    child,
+    exit,
+    exited: false,
+    code: null,
+    signal: null,
+    output: () => `${stdout}\n${stderr}`,
+  }
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (chunk) => (stdout += chunk))
   child.stderr.on('data', (chunk) => (stderr += chunk))
-  child.once('exit', () => (state.exited = true))
+  child.once('exit', (code, signal) => {
+    state.exited = true
+    state.code = code
+    state.signal = signal
+    resolveExit()
+  })
   await waitForServer(`http://127.0.0.1:${port}/`, state)
   return state
 }
 
 const stopCli = async (state) => {
-  if (state.exited) return
-  state.child.kill('SIGTERM')
-  await Promise.race([
-    new Promise((resolveExit) => state.child.once('exit', resolveExit)),
-    new Promise((resolveTimeout) =>
-      setTimeout(() => {
-        if (!state.exited) state.child.kill('SIGKILL')
-        resolveTimeout()
-      }, 5_000)
-    ),
-  ])
+  const shutdownStartedAt = Date.now()
+  let forced = false
+  if (!state.exited) {
+    state.child.kill('SIGTERM')
+    let forcedTimer
+    try {
+      await Promise.race([
+        state.exit,
+        new Promise((resolveTimeout) => {
+          forcedTimer = setTimeout(() => {
+            if (!state.exited) {
+              forced = true
+              state.child.kill('SIGKILL')
+            }
+            resolveTimeout()
+          }, 5_000)
+        }),
+      ])
+    } finally {
+      if (forcedTimer) clearTimeout(forcedTimer)
+    }
+  }
+  assert(!forced, `server required SIGKILL during shutdown\n${state.output()}`)
+  assert(state.exited, `server did not exit after SIGTERM\n${state.output()}`)
+  assert(state.code === 0, `server exited with code ${state.code}\n${state.output()}`)
+  assert(
+    !state.output().includes('SSR server graceful shutdown timed out.'),
+    `server reached its graceful shutdown timeout\n${state.output()}`
+  )
+  return Date.now() - shutdownStartedAt
 }
 
 const assertResponse = async (origin, path, status, markers) => {
@@ -414,7 +453,9 @@ const main = async () => {
     'the built server entry must not reference the obsolete renderer package.'
   )
 
-  const temporaryRoot = await mkdtemp(join(repositoryRoot, '.package-smoke-'))
+  const temporaryRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'vue-ssr-lite-package-smoke-'))
+  )
   try {
     const packed = await execFile(
       'npm',
@@ -491,6 +532,26 @@ const main = async () => {
     const dev = await startCli(consumerRoot, 'dev', devPort)
     try {
       const origin = `http://127.0.0.1:${devPort}`
+      const coldConcurrent = await Promise.all(
+        ['/', '/', '/lazy'].map((path) => fetch(`${origin}${path}`))
+      )
+      const coldConcurrentBodies = await Promise.all(
+        coldConcurrent.map(async (response, index) => {
+          assert(
+            response.status === 200,
+            `cold concurrent request ${index + 1} returned ${response.status}.`
+          )
+          return response.text()
+        })
+      )
+      assert(
+        coldConcurrentBodies[0].includes('id="home-page">packed-home'),
+        'cold concurrent root request did not render the home route.'
+      )
+      assert(
+        coldConcurrentBodies[2].includes('id="lazy-page">packed-lazy'),
+        'cold concurrent lazy request did not render the lazy route.'
+      )
       const home = await assertResponse(origin, '/', 200, [
         'id="routed-app"',
         'data-route="/"',
@@ -560,10 +621,53 @@ const main = async () => {
       await assertResponse(origin, '/robots.txt', 200, [
         'Sitemap: https://packed-smoke.test/sitemap.xml',
       ])
+      for (const privatePath of [
+        '/.vite/manifest.json',
+        '/.vite/ssr-manifest.json',
+        '/.vite/vue-ssr-lite-assets.json',
+        '/.%76ite/manifest.json',
+      ]) {
+        await assertResponse(origin, privatePath, 404, [])
+      }
+      const publicCssPath = homeCss[0][1]
+      const publicCss = await fetch(`${origin}${publicCssPath}`)
+      assert(publicCss.status === 200, 'production public CSS did not remain available.')
+      const publicCssEtag = publicCss.headers.get('etag')
+      assert(publicCssEtag, 'production public CSS did not include an ETag.')
+      await publicCss.arrayBuffer()
+      const publicCssHead = await fetch(`${origin}${publicCssPath}`, { method: 'HEAD' })
+      assert(publicCssHead.status === 200, 'production public CSS HEAD request failed.')
+      const publicCssNotModified = await fetch(`${origin}${publicCssPath}`, {
+        headers: { 'if-none-match': publicCssEtag },
+      })
+      assert(publicCssNotModified.status === 304, 'production public CSS ETag request failed.')
       await assertProductionHydration(consumerRoot, homeHtml, origin)
       assertWarningFree(production.output(), 'production SSR')
     } finally {
       await stopCli(production)
+    }
+
+    await writeFile(
+      join(consumerRoot, 'ssr.config.mjs'),
+      `import { defineSsrConfig } from 'vue-ssr-lite/server'
+export default defineSsrConfig({
+  server: { port: Number(process.env.SMOKE_PORT) },
+  render: 'spa',
+})
+`,
+      'utf8'
+    )
+    for (let run = 1; run <= 10; run += 1) {
+      const port = await reservePort()
+      const spaDev = await startCli(consumerRoot, 'dev', port)
+      try {
+        await assertResponse(`http://127.0.0.1:${port}`, '/', 200, [
+          'vue-ssr-lite-domain',
+        ])
+      } finally {
+        const shutdownMs = await stopCli(spaDev)
+        console.log(`[vue-ssr-lite] SPA shutdown run ${run}: ${shutdownMs}ms`)
+      }
     }
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true })
