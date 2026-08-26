@@ -9,6 +9,9 @@ import { createTestDomain } from './SsrTestFixtures'
 
 describe('client head hydration', () => {
   it('adopts SSR-marked tags without duplicating them', async () => {
+    document.documentElement.setAttribute('lang', 'en')
+    document.documentElement.setAttribute('dir', 'ltr')
+    document.documentElement.setAttribute('data-theme', 'dark')
     document.head.innerHTML = `
       <title data-vue-ssr-lite-head="title">About</title>
       <meta name="description" content="Learn" data-vue-ssr-lite-head="description">
@@ -37,7 +40,11 @@ describe('client head hydration', () => {
           path: '/',
           component: defineComponent({
             setup() {
-              useSeo({ title: 'About', description: 'Learn' })
+              useSeo({
+                title: 'About',
+                description: 'Learn',
+                htmlAttributes: { lang: 'en', dir: 'ltr' },
+              })
               return () => h('main', 'About')
             },
           }),
@@ -52,5 +59,11 @@ describe('client head hydration', () => {
       '/favicon.ico'
     )
     expect(document.title).toBe('About')
+    expect(document.documentElement.getAttribute('lang')).toBe('en')
+    expect(document.documentElement.getAttribute('dir')).toBe('ltr')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    document.documentElement.removeAttribute('lang')
+    document.documentElement.removeAttribute('dir')
+    document.documentElement.removeAttribute('data-theme')
   })
 })
