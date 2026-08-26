@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ViteDevServer } from 'vite'
 import { defineComponent, h } from 'vue'
 import {
   serializeSsrProductionAssetMetadata,
@@ -76,6 +77,419 @@ const requestRawPathStatus = (port: number, path: string): Promise<number> =>
   })
 
 describe('managed SSR server lifecycle', () => {
+  it('completes idle development shutdown promptly and safely before listen', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 15_000 },
+          render: 'spa',
+        }),
+      }),
+    })
+
+    const beforeListen = managed.close()
+    expect(managed.close()).toBe(beforeListen)
+    await expect(beforeListen).resolves.toBeUndefined()
+
+    managed = undefined
+    const listeningServer = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 15_000 },
+          render: 'spa',
+        }),
+      }),
+    })
+    managed = listeningServer
+    await listeningServer.listen()
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await expect(
+        Promise.race([
+          listeningServer.close().then(() => 'closed'),
+          new Promise((resolveWait) => {
+            deadline = setTimeout(() => resolveWait('deadline'), 1_000)
+          }),
+        ])
+      ).resolves.toBe('closed')
+    } finally {
+      if (deadline) clearTimeout(deadline)
+    }
+  })
+
+  it('uses one close promise and waits for Vite-owned shutdown', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let resolveViteClose!: () => void
+    const viteClose = new Promise<void>((resolveClose) => {
+      resolveViteClose = resolveClose
+    })
+    let resolveOptimizer!: () => void
+    const optimizer = new Promise<void>((resolveWork) => {
+      resolveOptimizer = resolveWork
+    })
+    const closeVite = vi.fn(() => viteClose)
+    const vite = {
+      close: closeVite,
+      environments: {
+        client: {
+          depsOptimizer: {
+            scanProcessing: Promise.resolve(),
+            metadata: {
+              discovered: { vue: { processing: optimizer } },
+            },
+          },
+        },
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+      }),
+    })
+    await managed.listen()
+
+    const first = managed.close()
+    const second = managed.close()
+    let settled = false
+    void first.then(() => {
+      settled = true
+    })
+    expect(second).toBe(first)
+    await Promise.resolve()
+    expect(closeVite).not.toHaveBeenCalled()
+    resolveOptimizer()
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+    expect(closeVite).toHaveBeenCalledTimes(1)
+    expect(managed.nodeServer.listening).toBe(false)
+    expect(settled).toBe(false)
+
+    resolveViteClose()
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined])
+  })
+
+  it('waits for optimizer processing created while the dependency scan is pending', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let resolveScan!: () => void
+    const scan = new Promise<void>((resolveWork) => {
+      resolveScan = resolveWork
+    })
+    let resolveProcessing!: () => void
+    const processing = new Promise<void>((resolveWork) => {
+      resolveProcessing = resolveWork
+    })
+    const discovered: Record<string, { processing: Promise<void> }> = {}
+    const closeVite = vi.fn(async () => undefined)
+    const vite = {
+      close: closeVite,
+      environments: {
+        client: {
+          depsOptimizer: {
+            scanProcessing: scan,
+            metadata: { discovered },
+          },
+        },
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+      }),
+    })
+    await managed.listen()
+
+    const closing = managed.close()
+    await Promise.resolve()
+    expect(closeVite).not.toHaveBeenCalled()
+
+    // Model Vite discovering and starting an optimization batch as the scan
+    // reaches its completion boundary.
+    discovered.vue = { processing }
+    resolveScan()
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+    expect(closeVite).not.toHaveBeenCalled()
+
+    resolveProcessing()
+    await expect(closing).resolves.toBeUndefined()
+    expect(closeVite).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes Vite and the HTTP server when post-scan optimizer work rejects', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let resolveScan!: () => void
+    const scan = new Promise<void>((resolveWork) => {
+      resolveScan = resolveWork
+    })
+    const discovered: Record<string, { processing: Promise<void> }> = {}
+    let rejectOptimizer!: (error: Error) => void
+    const optimizer = new Promise<void>((_resolveOptimizer, rejectWork) => {
+      rejectOptimizer = rejectWork
+    })
+    const closeVite = vi.fn(async () => undefined)
+    const vite = {
+      close: closeVite,
+      environments: {
+        client: {
+          depsOptimizer: {
+            scanProcessing: scan,
+            metadata: { discovered },
+          },
+        },
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+      }),
+    })
+    await managed.listen()
+
+    const closing = managed.close()
+    const optimizerError = new Error('optimizer failed')
+    discovered.vue = { processing: optimizer }
+    resolveScan()
+    rejectOptimizer(optimizerError)
+
+    await expect(closing).rejects.toThrow('optimizer failed')
+    expect(closeVite).toHaveBeenCalledTimes(1)
+    expect(managed.nodeServer.listening).toBe(false)
+  })
+
+  it('attempts Vite cleanup when post-scan optimizer work is stuck at the shutdown deadline', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const optimizer = new Promise<never>(() => undefined)
+    const closeVite = vi.fn(async () => undefined)
+    const vite = {
+      close: closeVite,
+      environments: {
+        client: {
+          depsOptimizer: {
+            scanProcessing: Promise.resolve(),
+            metadata: {
+              discovered: { vue: { processing: optimizer } },
+            },
+          },
+        },
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 50 },
+          render: 'spa',
+        }),
+      }),
+    })
+    await managed.listen()
+
+    await expect(managed.close()).rejects.toThrow('SSR server graceful shutdown timed out.')
+    expect(closeVite).toHaveBeenCalledTimes(1)
+    expect(managed.nodeServer.listening).toBe(false)
+  })
+
+  it('attempts Vite cleanup when the dependency scan itself is stuck', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const scan = new Promise<never>(() => undefined)
+    const closeVite = vi.fn(async () => undefined)
+    const vite = {
+      close: closeVite,
+      environments: {
+        client: {
+          depsOptimizer: {
+            scanProcessing: scan,
+            metadata: { discovered: {} },
+          },
+        },
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 50 },
+          render: 'spa',
+        }),
+      }),
+    })
+    await managed.listen()
+
+    await expect(managed.close()).rejects.toThrow('SSR server graceful shutdown timed out.')
+    expect(closeVite).toHaveBeenCalledTimes(1)
+    expect(managed.nodeServer.listening).toBe(false)
+  })
+
+  it('lets active application work finish while shutdown drains the HTTP server', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    let requestStarted!: () => void
+    const started = new Promise<void>((resolveStarted) => {
+      requestStarted = resolveStarted
+    })
+    let releaseRequest!: () => void
+    const release = new Promise<void>((resolveRelease) => {
+      releaseRequest = resolveRelease
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 2_000 },
+          render: 'spa',
+          endpoints: [
+            {
+              id: 'slow',
+              match: (request) => request.pathname === '/slow',
+              handle: async () => {
+                requestStarted()
+                await release
+                return { statusCode: 200, body: 'completed' }
+              },
+            },
+          ],
+        }),
+      }),
+    })
+    await managed.listen()
+    const responsePending = fetch(`http://127.0.0.1:${managed.address().port}/slow`)
+    await started
+    const closing = managed.close()
+    let closed = false
+    void closing.then(
+      () => {
+        closed = true
+      },
+      () => undefined
+    )
+    await Promise.resolve()
+    expect(closed).toBe(false)
+
+    releaseRequest()
+    const response = await responsePending
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('completed')
+    await expect(closing).resolves.toBeUndefined()
+  })
+
+  it('bounds a genuinely stuck Vite close with the configured timeout', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const vite = {
+      close: () => new Promise<never>(() => undefined),
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, shutdownTimeoutMs: 50 },
+          render: 'spa',
+        }),
+      }),
+    })
+    await managed.listen()
+
+    await expect(managed.close()).rejects.toThrow('SSR server graceful shutdown timed out.')
+  })
+
+  it('finishes request scope when Vite middleware owns the response', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const requestTimeoutMs = 12_345
+    const vite = {
+      close: vi.fn(async () => undefined),
+      middlewares: (
+        _request: import('node:http').IncomingMessage,
+        response: import('node:http').ServerResponse
+      ) => {
+        response.writeHead(200, { 'content-type': 'text/javascript' })
+        response.end('export default true')
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineSsrConfig({
+          server: { port: 0, requestTimeoutMs },
+          render: 'spa',
+        }),
+      }),
+    })
+    await managed.listen()
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+    try {
+      const response = await fetch(`http://127.0.0.1:${managed.address().port}/fixture.js`)
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('export default true')
+      await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+
+      const requestTimerIndex = setTimeoutSpy.mock.calls.findIndex(
+        (call) => call[1] === requestTimeoutMs
+      )
+      expect(requestTimerIndex).toBeGreaterThanOrEqual(0)
+      const requestTimer = setTimeoutSpy.mock.results[requestTimerIndex]?.value
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(requestTimer)
+    } finally {
+      setTimeoutSpy.mockRestore()
+      clearTimeoutSpy.mockRestore()
+    }
+  })
+
   it('does not open body files for HEAD, 304, pre-abort, or a deleted-file race', async () => {
     const asset: SsrResolvedProductionAsset = {
       filePath: '/temporary/asset.js',
@@ -496,6 +910,19 @@ describe('managed SSR server lifecycle', () => {
       expect(await response.text()).toContain('vue-ssr-lite-domain')
       expect(explicitTemplate.status).toBe(200)
       expect(await explicitTemplate.text()).toContain('vue-ssr-lite-domain')
+      const privateNavigation = await fetch(`http://127.0.0.1:${port}/.vite/manifest.json`, {
+        headers: { accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+      })
+      const privateHead = await fetch(`http://127.0.0.1:${port}/.vite/manifest.json`, {
+        method: 'HEAD',
+        headers: { accept: 'text/html' },
+      })
+      expect(privateNavigation.status).toBe(404)
+      expect(privateNavigation.headers.get('cache-control')).toBe('no-store')
+      expect(await privateNavigation.text()).not.toContain('<!doctype html>')
+      expect(privateHead.status).toBe(404)
+      expect(privateHead.headers.get('cache-control')).toBe('no-store')
+      expect((await privateHead.arrayBuffer()).byteLength).toBe(0)
     } finally {
       if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
       else process.env.PUBLIC_URL = previousPublicUrl
@@ -511,7 +938,12 @@ describe('managed SSR server lifecycle', () => {
       templatePath,
       '<!doctype html><html><head><meta name="template-version" content="original"></head><body><div id="app"></div></body></html>'
     )
+    await writeFile(join(clientRoot, '.vite', 'manifest.json'), '{}')
     await writeFile(join(clientRoot, '.vite', 'ssr-manifest.json'), '{}')
+    await writeFile(
+      join(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH),
+      serializeSsrProductionAssetMetadata([])
+    )
 
     let requestNumber = 0
     const Root = defineComponent({
@@ -559,6 +991,21 @@ describe('managed SSR server lifecycle', () => {
       '<!doctype html><html><head><meta name="template-version" content="changed"></head><body><div id="app"></div></body></html>'
     )
     const second = await navigate('b.test')
+    const privateMetadata = await Promise.all([
+      fetch(`${origin}/.vite/manifest.json`, {
+        headers: { accept: 'text/html' },
+      }),
+      fetch(`${origin}/.vite/ssr-manifest.json`, {
+        headers: { accept: 'text/html', 'sec-fetch-mode': 'navigate' },
+      }),
+      fetch(`${origin}/.vite/vue-ssr-lite-assets.json`, {
+        headers: { accept: 'text/html' },
+      }),
+      fetch(`${origin}/.vite/manifest.json`, {
+        method: 'HEAD',
+        headers: { accept: 'text/html' },
+      }),
+    ])
 
     expect(first).toContain('content="A:a.test"')
     expect(first).toContain('"marker":"A"')
@@ -570,6 +1017,17 @@ describe('managed SSR server lifecycle', () => {
     expect(second).not.toContain('A:a.test')
     expect(second).toContain('content="original"')
     expect(second).not.toContain('content="changed"')
+    expect(privateMetadata.map((response) => response.status)).toEqual([404, 404, 404, 404])
+    expect(privateMetadata.map((response) => response.headers.get('cache-control'))).toEqual([
+      'no-store',
+      'no-store',
+      'no-store',
+      'no-store',
+    ])
+    expect(await privateMetadata[0]!.text()).not.toContain('<!doctype html>')
+    expect(await privateMetadata[1]!.text()).not.toContain('<!doctype html>')
+    expect(await privateMetadata[2]!.text()).not.toContain('<!doctype html>')
+    expect((await privateMetadata[3]!.arrayBuffer()).byteLength).toBe(0)
   })
 
   it('keeps production SPA domain and public config injection request-local', async () => {
@@ -990,6 +1448,8 @@ describe('managed SSR server lifecycle', () => {
         },
       })
     )
+    await writeFile(join(clientRoot, '.vite', 'ssr-manifest.json'), '{}')
+    await writeFile(join(clientRoot, '.vite', 'other-private-file.json'), '{"private":true}')
     await writeFile(
       join(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH),
       serializeSsrProductionAssetMetadata(['assets/app-DG71SDF2.js', 'assets/nested/site.css'])
@@ -1077,6 +1537,30 @@ describe('managed SSR server lifecycle', () => {
     expect(directory.status).toBe(404)
     expect(post.status).toBe(404)
     expect(missing.status).toBe(404)
+    for (const [index, privatePath] of [
+      '/products/.vite/manifest.json',
+      '/products/.vite/ssr-manifest.json',
+      '/products/.vite/vue-ssr-lite-assets.json',
+      '/products/.vite/other-private-file.json',
+      '/products/%2evite/manifest.json',
+      '/products/.%76ite/ssr-manifest.json',
+      '/products/%2e%76ite%2fssr-manifest.json',
+    ].entries()) {
+      const privateResponse = await fetch(`${origin}${privatePath}`, {
+        method: index === 1 ? 'HEAD' : 'GET',
+        headers:
+          index === 0
+            ? { accept: 'text/html', 'sec-fetch-mode': 'navigate' }
+            : { accept: 'text/html' },
+      })
+      expect(privateResponse.status, privatePath).toBe(404)
+      expect(privateResponse.headers.get('cache-control'), privatePath).toBe('no-store')
+      if (index === 1) {
+        expect((await privateResponse.arrayBuffer()).byteLength).toBe(0)
+      } else {
+        expect(await privateResponse.text()).not.toContain('<!doctype html>')
+      }
+    }
     await expect(
       requestRawPathStatus(port, '/products/%2e%2e/assets/app-DG71SDF2.js')
     ).resolves.toBe(404)
