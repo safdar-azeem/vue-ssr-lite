@@ -33,5 +33,7 @@ export interface ExtensionContext<TState = unknown> {
 export interface InternalExtensionContext<TState = unknown>
   extends ExtensionContext<TState> {
   readonly siteOrigin: string
+  readonly pathname: string
   readonly responseStatus: number
+  readonly redirected: boolean
 }
