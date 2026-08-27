@@ -1,11 +1,5 @@
-import { defineApplication } from '../../../../src/index'
-import WebsiteShell from './WebsiteShell.vue'
-import WebsiteHome from './WebsiteHome.vue'
+import type { AppContext } from '../../../../src/index'
 
-export default defineApplication({
-  root: WebsiteShell,
-  routes: [
-    { path: '/', component: WebsiteHome },
-    { path: '/lazy', component: () => import('./WebsiteLazy.vue') },
-  ],
-})
+export default (_context: AppContext) => {
+  // Website plugins belong here.
+}
