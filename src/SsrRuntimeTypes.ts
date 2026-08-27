@@ -6,8 +6,9 @@ import type { Router, RouterHistory, RouteRecordRaw, RouterScrollBehavior } from
 import type { SsrHydrationContext, SsrHydrationController } from './SsrHydrationRuntime'
 import type { SsrRequestResolution, SsrResolutionController } from './SsrRequestResolution'
 
-export type SsrHeaderValue = string | string[] | undefined
-export type SsrHeaders = Record<string, SsrHeaderValue>
+export type SsrHeaderValue = string | readonly string[] | undefined
+/** Immutable transport facts captured at the request boundary. */
+export type SsrHeaders = Readonly<Record<string, SsrHeaderValue>>
 
 export type SsrPublicConfigHeaderValue =
   | string
@@ -224,7 +225,8 @@ export interface SsrHttpRequest<TPublicConfig = unknown> extends SsrRenderReques
 export interface SsrHttpResponse {
   statusCode: number
   body?: string | Uint8Array
-  headers?: Record<string, string>
+  /** Header values retain multiplicity for fields such as Set-Cookie. */
+  headers?: Record<string, string | string[]>
 }
 
 export interface SsrResponseCacheWriteOptions {
