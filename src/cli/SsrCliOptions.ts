@@ -8,7 +8,7 @@ export interface SsrCliOptions {
   command: SsrCliCommand
   root: string
   /**
-   * Absolute path to optional `ssr.config.*` overrides. Production `start`
+   * Absolute path to optional `server.ts`. Production `start`
    * loads the baked runtime and never reads source config.
    */
   config?: string
@@ -30,7 +30,7 @@ const assertProductionRuntimeExists = async (serverOutput: string) => {
     throw new Error(
       `vue-ssr-lite start could not find the production SSR runtime at ${serverOutput}. ` +
         'Run `vue-ssr-lite build` first. Production start loads the baked runtime ' +
-        'and does not require ssr.config.* in the working directory.'
+        'and does not require server.ts in the working directory.'
     )
   }
 }
@@ -38,7 +38,7 @@ const assertProductionRuntimeExists = async (serverOutput: string) => {
 /**
  * Parse CLI argv for `vue-ssr-lite <dev|build|start>`.
  *
- * - `dev` / `build` use conventions plus optional `ssr.config.*` overrides.
+ * - `dev` / `build` use conventions plus optional `server.ts`.
  * - `start` only requires the baked server bundle (`--server-output` or
  *   `dist/server/SsrRuntime.js`) so slim production images need not COPY
  *   source config.
@@ -49,7 +49,7 @@ export const parseSsrCliArguments = async (
   const command = args[0]
   if (!['dev', 'build', 'start'].includes(command)) {
     throw new Error(
-      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config ssr.config.ts] [--hmr-port 31001]'
+      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config server.ts] [--hmr-port 31001]'
     )
   }
   // Vite's watcher and custom-base module URLs resolve filesystem paths to
