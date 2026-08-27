@@ -23,4 +23,11 @@ Three applications share one global server and one global port.
   - its own `/src/modules/docs/App.vue`
   - its own routes + SEO + sitemap + robots
 
-No application has its own port.
+No application has its own port. Applications are registered explicitly:
+
+```ts
+export default defineServer({
+  server: { port: 4211 },
+  applications: [website, admin, docs],
+})
+```
