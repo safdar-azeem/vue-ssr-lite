@@ -15,6 +15,17 @@ import {
 
 export const SSR_HEAD_MARKER = '<!--vue-ssr-lite:head-->'
 export const SSR_TELEPORT_MARKER = '<!--vue-ssr-lite:teleports-->'
+export const SSR_HTML_TEMPLATE = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
+`
 export const SSR_HTML_MARKER = '<!--vue-ssr-lite:html-->'
 export const SSR_STATE_MARKER = '<!--vue-ssr-lite:state-->'
 
