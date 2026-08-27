@@ -50,4 +50,56 @@ describe('SSR generic hydration cleanup', () => {
     expect(result.html).toContain('rendered')
     expect(dispose).toHaveBeenCalledTimes(1)
   })
+
+  it('runs main.ts before extension setup', async () => {
+    const order: string[] = []
+    await createSsrApplication(
+      {
+        id: 'lifecycle-order',
+        root: defineComponent(() => () => h('main')),
+        install: () => {
+          order.push('main')
+        },
+        extensions: [
+          {
+            name: 'probe',
+            setup() {
+              order.push('extension')
+            },
+          },
+        ],
+      },
+      { server: true, request: request() }
+    )
+    expect(order[0]).toBe('main')
+    expect(order.indexOf('main')).toBeLessThan(order.indexOf('extension'))
+  })
+
+  it('does not set up extensions when main.ts fails, and still disposes install work', async () => {
+    const dispose = vi.fn()
+    let extensionSetup = false
+    await expect(
+      createSsrApplication(
+        {
+          id: 'lifecycle-install-failure',
+          root: defineComponent(() => () => h('main')),
+          install: ({ hydration }) => {
+            hydration.onDispose(dispose)
+            throw new Error('install failed')
+          },
+          extensions: [
+            {
+              name: 'probe',
+              setup() {
+                extensionSetup = true
+              },
+            },
+          ],
+        },
+        { server: true, request: request() }
+      )
+    ).rejects.toThrow('install failed')
+    expect(extensionSetup).toBe(false)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
 })
