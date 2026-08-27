@@ -1,5 +1,6 @@
 import type { RouteRecordRaw } from 'vue-router'
 import { composeCanonicalUrl, normalizeSiteOrigin } from '../../SsrCanonicalOrigin'
+import type { SsrRenderMode } from '../../SsrConfigTypes'
 import { validateResponseStatus } from '../../SsrResponseStatus'
 import type { SeoEndpointContext, SeoEndpointResultMeta, SeoRouteInput } from './types'
 
@@ -82,23 +83,33 @@ const collectStaticPaths = (
   records: readonly RouteRecordRaw[] | undefined,
   parentPath: string,
   parentSeo: SeoRouteInput,
+  parentRender: SsrRenderMode | undefined,
+  defaultRender: SsrRenderMode,
   output: Set<string>
 ): void => {
   for (const record of records ?? []) {
     const path = joinRoutePaths(parentPath, String(record.path ?? ''))
     const seo = { ...parentSeo, ...readRouteSeo(record) }
-    if (record.children?.length) collectStaticPaths(record.children, path, seo, output)
+    const declared = record.meta?.render
+    const render =
+      declared === 'ssr' || declared === 'spa' ? declared : parentRender
+    const effective = render ?? defaultRender
+    if (record.children?.length) {
+      collectStaticPaths(record.children, path, seo, effective, defaultRender, output)
+    }
     if (record.redirect || !isNavigableRecord(record) || isDynamicPath(path)) continue
+    if (effective === 'spa') continue
     if (seo.index === false || seo.sitemap === false || declaredErrorStatus(seo)) continue
     output.add(path === '' ? '/' : path)
   }
 }
 
 export const discoverStaticSitemapPaths = (
-  routes: readonly RouteRecordRaw[] | undefined
+  routes: readonly RouteRecordRaw[] | undefined,
+  defaultRender: SsrRenderMode = 'ssr'
 ): string[] => {
   const paths = new Set<string>()
-  collectStaticPaths(routes, '', {}, paths)
+  collectStaticPaths(routes, '', {}, undefined, defaultRender, paths)
   return [...paths].sort((left, right) => left === '/' ? -1 : right === '/' ? 1 : left.localeCompare(right))
 }
 
