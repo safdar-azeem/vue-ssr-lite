@@ -1,5 +1,5 @@
 /** Server/configuration APIs. Implementation runtimes are intentionally private. */
-export { defineSsrConfig } from './SsrConfigRuntime'
+export { defineServer } from './SsrConfigRuntime'
 export { defineSitemap } from './server/SsrSitemapConfig'
 export type {
   SitemapContext,
@@ -65,10 +65,11 @@ export type { SsrCreateDomainUrlOptions, SsrDomainApi } from './SsrDomainRuntime
 export { useSsrRequestContext } from './SsrRequestContext'
 
 export type {
-  SsrApplicationConfig,
+  ApplicationConfig,
+  ServerConfig,
   SsrApplicationCookiesConfig,
   SsrApplicationDomainConfig,
-  SsrApplicationModuleRef,
+  SsrAppShellConfig,
   SsrConfig,
   SsrConfigExport,
   SsrConfigServerOptions,
@@ -81,7 +82,9 @@ export type {
   SsrPublicConfigFactory,
   SsrPublicConfigSource,
   SsrRenderMode,
+  SsrSeoConfig,
   SsrSingleApplicationConfig,
+  SsrSiteSeoInput,
 } from './SsrConfigTypes'
 export type {
   SsrEndpointDefinition,
