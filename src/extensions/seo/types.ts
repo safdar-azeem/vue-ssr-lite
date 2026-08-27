@@ -209,7 +209,11 @@ export type UseSeoSource =
   | SeoResolvable<SeoPageInput | null | undefined>
 
 declare module 'vue-router' {
-  interface RouteMeta { seo?: SeoRouteInput }
+  interface RouteMeta {
+    seo?: SeoRouteInput
+    /** Route-level render mode. Children inherit unless they override. */
+    render?: 'ssr' | 'spa'
+  }
 }
 
 export const isSeoEnabled = (config: SeoApplicationConfig | undefined): boolean =>
