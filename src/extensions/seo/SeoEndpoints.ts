@@ -2,6 +2,7 @@ import { access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { RouteRecordRaw } from 'vue-router'
 import { composeCanonicalUrl } from '../../SsrCanonicalOrigin'
+import type { SsrRenderMode } from '../../SsrConfigTypes'
 import type { SsrEndpointDefinition, SsrHttpRequest, SsrHttpResponse } from '../../SsrRuntimeTypes'
 import { validateSeoApplicationConfig, validateSeoSiteDefaults } from './normalize'
 import {
@@ -36,6 +37,7 @@ export interface SeoEndpointOptions {
   siteRobots?: SiteRobotsConfig
   root: string
   sitemapProvider?: SitemapProvider
+  defaultRender?: SsrRenderMode
   resolveSiteUrl: (request: SsrHttpRequest<any>) => string | Promise<string>
   existingEndpoints: readonly SsrEndpointDefinition<any>[]
 }
@@ -278,7 +280,11 @@ export const createSeoEndpoints = async (
         const conditional = conditionalResponse(request, headers)
         if (conditional) return conditional
         const dynamic = await collectSitemapSource(toSource(result), siteOrigin, request.signal)
-        const entries = mergeSitemapEntries(siteOrigin, discoverStaticSitemapPaths(routes), dynamic)
+        const entries = mergeSitemapEntries(
+          siteOrigin,
+          discoverStaticSitemapPaths(routes, options.defaultRender ?? 'ssr'),
+          dynamic
+        )
         return { statusCode: 200, body: serializeSitemapXml(entries), headers }
       },
     })
