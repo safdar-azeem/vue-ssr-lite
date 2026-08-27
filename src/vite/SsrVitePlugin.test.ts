@@ -1,18 +1,22 @@
 import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promises'
-import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build, createServer, type ViteDevServer } from 'vite'
+import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from './SsrVitePlugin'
+import { closeViteDevServer, provisionHostVuePeers } from '../SsrTestFixtures'
 
 let root = ''
 let server: ViteDevServer | undefined
+let hmrServer: Server | undefined
 
 afterEach(async () => {
-  await server?.close()
+  await closeViteDevServer(server, hmrServer)
   server = undefined
+  hmrServer = undefined
   if (root) await rm(root, { recursive: true, force: true })
   root = ''
 })
@@ -20,17 +24,14 @@ afterEach(async () => {
 const writeMinimalConfig = async () => {
   root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-vite-'))
   await writeFile(
-    join(root, 'ssr.config.mjs'),
+    join(root, 'server.ts'),
     `
 export default {
   name: 'demo',
-  applications: {
-    storefront: {
+  applications: [
+    {
+      name: 'storefront',
       render: 'ssr',
-      application: {
-        module: './src/SsrApplication.ts',
-        exportName: 'websiteApplication',
-      },
       template: 'site.html',
       domain: {
         development: 'localhost',
@@ -39,18 +40,15 @@ export default {
       },
       publicConfig: { api: { endpoint: 'http://localhost/graphql' } },
     },
-  },
+  ],
 }
-`,
-    'utf8'
+`
   )
   await mkdir(join(root, 'src'), { recursive: true })
-  await writeFile(
-    join(root, 'src/SsrApplication.ts'),
-    `export default { root: {} }`,
-    'utf8'
-  )
+  await writeFile(join(root, 'src/main.ts'), 'export default () => {}\n')
+  await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
   await writeFile(join(root, 'site.html'), '<html><body><div id="app"></div></body></html>')
+  await provisionHostVuePeers(root)
   return root
 }
 
@@ -124,7 +122,11 @@ describe('SSR Vite package identity', () => {
     expect(config.resolve?.dedupe).toContain('vue-router')
     expect(config.resolve?.dedupe).toContain('vue-ssr-lite')
     expect(config.resolve?.dedupe).not.toContain('@vue/server-renderer')
-    expect(config.optimizeDeps?.include).toEqual(['vue-ssr-lite/client'])
+    expect(config.optimizeDeps?.include).toEqual([
+      'vue',
+      'vue-router',
+      'vue-ssr-lite/client',
+    ])
     expect(config.ssr?.external).toContain('vue-ssr-lite')
     expect(config.ssr?.noExternal).not.toContain('vue-ssr-lite')
   })
@@ -143,19 +145,19 @@ describe('SSR Vite package identity', () => {
   it.each(['./', ''])('carries relative SPA base %j through a real generated SSR runtime', async (base) => {
     const pluginRoot = await writeMinimalConfig()
     await writeFile(
-      join(pluginRoot, 'ssr.config.mjs'),
+      join(pluginRoot, 'server.ts'),
       `
 export default {
   server: { port: 0 },
-  applications: {
-    admin: {
+  applications: [
+    {
+      name: 'admin',
       render: 'spa',
-      application: { module: './src/SsrApplication.ts' },
       template: 'site.html',
       host: 'admin.test',
       domain: { production: 'admin.test' },
     },
-  },
+  ],
 }
 `
     )
@@ -165,7 +167,7 @@ export default {
       base,
       configFile: false,
       logLevel: 'silent',
-      plugins: [vueSsrLite({ root: pluginRoot })],
+      plugins: [vueSsrLite({ root: pluginRoot }), vue()],
       build: {
         ssr: true,
         outDir,
@@ -182,7 +184,11 @@ export default {
     const generated = await runtime.default()
 
     expect(generated.__vueSsrLiteViteBase).toBe(base)
-    expect((generated.applications as Record<string, { render: string }>).admin.render).toBe('spa')
+    expect(
+      (generated.applications as { name: string; render: string }[]).find(
+        (application) => application.name === 'admin'
+      )?.render
+    ).toBe('spa')
   })
 
   it('stays API-client neutral: no Apollo or GraphQL packages by default', async () => {
@@ -314,6 +320,82 @@ export default {
     expect(JSON.stringify(tags)).not.toContain('children')
   })
 
+  it('does not guess the first application when several share one HTML template', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-shared-html-'))
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src/main.ts'), 'export default () => {}\n')
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'index.html'),
+      '<html><body><div id="app"></div></body></html>'
+    )
+    await writeFile(
+      join(root, 'server.ts'),
+      `
+export default {
+  applications: [
+    {
+      name: 'website',
+      render: 'ssr',
+      template: './index.html',
+      domain: { development: 'website.localhost', production: 'website.test' },
+    },
+    {
+      name: 'admin',
+      render: 'spa',
+      template: './index.html',
+      domain: { development: 'admin.localhost', production: 'admin.test' },
+    },
+  ],
+}
+`
+    )
+    await provisionHostVuePeers(root)
+    const plugin = vueSsrLite({ root })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') throw new Error('Missing config hook.')
+    await configHook.call(
+      {} as never,
+      { root },
+      {
+        command: 'serve',
+        mode: 'test',
+        isSsrBuild: false,
+        isPreview: false,
+      }
+    )
+    const transform = plugin.transformIndexHtml
+    if (!transform || typeof transform === 'function' || !transform.handler) {
+      throw new Error('Missing HTML transform.')
+    }
+    const source = await readFile(join(root, 'index.html'), 'utf8')
+    const shared = await transform.handler.call(
+      {} as never,
+      source,
+      {
+        path: '/',
+        filename: join(root, 'index.html'),
+      } as never
+    )
+    const sharedHtml =
+      typeof shared === 'string' ? shared : String(shared?.html || source)
+    const sharedTags = JSON.stringify(typeof shared === 'object' ? shared?.tags : [])
+    expect(sharedHtml).not.toContain('/@vue-ssr-lite/client/')
+    expect(sharedTags).not.toContain('/@vue-ssr-lite/client/')
+
+    const admin = await transform.handler.call(
+      {} as never,
+      source,
+      {
+        path: '/@vue-ssr-lite/html/admin',
+        filename: join(root, 'index.html'),
+      } as never
+    )
+    const adminTags = JSON.stringify(typeof admin === 'object' ? admin?.tags : [])
+    expect(adminTags).toContain('/@vue-ssr-lite/client/admin')
+    expect(adminTags).not.toContain('/@vue-ssr-lite/client/website')
+  })
+
   it('isolates eager styles by application and applies Vite base URLs', async () => {
     root = await realpath(await mkdtemp(join(tmpdir(), 'vue-ssr-lite-assets-')))
     await mkdir(join(root, 'src', 'website'), { recursive: true })
@@ -324,29 +406,32 @@ export default {
       'export const hydrateSsrApplication = () => {}; export const mountSpaApplication = () => {}'
     )
     await writeFile(
-      join(root, 'ssr.config.mjs'),
+      join(root, 'server.ts'),
       `
 export default {
-  applications: {
-    website: {
+  applications: [
+    {
+      name: 'website',
       render: 'ssr',
-      app: '@site/main.ts',
       template: './website.html',
       domain: { development: 'localhost', customDomains: true },
+      app: { main: './src/website/main.ts', root: './src/website/App.vue' },
     },
-    admin: {
+    {
+      name: 'admin',
       render: 'ssr',
-      app: './src/admin/main.ts',
       template: './admin.html',
       domain: { development: 'admin.localhost' },
+      app: { main: './src/admin/main.ts', root: './src/admin/App.vue' },
     },
-    portal: {
+    {
+      name: 'portal',
       render: 'spa',
-      app: './src/portal/main.ts',
       template: './portal.html',
       domain: { development: 'portal.localhost' },
+      app: { main: './src/portal/main.ts', root: './src/portal/App.vue' },
     },
-  },
+  ],
 }
 `
     )
@@ -364,7 +449,7 @@ export default {
     )
     await writeFile(
       join(root, 'src', 'website', 'main.ts'),
-      `import './base.css'; import './bootstrap.ts'; import './router.ts'; export default { root: {} }`
+      `import './base.css'; import './bootstrap.ts'; import './router.ts'; export default () => {}`
     )
     await writeFile(
       join(root, 'src', 'website', 'bootstrap.ts'),
@@ -389,15 +474,20 @@ export default {
     )
     await writeFile(
       join(root, 'src', 'admin', 'main.ts'),
-      `import './admin.css'; export default { root: {} }`
+      `import './admin.css'; export default () => {}`
     )
     await writeFile(join(root, 'src', 'admin', 'admin.css'), 'body { color: red }')
+    await writeFile(join(root, 'src', 'admin', 'App.vue'), '<template><div /></template>')
     await writeFile(
       join(root, 'src', 'portal', 'main.ts'),
-      `import './portal.css'; export default { root: {} }`
+      `import './portal.css'; export default () => {}`
     )
     await writeFile(join(root, 'src', 'portal', 'portal.css'), 'body { color: green }')
+    await writeFile(join(root, 'src', 'portal', 'App.vue'), '<template><div /></template>')
+    await writeFile(join(root, 'src', 'website', 'App.vue'), '<template><div /></template>')
+    await provisionHostVuePeers(root)
 
+    hmrServer = createHttpServer()
     server = await createServer({
       root,
       base: '/dashboard/',
@@ -408,10 +498,10 @@ export default {
           '@site': join(root, 'src', 'website'),
         },
       },
-      plugins: [vueSsrLite({ root })],
+      plugins: [vueSsrLite({ root }), vue()],
       server: {
         middlewareMode: true,
-        hmr: { server: createHttpServer() },
+        hmr: { server: hmrServer },
       },
       appType: 'custom',
     })
@@ -469,7 +559,7 @@ export default {
           '@site': join(root, 'src', 'website'),
         },
       },
-      plugins: [vueSsrLite({ root })],
+      plugins: [vueSsrLite({ root }), vue()],
       build: { outDir, emptyOutDir: true },
     })
     const [builtWebsite, builtAdmin, builtPortal] = await Promise.all([
@@ -521,19 +611,20 @@ export default {
   it('deduplicates application CSS against consumer-owned stylesheet links', async () => {
     const pluginRoot = await writeMinimalConfig()
     await writeFile(
-      join(pluginRoot, 'src/SsrApplication.ts'),
-      `import './style.css'; export default { root: {} }`
+      join(pluginRoot, 'src/main.ts'),
+      `import './style.css'; export default () => {}`
     )
     await writeFile(join(pluginRoot, 'src/style.css'), 'body { margin: 0 }')
     await writeFile(
       join(pluginRoot, 'client-runtime.ts'),
-      'export const hydrateSsrApplication = () => {}'
+      'export const hydrateSsrApplication = () => {}; export const mountSpaApplication = () => {}'
     )
     const source = `<html><head>
       <link rel="stylesheet" href="/src/style.css">
       <link rel="stylesheet" href="https://fonts.example.com/font.css">
-    </head><body><div id="app"></div><script type="module" src="/src/SsrApplication.ts"></script></body></html>`
+    </head><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>`
     await writeFile(join(pluginRoot, 'site.html'), source)
+    hmrServer = createHttpServer()
     server = await createServer({
       root: pluginRoot,
       configFile: false,
@@ -542,10 +633,10 @@ export default {
           'vue-ssr-lite/client': join(pluginRoot, 'client-runtime.ts'),
         },
       },
-      plugins: [vueSsrLite({ root: pluginRoot })],
+      plugins: [vueSsrLite({ root: pluginRoot }), vue()],
       server: {
         middlewareMode: true,
-        hmr: { server: createHttpServer() },
+        hmr: { server: hmrServer },
       },
       appType: 'custom',
     })
