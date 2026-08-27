@@ -9,14 +9,14 @@ const fixtureRoot = join(
 )
 
 describe('basic consumer fixture', () => {
-  it('declares only root and routes', async () => {
+  it('uses the conventional main.ts initializer and routes export', async () => {
     const main = await readFile(join(fixtureRoot, 'src/main.ts'), 'utf8')
-    expect(main).toContain('defineApplication({')
-    expect(main).toContain('root: App')
-    expect(main).toContain('routes:')
-    expect(main).not.toContain('extensions')
+    expect(main).toContain('export { routes }')
+    expect(main).toContain('export default ({ app }: AppContext)')
+    expect(main).not.toContain('defineApplication')
+    expect(main).not.toContain('createApp')
+    expect(main).not.toContain('createSSRApp')
     expect(main).not.toContain('entry-client')
     expect(main).not.toContain('entry-server')
-    expect(main).not.toContain('seoExtension')
   })
 })
