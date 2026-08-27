@@ -1,5 +1,5 @@
+import type { AppContext } from '../../../src/index'
 import { defineComponent, h } from 'vue'
-import { defineApplication } from '../../../src/index'
 
 const App = defineComponent({
   name: 'BasicConsumerApp',
@@ -8,7 +8,10 @@ const App = defineComponent({
   },
 })
 
-export default defineApplication({
-  root: App,
-  routes: [{ path: '/', component: App }],
-})
+const routes = [{ path: '/', component: App }]
+
+export { routes }
+
+export default ({ app }: AppContext) => {
+  void app
+}
