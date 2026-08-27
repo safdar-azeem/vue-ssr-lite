@@ -10,7 +10,7 @@ import {
   type InjectionKey,
 } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
-import { defineApplication } from './index'
+import { createTestApplication } from './SsrTestFixtures'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
@@ -124,7 +124,7 @@ const Shell = defineComponent({
 const routes: RouteRecordRaw[] = [{ path: '/:x(.*)*', component: Page }]
 
 const buildApplication = (source: TestSource) =>
-  defineApplication<AppState>({
+  createTestApplication<AppState>({
     id: 'parent-child',
     root: Shell,
     routes,
@@ -191,7 +191,7 @@ describe('deferred parent → child SSR resolution (no application orchestration
   })
 
   it('completes a page with no deferred children in a single pass', async () => {
-    const application = defineApplication<AppState>({
+    const application = createTestApplication<AppState>({
       id: 'no-children',
       root: defineComponent({
         setup: () => () => h('main', 'static content'),
