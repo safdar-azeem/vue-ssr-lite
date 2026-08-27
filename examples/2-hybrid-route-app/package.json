@@ -1,11 +1,12 @@
 {
+  "name": "vue-ssr-lite-single-domain-route-rendering",
   "private": true,
   "version": "0.0.0-example",
   "type": "module",
   "scripts": {
-    "dev": "vue-ssr-lite dev --config server.ts",
-    "build": "vue-ssr-lite build --config server.ts",
-    "start": "vue-ssr-lite start --config server.ts"
+    "dev": "vue-ssr-lite dev",
+    "build": "vue-ssr-lite build",
+    "start": "vue-ssr-lite start"
   },
   "dependencies": {
     "vue": "^3.5.0",
@@ -17,7 +18,5 @@
     "@vitejs/plugin-vue": "^6.0.0",
     "vite": "^7.0.0",
     "typescript": "^5.9.0"
-  },
-  "name": "vue-ssr-lite-single-domain-route-rendering",
-  "note": "Conceptual target architecture; route-level render metadata is a proposed vue-ssr-lite capability."
+  }
 }
