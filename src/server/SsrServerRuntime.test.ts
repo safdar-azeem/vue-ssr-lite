@@ -6,11 +6,14 @@ import { PassThrough, Readable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ViteDevServer } from 'vite'
 import { defineComponent, h } from 'vue'
+import { RouterView } from 'vue-router'
+import { defineApplication } from '../index'
 import {
   serializeSsrProductionAssetMetadata,
   SSR_PRODUCTION_ASSET_METADATA_PATH,
 } from '../SsrAssetMetadata'
-import { defineSsrConfig } from '../SsrConfigRuntime'
+import { defineServer } from '../SsrConfigRuntime'
+import { withSsrShells } from '../SsrTestFixtures'
 import { useSsrRequestContext } from '../SsrRequestContext'
 import { useSeo } from '../extensions/seo/useSeo'
 import { createSsrMemoryResponseCache } from './SsrResponseCacheRuntime'
@@ -31,20 +34,18 @@ afterEach(async () => {
   root = ''
 })
 const spaConfig = () =>
-  defineSsrConfig({
+  defineServer({
     name: 'test-runtime',
     runtime: 'unified',
     // Lifecycle tests must not claim the public development port. Binding to
     // zero keeps them isolated from local managed-server processes and other
     // test workers.
     server: { port: 0 },
-    applications: {
-      spa: {
+    applications: [
+      defineApplication({
+        name: 'spa',
         render: 'spa',
-        application: {
-          module: './SpaApp.ts',
-          exportName: 'spaApplication',
-        },
+        app: { main: './SpaApp.ts' },
         template: 'index.html',
         domain: {
           development: 'localhost',
@@ -56,8 +57,8 @@ const spaConfig = () =>
         publicConfig: {
           api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
         },
-      },
-    },
+      }),
+    ],
   })
 
 const requestRawPathStatus = (port: number, path: string): Promise<number> =>
@@ -87,7 +88,7 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 15_000 },
           render: 'spa',
         }),
@@ -103,7 +104,7 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 15_000 },
           render: 'spa',
         }),
@@ -159,7 +160,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+        default: defineServer({ server: { port: 0 }, render: 'spa' }),
       }),
     })
     await managed.listen()
@@ -215,7 +216,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+        default: defineServer({ server: { port: 0 }, render: 'spa' }),
       }),
     })
     await managed.listen()
@@ -268,7 +269,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({ server: { port: 0 }, render: 'spa' }),
+        default: defineServer({ server: { port: 0 }, render: 'spa' }),
       }),
     })
     await managed.listen()
@@ -310,7 +311,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 50 },
           render: 'spa',
         }),
@@ -347,7 +348,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 50 },
           render: 'spa',
         }),
@@ -378,7 +379,7 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 2_000 },
           render: 'spa',
           endpoints: [
@@ -430,7 +431,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, shutdownTimeoutMs: 50 },
           render: 'spa',
         }),
@@ -463,7 +464,7 @@ describe('managed SSR server lifecycle', () => {
       root,
       vite,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, requestTimeoutMs },
           render: 'spa',
         }),
@@ -692,7 +693,7 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'test-runtime',
           runtime: 'unified',
           // The configured deadline includes development runtime reload work;
@@ -709,10 +710,10 @@ describe('managed SSR server lifecycle', () => {
               return new Promise<never>(() => undefined)
             },
           },
-          applications: {
-            ssr: {
+          applications: [
+            defineApplication({
+              name: 'ssr',
               render: 'ssr',
-              application: { id: 'test-app', root: Root },
               template: 'site.html',
               domain: {
                 development: 'localhost',
@@ -722,9 +723,12 @@ describe('managed SSR server lifecycle', () => {
               publicConfig: {
                 api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          ssr: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -769,15 +773,15 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, requestTimeoutMs: 60 },
           resolveSiteUrl: async () => {
             if (slow) await new Promise((resolveWait) => setTimeout(resolveWait, 40))
             return 'http://localhost'
           },
-          applications: {
-            deadline: {
-              application: { id: 'deadline', root: Root },
+          applications: [
+            defineApplication({
+              name: 'deadline',
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
               cacheControl: 'public, max-age=60',
@@ -810,9 +814,12 @@ describe('managed SSR server lifecycle', () => {
                   activeFactories -= 1
                 }
               },
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          deadline: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -849,28 +856,31 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: {
             port: 0,
             logger: { debug: fail, info: fail, warn: fail, error: fail },
             onMetrics: fail,
           },
-          applications: {
-            observability: {
-              application: {
-                id: 'observability',
-                root: defineComponent({
-                  setup: () => () => h('main', 'healthy'),
-                }),
-                cleanup: () => {
-                  throw new Error('cleanup failed')
-                },
-              },
+          applications: [
+            defineApplication({
+              name: 'observability',
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
-            },
-          },
+              cleanup: () => {
+                throw new Error('cleanup failed')
+              },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          observability: {
+            root: defineComponent({
+              setup: () => () => h('main', 'healthy'),
+            }),
+            main: { default: () => undefined },
+          },
+        },
       }),
     })
     await managed.listen()
@@ -958,20 +968,23 @@ describe('managed SSR server lifecycle', () => {
       production: true,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, trustProxy: true },
           resolveSiteUrl: () => 'https://example.com',
-          applications: {
-            site: {
-              application: { id: 'site', root: Root },
+          applications: [
+            defineApplication({
+              name: 'site',
               template: 'index.html',
               domain: { production: 'example.com', customDomains: true },
               publicConfig: () => ({
                 marker: requestNumber++ === 0 ? 'A' : 'B',
               }),
-            },
-          },
+            }),
+          ],
         } as any),
+        __vueSsrLiteShells: {
+          site: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1042,17 +1055,18 @@ describe('managed SSR server lifecycle', () => {
       production: true,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0, trustProxy: true },
-          applications: {
-            spa: {
+          applications: [
+            defineApplication({
+              name: 'spa',
               render: 'spa',
-              application: { module: './SpaApp.ts' },
+              app: { main: './SpaApp.ts' },
               template: 'index.html',
               domain: { production: 'example.com', customDomains: true },
               publicConfig: ({ host, pathname }) => ({ host, pathname }),
-            },
-          },
+            }),
+          ],
         } as any),
       }),
     })
@@ -1142,15 +1156,15 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: {
             port: 0,
             trustProxy: true,
             maxResolutionPasses: 2,
           },
-          applications: {
-            alpha: {
-              application: { id: 'alpha', root: Root },
+          applications: [
+            defineApplication({
+              name: 'alpha',
               template: 'alpha.html',
               host: '*.alpha.test',
               domain: {
@@ -1159,9 +1173,9 @@ describe('managed SSR server lifecycle', () => {
               },
               cookies: { allow: ['locale'] },
               publicConfig: factory('alpha'),
-            },
-            beta: {
-              application: { id: 'beta', root: Root },
+            }),
+            defineApplication({
+              name: 'beta',
               template: 'beta.html',
               host: '*.beta.test',
               domain: {
@@ -1170,9 +1184,13 @@ describe('managed SSR server lifecycle', () => {
               },
               cookies: { allow: ['locale'] },
               publicConfig: factory('beta'),
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          alpha: { root: Root, main: { default: () => undefined } },
+          beta: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1253,11 +1271,11 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0 },
-          applications: {
-            cached: {
-              application: { id: 'cached', root: Root },
+          applications: [
+            defineApplication({
+              name: 'cached',
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
               cacheControl: 'public, max-age=60',
@@ -1270,9 +1288,12 @@ describe('managed SSR server lifecycle', () => {
                 factoryInvocations += 1
                 return { locale: headers['accept-language'] || 'en' }
               },
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          cached: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1326,15 +1347,11 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0 },
-          applications: {
-            private: {
-              application: {
-                id: 'private',
-                root: Root,
-                seo: { mode: 'private' },
-              },
+          applications: [
+            defineApplication({
+              name: 'private',
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
               cacheControl: 'public, max-age=60',
@@ -1347,9 +1364,13 @@ describe('managed SSR server lifecycle', () => {
                 ttlMs: 60_000,
                 shouldCache,
               },
-            },
-          },
+              seo: { mode: 'private' },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          private: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1397,14 +1418,11 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0 },
-          applications: {
-            invalid: {
-              application: {
-                id: 'invalid',
-                root: defineComponent(() => () => h('main', 'unreachable')),
-              },
+          applications: [
+            defineApplication({
+              name: 'invalid',
               template: 'site.html',
               domain: { development: 'localhost', customDomains: true },
               cacheControl: 'public, max-age=60',
@@ -1418,9 +1436,15 @@ describe('managed SSR server lifecycle', () => {
                 vary: cacheVary,
               },
               publicConfig: () => value,
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          invalid: {
+            root: defineComponent(() => () => h('main', 'unreachable')),
+            main: { default: () => undefined },
+          },
+        },
       }),
     })
     await managed.listen()
@@ -1739,18 +1763,21 @@ describe('managed SSR server lifecycle', () => {
       production: true,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0 },
           resolveSiteUrl: () => 'https://example.com',
-          applications: {
-            cached: {
-              application: { id: 'cached', root: Root },
+          applications: [
+            defineApplication({
+              name: 'cached',
               template: 'index.html',
               responseCache: { store: trackingStore, ttlMs: 60_000 },
               domain: { production: 'localhost', customDomains: true },
-            },
-          },
+            }),
+          ],
         } as any),
+        __vueSsrLiteShells: {
+          cached: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1798,29 +1825,33 @@ describe('managed SSR server lifecycle', () => {
       root,
       loadRuntime: async () => ({
         default: {
-          ...defineSsrConfig({
+          ...defineServer({
             runtime: 'admin',
             server: { port: 0 },
-            applications: {
-              website: {
+            applications: [
+              defineApplication({
+                name: 'website',
                 render: 'ssr',
                 roles: ['website'],
-                application: { root: Root },
                 template: 'website.html',
                 host: 'website.test',
                 domain: { production: 'website.test' },
-              },
-              admin: {
+              }),
+              defineApplication({
+                name: 'admin',
                 render: 'spa',
                 roles: ['admin'],
-                application: { module: './Admin.ts' },
+                app: { main: './Admin.ts' },
                 template: 'admin.html',
                 host: 'admin.test',
                 domain: { production: 'admin.test' },
-              },
-            },
+              }),
+            ],
           } as any),
           __vueSsrLiteViteBase: './',
+          __vueSsrLiteShells: {
+            website: { root: Root, main: { default: () => undefined } },
+          },
         },
       }),
     })
@@ -1837,13 +1868,15 @@ describe('managed SSR server lifecycle', () => {
         root,
         loadRuntime: async () => ({
           default: {
-            ...defineSsrConfig({
+            ...defineServer({
               server: { port: 0 },
               resolveSiteUrl: () => 'https://example.com',
-              application: { root: Root },
               domain: { production: 'localhost', customDomains: true },
             } as any),
             __vueSsrLiteViteBase: viteBase,
+            __vueSsrLiteShells: {
+              app: { root: Root, main: { default: () => undefined } },
+            },
           },
         }),
       })
@@ -1864,12 +1897,16 @@ describe('managed SSR server lifecycle', () => {
         production: true,
         root,
         loadRuntime: async () => ({
-          default: defineSsrConfig({
-            server: { port: 0 },
-            resolveSiteUrl: () => 'https://example.com',
-            application: { root: Root },
-            domain: { production: 'localhost', customDomains: true },
-          } as any),
+          default: {
+            ...defineServer({
+              server: { port: 0 },
+              resolveSiteUrl: () => 'https://example.com',
+              domain: { production: 'localhost', customDomains: true },
+            } as any),
+            __vueSsrLiteShells: {
+              app: { root: Root, main: { default: () => undefined } },
+            },
+          },
         }),
       })
     ).rejects.toThrow("requires Vite's generated SSR manifest")
@@ -1894,11 +1931,11 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           server: { port: 0 },
-          applications: {
-            cached: {
-              application: { id: 'cached', root: Root },
+          applications: [
+            defineApplication({
+              name: 'cached',
               template: 'site.html',
               cacheControl: 'public, max-age=60',
               responseCache: {
@@ -1906,9 +1943,12 @@ describe('managed SSR server lifecycle', () => {
                 ttlMs: 60_000,
               },
               domain: { development: 'localhost', customDomains: true },
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          cached: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -1954,14 +1994,14 @@ describe('managed SSR server lifecycle', () => {
       production: false,
       root,
       loadRuntime: async () => ({
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'host-runtime',
           runtime: 'erp',
           server: { port: 0, trustProxy: true },
-          applications: {
-            storefront: {
+          applications: [
+            defineApplication({
+              name: 'storefront',
               render: 'ssr',
-              application: { id: 'storefront', root: Root },
               template: 'site.html',
               roles: ['unified', 'storefront'],
               domain: {
@@ -1976,13 +2016,11 @@ describe('managed SSR server lifecycle', () => {
               publicConfig: {
                 api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
-            },
-            erp: {
+            }),
+            defineApplication({
+              name: 'erp',
               render: 'spa',
-              application: {
-                module: './Erp.ts',
-                exportName: 'createErpApplication',
-              },
+              app: { main: './Erp.ts' },
               template: 'index.html',
               roles: ['unified', 'erp'],
               domain: {
@@ -1997,9 +2035,12 @@ describe('managed SSR server lifecycle', () => {
               publicConfig: {
                 api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
-            },
-          },
+            }),
+          ],
         }),
+        __vueSsrLiteShells: {
+          storefront: { root: Root, main: { default: () => undefined } },
+        },
       }),
     })
     await managed.listen()
@@ -2069,5 +2110,101 @@ describe('managed SSR server lifecycle', () => {
     const afterFailure = await fetch(`http://127.0.0.1:${port}/healthz`)
     expect(afterFailure.status).toBe(200)
     expect(loads).toBe(3)
+  })
+
+  it('does not Vue-SSR SPA hybrid routes under concurrent mixed traffic', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-hybrid-'))
+    await writeFile(
+      join(root, 'index.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    let ssrRenders = 0
+    const Page = defineComponent({
+      setup: () => () => h('p', 'ssr-page'),
+    })
+    const Shell = defineComponent({
+      setup() {
+        ssrRenders += 1
+        return () => h(RouterView)
+      },
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: withSsrShells(
+          defineServer({
+            server: { port: 0 },
+            applications: [
+              defineApplication({
+                name: 'hybrid',
+                render: 'ssr',
+                template: 'index.html',
+                domain: {
+                  development: 'localhost',
+                  production: 'localhost',
+                  customDomains: true,
+                },
+                routes: [
+                  { path: '/', component: Page, meta: { render: 'ssr' } },
+                  { path: '/about', component: Page, meta: { render: 'ssr' } },
+                  { path: '/go-app', redirect: '/app/projects' },
+                  {
+                    path: '/app',
+                    component: Page,
+                    meta: { render: 'spa' },
+                    children: [
+                      { path: '', component: Page },
+                      { path: 'projects', component: Page },
+                      { path: 'go-public', redirect: '/about' },
+                      { path: 'settings', component: Page },
+                    ],
+                  },
+                  {
+                    path: '/admin',
+                    component: Page,
+                    meta: { render: 'spa' },
+                    children: [{ path: 'users', component: Page }],
+                  },
+                ],
+              }),
+            ],
+          }),
+          { hybrid: { root: Shell } }
+        ),
+      }),
+    })
+    await managed.listen()
+    const origin = `http://127.0.0.1:${managed.address().port}`
+    const html = (path: string) =>
+      fetch(`${origin}${path}`, { headers: { accept: 'text/html' } })
+    const responses = await Promise.all([
+      html('/'),
+      html('/about'),
+      html('/app'),
+      html('/app/projects'),
+      html('/app/settings'),
+      html('/admin'),
+      html('/admin/users'),
+      html('/about'),
+      html('/app/projects'),
+      html('/go-app'),
+      html('/app/go-public'),
+    ])
+    const snapshot = await Promise.all(
+      responses.map(async (response) => ({
+        status: response.status,
+        body: await response.text(),
+      }))
+    )
+    const bodies = snapshot.map((item) => item.body)
+    expect(snapshot.every((item) => item.status === 200)).toBe(true)
+    expect(bodies[0]).toContain('ssr-page')
+    expect(bodies[1]).toContain('ssr-page')
+    expect(bodies[2]).not.toContain('ssr-page')
+    expect(bodies[3]).not.toContain('ssr-page')
+    expect(bodies[9]).not.toContain('ssr-page')
+    expect(bodies[10]).toContain('ssr-page')
+    expect(ssrRenders).toBe(4)
   })
 })
