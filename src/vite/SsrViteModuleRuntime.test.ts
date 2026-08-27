@@ -64,7 +64,14 @@ afterEach(async () => {
   await closeViteDevServer(server, hmrServer)
   server = undefined
   hmrServer = undefined
-  if (root) await rm(root, { recursive: true, force: true })
+  if (root) {
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    })
+  }
   root = ''
 })
 
