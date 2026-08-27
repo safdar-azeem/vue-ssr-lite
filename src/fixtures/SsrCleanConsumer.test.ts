@@ -26,10 +26,12 @@ import {
   loadSsrConfigFile,
   normalizeSsrConfig,
   resolveSsrConfigPath,
+  SSR_RUNTIME_VIRTUAL_ID,
 } from '../SsrConfigCompileRuntime'
 import { vueSsrLite } from '../vite/SsrVitePlugin'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
-import { defineSsrConfig } from '../SsrConfigRuntime'
+import { defineServer } from '../SsrConfigRuntime'
+import { withSsrShells } from '../SsrTestFixtures'
 import {
   createSsrManagedServer,
   type SsrManagedServer,
@@ -67,7 +69,7 @@ afterEach(async () => {
 })
 
 describe('zero-config clean consumer fixture', () => {
-  it('discovers standard Vue files without ssr.config', async () => {
+  it('discovers standard Vue files without server.ts', async () => {
     expect(await resolveSsrConfigPath(fixtureRoot)).toBeUndefined()
     const config = await loadSsrConfigFile(fixtureRoot)
     const normalized = normalizeSsrConfig(config, { root: fixtureRoot })
@@ -78,8 +80,9 @@ describe('zero-config clean consumer fixture', () => {
       mountSelector: '#app',
       hosts: ['*'],
     })
-    expect(normalized.applications.app.application).toEqual({
-      module: './src/main.ts',
+    expect(normalized.applications.app.shell).toMatchObject({
+      main: './src/main.ts',
+      root: './src/App.vue',
     })
   })
 
@@ -90,7 +93,8 @@ describe('zero-config clean consumer fixture', () => {
       expect.objectContaining({
         id: 'app',
         kind: 'ssr',
-        definition: './src/main.ts',
+        main: './src/main.ts',
+        root: './src/App.vue',
         template: './index.html',
         mountSelector: '#app',
       }),
@@ -100,12 +104,10 @@ describe('zero-config clean consumer fixture', () => {
     expect(client).toContain('/src/main.ts')
     expect(client).toContain('link[data-vue-ssr-lite-style]')
     expect(client).toContain('await Promise.all(__vueSsrLiteRenderedStyles.map')
-    expect(client.indexOf('data-vue-ssr-lite-style')).toBeLessThan(
-      client.indexOf('const definition')
-    )
-    expect(client.indexOf('__vueSsrLiteRenderedStyles')).toBeLessThan(
-      client.indexOf('const definition')
-    )
+    const hydrateAt = client.indexOf('await hydrateSsrApplication')
+    expect(hydrateAt).toBeGreaterThan(-1)
+    expect(client.indexOf('data-vue-ssr-lite-style')).toBeLessThan(hydrateAt)
+    expect(client.indexOf('__vueSsrLiteRenderedStyles')).toBeLessThan(hydrateAt)
     const runtime = generateSsrRuntimeModule(
       fixtureRoot,
       undefined,
@@ -233,17 +235,11 @@ describe('zero-config clean consumer fixture', () => {
     expect(browserEntry?.code).toContain('hydrateSsrApplication')
     expect(browserEntry?.code).toContain('/src/main.ts')
 
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: { port: 0 },
-          application: applicationModule.default,
-        } as any),
-      }),
+      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
     })
     await managedServer.listen()
     const origin = `http://127.0.0.1:${managedServer.address().port}`
@@ -287,17 +283,11 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: { port: 0 },
-          application: applicationModule.default,
-        } as any),
-      }),
+      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
     })
     await managedServer.listen()
 
@@ -347,7 +337,7 @@ describe('zero-config clean consumer fixture', () => {
       ),
       writeFile(
         join(installedPackage, 'index.mjs'),
-        'export const defineApplication = (definition) => definition\n'
+        'export const defineServer = (config) => config\nexport const defineApplication = (definition) => definition\n'
       ),
       writeFile(
         join(installedPackage, 'client.mjs'),
@@ -370,7 +360,6 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     const clientGraph = devServer.environments.client.moduleGraph
     const hasGeneratedClientEntry = () =>
       [...clientGraph.urlToModuleMap.values()].some((module) =>
@@ -382,12 +371,7 @@ describe('zero-config clean consumer fixture', () => {
       production: false,
       root: coldConsumerRoot,
       vite: devServer,
-      loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: { port: 0 },
-          application: applicationModule.default,
-        } as any),
-      }),
+      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
     })
     await managedServer.listen()
     expect(hasGeneratedClientEntry()).toBe(false)
@@ -447,17 +431,11 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: async () => ({
-        default: defineSsrConfig({
-          server: { port: 0 },
-          application: applicationModule.default,
-        } as any),
-      }),
+      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
     })
     await managedServer.listen()
     const origin = `http://127.0.0.1:${managedServer.address().port}`
@@ -541,22 +519,24 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: {
-              port: 0,
-              clientOutDir: productionOutDir,
-            },
-            resolveSiteUrl: () => 'https://example.com',
-            application: { root: Root },
-            template: './index.html',
-            domain: {
-              production: 'localhost',
-              customDomains: true,
-            },
-          } as any),
-          __vueSsrLiteViteBase: '/products/',
-        },
+        default: withSsrShells(
+          {
+            ...defineServer({
+              server: {
+                port: 0,
+                clientOutDir: productionOutDir,
+              },
+              resolveSiteUrl: () => 'https://example.com',
+              template: './index.html',
+              domain: {
+                production: 'localhost',
+                customDomains: true,
+              },
+            }),
+            __vueSsrLiteViteBase: '/products/',
+          },
+          { app: { root: Root } }
+        ),
       }),
     })
     await managedServer.listen()
@@ -624,22 +604,27 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: true,
       root: fixtureRoot,
-      loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: { port: 0, clientOutDir: productionOutDir },
+      loadRuntime: async () => {
+        const runtime = await importSsrViteModule<{
+          default: () => Promise<Record<string, any>>
+        }>(devServer!, SSR_RUNTIME_VIRTUAL_ID)
+        const loadedConfig = await runtime.default()
+        return {
+          default: {
+            ...loadedConfig,
+            server: {
+              ...loadedConfig.server,
+              port: 0,
+              clientOutDir: productionOutDir,
+            },
             resolveSiteUrl: () => 'https://example.com',
-            application: applicationModule.default,
-            template: './index.html',
-            domain: { production: 'localhost', customDomains: true },
-          } as any),
-          __vueSsrLiteViteBase: '/products/',
-        },
-      }),
+            __vueSsrLiteViteBase: '/products/',
+          },
+        }
+      },
     })
     await managedServer.listen()
     const homeResponse = await fetch(
@@ -737,16 +722,18 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: { port: 0, clientOutDir: productionOutDir },
-            resolveSiteUrl: () => 'https://example.com',
-            application: { root: Root },
-            template: './index.html',
-            domain: { production: 'localhost', customDomains: true },
-          } as any),
-          __vueSsrLiteViteBase: '/products/',
-        },
+        default: withSsrShells(
+          {
+            ...defineServer({
+              server: { port: 0, clientOutDir: productionOutDir },
+              resolveSiteUrl: () => 'https://example.com',
+              template: './index.html',
+              domain: { production: 'localhost', customDomains: true },
+            }),
+            __vueSsrLiteViteBase: '/products/',
+          },
+          { app: { root: Root } }
+        ),
       }),
     })
     await managedServer.listen()
@@ -864,19 +851,21 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: { port: 0, clientOutDir: productionOutDir },
-            resolveSiteUrl: () => 'https://example.com',
-            application: { root: Root },
-            template: './index.html',
-            domain: {
-              production: 'localhost',
-              customDomains: true,
-            },
-          } as any),
-          __vueSsrLiteViteBase: '/products/',
-        },
+        default: withSsrShells(
+          {
+            ...defineServer({
+              server: { port: 0, clientOutDir: productionOutDir },
+              resolveSiteUrl: () => 'https://example.com',
+              template: './index.html',
+              domain: {
+                production: 'localhost',
+                customDomains: true,
+              },
+            }),
+            __vueSsrLiteViteBase: '/products/',
+          },
+          { app: { root: Root } }
+        ),
       }),
     })
     await managedServer.listen()
@@ -949,16 +938,18 @@ describe('zero-config clean consumer fixture', () => {
       production: true,
       root: fixtureRoot,
       loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: { port: 0, clientOutDir: productionOutDir },
-            resolveSiteUrl: () => 'https://example.com',
-            application: { root: Root },
-            template: './index.html',
-            domain: { production: 'localhost', customDomains: true },
-          } as any),
-          __vueSsrLiteViteBase: '/products/',
-        },
+        default: withSsrShells(
+          {
+            ...defineServer({
+              server: { port: 0, clientOutDir: productionOutDir },
+              resolveSiteUrl: () => 'https://example.com',
+              template: './index.html',
+              domain: { production: 'localhost', customDomains: true },
+            }),
+            __vueSsrLiteViteBase: '/products/',
+          },
+          { app: { root: Root } }
+        ),
       }),
     })
     await managedServer.listen()
@@ -1002,22 +993,27 @@ describe('zero-config clean consumer fixture', () => {
       },
       appType: 'custom',
     })
-    const applicationModule = await importSsrViteModule(devServer, '/src/main.ts')
     managedServer = await createSsrManagedServer({
       production: true,
       root: fixtureRoot,
-      loadRuntime: async () => ({
-        default: {
-          ...defineSsrConfig({
-            server: { port: 0, clientOutDir: productionOutDir },
+      loadRuntime: async () => {
+        const runtime = await importSsrViteModule<{
+          default: () => Promise<Record<string, any>>
+        }>(devServer!, SSR_RUNTIME_VIRTUAL_ID)
+        const loadedConfig = await runtime.default()
+        return {
+          default: {
+            ...loadedConfig,
+            server: {
+              ...loadedConfig.server,
+              port: 0,
+              clientOutDir: productionOutDir,
+            },
             resolveSiteUrl: () => 'https://example.com',
-            application: applicationModule.default,
-            template: './index.html',
-            domain: { production: 'localhost', customDomains: true },
-          } as any),
-          __vueSsrLiteViteBase: base,
-        },
-      }),
+            __vueSsrLiteViteBase: base,
+          },
+        }
+      },
     })
     await managedServer.listen()
     const html = await fetch(
@@ -1042,16 +1038,18 @@ describe('zero-config clean consumer fixture', () => {
         production: true,
         root: fixtureRoot,
         loadRuntime: async () => ({
-          default: {
-            ...defineSsrConfig({
-              server: { port: 0, clientOutDir: productionOutDir },
-              resolveSiteUrl: () => 'https://example.com',
-              application: { root: Root },
-              template: './index.html',
-              domain: { production: 'localhost', customDomains: true },
-            } as any),
-            __vueSsrLiteViteBase: './',
-          },
+          default: withSsrShells(
+            {
+              ...defineServer({
+                server: { port: 0, clientOutDir: productionOutDir },
+                resolveSiteUrl: () => 'https://example.com',
+                template: './index.html',
+                domain: { production: 'localhost', customDomains: true },
+              }),
+              __vueSsrLiteViteBase: './',
+            },
+            { app: { root: Root } }
+          ),
         }),
       })
     ).rejects.toThrow('does not support Vite relative base')
