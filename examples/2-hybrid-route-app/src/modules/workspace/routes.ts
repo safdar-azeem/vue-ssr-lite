@@ -9,8 +9,6 @@ export default [
     path: '/app',
     component: WorkspaceLayout,
 
-    // Proposed vue-ssr-lite route-level render override.
-    // All children inherit SPA unless a child overrides it.
     meta: {
       render: 'spa',
       seo: {
