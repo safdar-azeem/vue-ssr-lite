@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { access, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Plugin, ResolveFn, Rollup, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
@@ -9,12 +10,12 @@ import {
   loadSsrConfigFile,
   resolveSsrConfigPath,
   SSR_CLIENT_VIRTUAL_PREFIX,
+  SSR_HTML_VIRTUAL_PREFIX,
   SSR_RUNTIME_VIRTUAL_ID,
   type SsrViteApplicationEntry,
   type SsrViteEntries,
 } from '../SsrConfigCompileRuntime'
-import { resolveSitemapConfigPath } from '../server/SsrSitemapConfig'
-import { prepareSsrHtmlTemplate } from '../server/SsrHtmlRuntime'
+import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from '../server/SsrHtmlRuntime'
 import {
   serializeSsrProductionAssetMetadata,
   SSR_PRODUCTION_ASSET_METADATA_PATH,
@@ -27,7 +28,7 @@ import {
 export type { SsrViteApplicationEntry }
 
 export interface SsrVitePluginOptions {
-  /** Optional path to `ssr.config.*` (auto-discovered when omitted). */
+  /** Optional path to `server.ts` (auto-discovered when omitted). */
   config?: string
   root?: string
   /**
@@ -61,6 +62,7 @@ const FRAMEWORK_DEDUPE = [
 const SSR_CLIENT_PUBLIC_PREFIX = '/@vue-ssr-lite/client/'
 const RESOLVED_RUNTIME = `\0${SSR_RUNTIME_VIRTUAL_ID}`
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
+const RESOLVED_HTML_PREFIX = `\0${SSR_HTML_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
 
 /**
@@ -109,10 +111,16 @@ const isSsrRuntimeVirtualId = (id: string): boolean =>
 const MODULE_SRC_SCRIPT_RE =
   /<script\b(?=[^>]*\btype\s*=\s*["']module["'])(?=[^>]*\bsrc\s*=\s*["']([^"']+)["'])[^>]*>\s*<\/script>/gi
 
-const isSsrConfigFile = (filePath: string, configPath?: string): boolean => {
+const isResolvedServerConfig = (
+  filePath: string,
+  projectRoot: string,
+  configPath?: string
+): boolean => {
   const normalized = normalizePath(filePath)
   if (configPath && normalized === normalizePath(configPath)) return true
-  return /\/(?:ssr|sitemap)\.config\.(ts|mts|js|mjs)$/.test(normalized)
+  return ['server.ts'].some(
+    (name) => normalized === normalizePath(resolve(projectRoot, name))
+  )
 }
 
 export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
@@ -132,6 +140,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
 
   const clientPublicUrl = (applicationId: string): string =>
     `${SSR_CLIENT_PUBLIC_PREFIX}${applicationId}`
+
+  const sharedHtmlInput = (applicationId: string): string =>
+    normalizePath(resolve(root, '.vue-ssr-lite', `${applicationId}.html`))
 
   const stripViteBase = (id: string): string => {
     const cleanId = id.split(/[?#]/, 1)[0]
@@ -210,10 +221,22 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
       const resolved = await ensureEntries()
       const input = Object.fromEntries(
-        resolved.applications.map((entry) => [
-          entry.id,
-          resolve(root, entry.template),
-        ])
+        await Promise.all(
+          resolved.applications.map(async (entry) => {
+            const templatePath = resolve(root, entry.template)
+            const shared =
+              resolved.applications.filter(
+                (candidate) => resolve(root, candidate.template) === templatePath
+              ).length > 1
+            try {
+              await access(templatePath)
+              if (!shared) return [entry.id, templatePath] as const
+            } catch {
+              // Use the virtual HTML document when the conventional template is absent.
+            }
+            return [entry.id, sharedHtmlInput(entry.id)] as const
+          })
+        )
       )
       const resolvedOutDir =
         userConfig.build?.outDir || clientOutDir || DEFAULT_CLIENT_OUT_DIR
@@ -222,11 +245,11 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
         },
         optimizeDeps: {
-          // The generated client is virtual, so Vite's startup scanner cannot
-          // discover this framework-owned hydration dependency. Declare only
-          // that stable boundary up front to keep its optimizer restart out of
-          // the first HTML request without traversing consumer or lazy code.
-          include: ['vue-ssr-lite/client'],
+          // Generated clients are virtual, so Vite's HTML scanner cannot see
+          // their Vue imports until the first browser request. Prebundle the
+          // stable framework boundary so SPA/SSR hydration does not race an
+          // optimizer restart on first load.
+          include: ['vue', 'vue-router', 'vue-ssr-lite/client'],
         },
         ssr: {
           // Keep the published runtime on its intentional Node package boundary.
@@ -258,7 +281,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       })
     },
     async handleHotUpdate({ file, server }) {
-      if (!isSsrConfigFile(file, configPath)) return
+      if (!isResolvedServerConfig(file, root, configPath)) return
       invalidateVirtualModules(server)
       invalidateConfigCache()
       await ensureEntries()
@@ -277,6 +300,23 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (publicEntry) {
         return `${RESOLVED_CLIENT_PREFIX}${publicEntry.id}`
       }
+      const sharedHtml = entries?.applications.find(
+        (application) =>
+          normalizePath(id) === sharedHtmlInput(application.id) ||
+          publicId.endsWith(`/.vue-ssr-lite/${application.id}.html`) ||
+          publicId === `.vue-ssr-lite/${application.id}.html`
+      )
+      if (sharedHtml) {
+        return sharedHtmlInput(sharedHtml.id)
+      }
+      const htmlId = publicId.includes(SSR_HTML_VIRTUAL_PREFIX)
+        ? publicId.slice(publicId.indexOf(SSR_HTML_VIRTUAL_PREFIX))
+        : id.includes(SSR_HTML_VIRTUAL_PREFIX)
+          ? id.slice(id.indexOf(SSR_HTML_VIRTUAL_PREFIX))
+          : undefined
+      if (htmlId) {
+        return `\0${htmlId}`
+      }
       return undefined
     },
     async load(id) {
@@ -288,9 +328,33 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           root,
           absoluteConfig,
           resolved.applications,
-          await resolveSitemapConfigPath(root),
           configuredBuildBase ?? resolvedBase
         )
+      }
+      const sharedResolved = await ensureEntries()
+      const sharedHtml = sharedResolved.applications.find(
+        (application) => normalizePath(id) === sharedHtmlInput(application.id)
+      )
+      if (sharedHtml) {
+        try {
+          return await readFile(resolve(root, sharedHtml.template), 'utf8')
+        } catch {
+          return SSR_HTML_TEMPLATE
+        }
+      }
+      if (id.startsWith(RESOLVED_HTML_PREFIX) || id.startsWith(`\0${SSR_HTML_VIRTUAL_PREFIX}`)) {
+        const resolved = await ensureEntries()
+        const applicationId = id
+          .replace(/^\0/, '')
+          .slice(SSR_HTML_VIRTUAL_PREFIX.length)
+          .replace(/\.html$/, '')
+        const entry = resolved.applications.find((candidate) => candidate.id === applicationId)
+        if (!entry) return
+        try {
+          return await readFile(resolve(root, entry.template), 'utf8')
+        } catch {
+          return SSR_HTML_TEMPLATE
+        }
       }
       if (!id.startsWith(RESOLVED_CLIENT_PREFIX)) return
       const applicationId = id.slice(RESOLVED_CLIENT_PREFIX.length)
@@ -361,10 +425,26 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       order: 'pre',
       async handler(html, context) {
         const filename = normalizePath(context.filename)
-        const entry = entries?.applications.find(
-          (candidate) =>
-            filename === normalizePath(resolve(root, candidate.template))
+        const requestPath = normalizePath(context.path || '')
+        const originalUrl = normalizePath(
+          String((context as { originalUrl?: string }).originalUrl || '')
         )
+        const htmlApplicationId =
+          /(?:virtual:vue-ssr-lite\/html\/|@vue-ssr-lite\/html\/)([A-Za-z][A-Za-z0-9_-]*)/.exec(
+            `${requestPath}\n${filename}\n${originalUrl}`
+          )?.[1] ??
+          /\.vue-ssr-lite\/([A-Za-z][A-Za-z0-9_-]*)\.html$/.exec(filename)?.[1]
+        const templateMatches =
+          entries?.applications.filter(
+            (candidate) =>
+              filename === normalizePath(resolve(root, candidate.template))
+          ) ?? []
+        const entry =
+          (htmlApplicationId
+            ? entries?.applications.find((candidate) => candidate.id === htmlApplicationId)
+            : undefined) ??
+          (templateMatches.length === 1 ? templateMatches[0] : undefined) ??
+          (entries?.applications.length === 1 ? entries.applications[0] : undefined)
         if (!entry) return html
         const clientUrl = clientPublicUrl(entry.id)
         const prepared = prepareSsrHtmlTemplate(
@@ -375,9 +455,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         // scripts (analytics, verification, widgets, etc.) remain consumer-owned.
         const definitionPath = normalizePath(
           (await resolveClientModule?.(
-            entry.definition,
+            entry.main,
             resolve(root, 'index.html')
-          )) ?? resolve(root, entry.definition)
+          )) ?? resolve(root, entry.main)
         ).split(/[?#]/, 1)[0]
         const applicationSources = new Set<string>()
         const scripts = [...prepared.matchAll(MODULE_SRC_SCRIPT_RE)]
