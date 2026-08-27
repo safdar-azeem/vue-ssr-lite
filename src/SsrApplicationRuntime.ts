@@ -35,6 +35,7 @@ import {
   SSR_REQUEST_RESOLUTION,
   type SsrResolutionController,
 } from './SsrRequestResolution'
+import { installCrossRenderNavigation } from './SsrRouteRenderRuntime'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -226,6 +227,9 @@ export const createSsrApplication = async <
       ? createApp(definition.root)
       : createSSRApp(definition.root)
     if (router) {
+      if (!options.server) {
+        installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
+      }
       app.use(router)
       router.afterEach((to, _from, failure) => {
         if (failure) return
@@ -248,11 +252,6 @@ export const createSsrApplication = async <
         ? definition.plugins()
         : definition.plugins ?? []
     for (const plugin of plugins) app.use(plugin)
-    extensionRuntime.setup()
-    hydration.onDispose(() => {
-      extensionRuntime.dispose()
-      managedHead.dispose()
-    })
     await definition.install?.({
       app,
       router,
@@ -260,6 +259,11 @@ export const createSsrApplication = async <
       hydration,
       resolution,
       server: options.server,
+    })
+    extensionRuntime.setup()
+    hydration.onDispose(() => {
+      extensionRuntime.dispose()
+      managedHead.dispose()
     })
 
     return { app, router, context, hydration, resolution, managedHead }
