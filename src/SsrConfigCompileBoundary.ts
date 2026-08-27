@@ -1,5 +1,6 @@
 import { access, readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { init as initEsModuleLexer, parse as parseEsModule } from 'es-module-lexer'
 import type { Plugin } from 'esbuild'
 import type { ApplicationConfig } from './SsrConfigTypes'
@@ -19,11 +20,28 @@ export const SSR_CONFIG_UNIVERSAL_NAMESPACE = 'vue-ssr-lite-config-universal'
 export interface SsrConfigModuleGraph {
   imports: Map<string, string[]>
   universalImporters: Set<string>
+  /** Every esbuild resolution edge, including aliases and external packages. */
+  resolutions?: SsrConfigModuleResolution[]
+}
+
+export interface SsrConfigModuleResolution {
+  importer: string
+  specifier: string
+  resolved: string
+  external: boolean
+  identity?: string
+}
+
+export interface SsrConfigResolvedModuleIdentity {
+  identity: string
+  path?: string
+  external: boolean
 }
 
 export const createSsrConfigModuleGraph = (): SsrConfigModuleGraph => ({
   imports: new Map(),
   universalImporters: new Set(),
+  resolutions: [],
 })
 
 const exists = async (filePath: string): Promise<boolean> => {
@@ -73,9 +91,82 @@ const recordImport = (
   resolved: string
 ) => {
   if (!importer) return
-  const list = graph.imports.get(importer) ?? []
-  if (!list.includes(resolved)) list.push(resolved)
-  graph.imports.set(importer, list)
+  const normalizedImporter = normalizeResolutionPath(importer)
+  const normalizedResolved = normalizeResolutionPath(resolved)
+  const list = graph.imports.get(normalizedImporter) ?? []
+  if (!list.includes(normalizedResolved)) list.push(normalizedResolved)
+  graph.imports.set(normalizedImporter, list)
+}
+
+const normalizeResolutionPath = (filePath: string): string =>
+  filePath.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
+
+const recordResolution = (
+  graph: SsrConfigModuleGraph,
+  importer: string | undefined,
+  specifier: string,
+  resolved: string,
+  external: boolean
+) => {
+  if (!importer || !resolved) return
+  const edge: SsrConfigModuleResolution = {
+    importer: normalizeResolutionPath(importer),
+    specifier,
+    resolved: external ? resolved : normalizeResolutionPath(resolved),
+    external,
+    identity: external ? resolveExternalModuleIdentity(importer, specifier, resolved) : undefined,
+  }
+  const resolutions = (graph.resolutions ??= [])
+  if (
+    !resolutions.some(
+      (item) =>
+        item.importer === edge.importer &&
+        item.specifier === edge.specifier &&
+        item.resolved === edge.resolved &&
+        item.external === edge.external
+    )
+  ) {
+    resolutions.push(edge)
+  }
+}
+
+const resolveExternalModuleIdentity = (
+  importer: string,
+  specifier: string,
+  fallback: string
+): string => {
+  try {
+    const resolved = import.meta.resolve(specifier, pathToFileURL(importer).href)
+    return resolved.startsWith('file:')
+      ? `external-file:${normalizeResolutionPath(fileURLToPath(resolved))}`
+      : `external:${resolved}`
+  } catch {
+    return `external:${fallback}`
+  }
+}
+
+/** Resolve an AST edge to the exact identity selected by the config esbuild run. */
+export const resolveSsrConfigGraphModule = (
+  graph: SsrConfigModuleGraph,
+  importer: string,
+  specifier: string
+): SsrConfigResolvedModuleIdentity | undefined => {
+  const normalizedImporter = normalizeResolutionPath(importer)
+  const edge = graph.resolutions?.find(
+    (item) => item.importer === normalizedImporter && item.specifier === specifier
+  )
+  if (!edge) return undefined
+  if (edge.external) {
+    return {
+      identity: edge.identity ?? `external:${edge.resolved}`,
+      external: true,
+    }
+  }
+  return {
+    identity: edge.resolved,
+    path: edge.resolved,
+    external: false,
+  }
 }
 
 const isUniversalSpecifier = (specifier: string): boolean =>
@@ -106,6 +197,9 @@ export const createSsrConfigBoundaryPlugin = (
         pluginData: { vueSsrLiteConfigBoundary: true },
       })
       if (resolved.errors.length) return resolved
+      if (resolved.path) {
+        recordResolution(graph, args.importer, args.path, resolved.path, Boolean(resolved.external))
+      }
       if (resolved.path && isUniversalSpecifier(resolved.path)) {
         if (args.importer) graph.universalImporters.add(args.importer)
         return {
