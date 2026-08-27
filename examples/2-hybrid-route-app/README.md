@@ -2,8 +2,6 @@
 
 One application. One domain. One global server. One global port.
 
-Example:
-
 ```text
 example.com/                 -> SSR
 example.com/about            -> SSR
@@ -18,9 +16,7 @@ example.com/admin/users      -> SPA
 example.com/admin/settings   -> SPA
 ```
 
-The global/default render mode is SSR.
-
-A route tree can override it with:
+The global render mode is SSR. A route tree overrides it with:
 
 ```ts
 meta: {
@@ -28,12 +24,12 @@ meta: {
 }
 ```
 
-Child routes inherit the nearest parent render mode.
+Child routes inherit the nearest parent render mode. Crossing SSR and SPA trees uses a full-document navigation. Navigation inside the same mode stays on Vue Router.
 
-SEO precedence remains:
+SEO precedence:
 
 1. global/site SEO
 2. route SEO
 3. dynamic/component `useSeo()`
 
-This keeps the application module-based without creating separate application definitions merely to change rendering by URL.
+Automatic sitemap generation excludes private SPA branches such as `/app/**` and `/admin/**` unless those URLs are provided explicitly.
