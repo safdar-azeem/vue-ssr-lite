@@ -6,147 +6,207 @@ import {
   generateSsrRuntimeModule,
   normalizeSsrConfig,
 } from './SsrConfigCompileRuntime'
-import { defineSsrConfig } from './SsrConfigRuntime'
+import { defineApplication, defineServer } from './index'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
+import { withSsrShells } from './SsrTestFixtures'
+import { defineComponent, h } from 'vue'
 
-describe('defineSsrConfig application domains', () => {
+const Root = defineComponent({ setup: () => () => h('div') })
+
+describe('defineServer application architecture', () => {
   it('normalizes conventions without a config file', () => {
     const normalized = normalizeSsrConfig({}, { root: '/workspace/my-app' })
     expect(normalized.name).toBe('my-app')
     expect(normalized.applications.app).toMatchObject({
       id: 'app',
       render: 'ssr',
-      application: { module: './src/main.ts' },
+      shell: { main: './src/main.ts', root: './src/App.vue' },
       template: './index.html',
       mountSelector: '#app',
       hosts: ['*'],
     })
   })
 
-  it('applies flat single-app overrides without repeating defaults', () => {
-    const siteSeo = { resolve: async () => ({ status: 'resolved' as const, defaults: { title: 'Tenant' } }) }
-    const siteRobots = { resolve: async () => ({ status: 'resolved' as const, config: {} }) }
-    const normalized = normalizeSsrConfig({
-      app: './src/platform/main.ts',
-      mount: '#website',
-      server: { trustProxy: true },
-      siteSeo,
-      siteRobots,
-    })
+  it('applies global shell and SEO overrides without repeating defaults', () => {
+    const site = { title: 'Tenant' }
+    const robots = {
+      resolve: async () => ({ status: 'resolved' as const, config: {} }),
+    }
+    const normalized = normalizeSsrConfig(
+      defineServer({
+        app: { main: './src/platform/main.ts', root: './src/platform/App.vue' },
+        mount: '#website',
+        server: { trustProxy: true },
+        seo: { site, robots },
+      }),
+      { root: '/workspace/my-app' }
+    )
     expect(normalized.applications.app).toMatchObject({
-      application: { module: './src/platform/main.ts' },
+      shell: {
+        main: './src/platform/main.ts',
+        root: './src/platform/App.vue',
+      },
       template: './index.html',
       mountSelector: '#website',
       render: 'ssr',
     })
     expect(normalized.server?.trustProxy).toBe(true)
-    expect(normalized.applications.app.siteSeo).toBe(siteSeo)
-    expect(normalized.applications.app.siteRobots).toBe(siteRobots)
+    expect(normalized.applications.app.seo?.site).toEqual(site)
+    expect(normalized.applications.app.seo?.robots).toBe(robots)
   })
 
-  it('uses application keys as ids and requires routing for multiple apps', () => {
+  it('uses defineApplication names as identity and requires routing for multiple apps', () => {
     const normalized = normalizeSsrConfig({
-      applications: {
-        website: {
-          app: './src/website/main.ts',
-          template: './index.html',
+      applications: [
+        defineApplication({
+          name: 'website',
           host: 'example.com',
-        },
-        store: {
-          app: './src/store/main.ts',
-          template: './store.html',
+        }),
+        defineApplication({
+          name: 'store',
           host: '*.shop.example.com',
-        },
-      },
+        }),
+      ],
     })
     expect(normalized.applications.website.id).toBe('website')
     expect(normalized.applications.store.hosts).toEqual(['*.shop.example.com'])
     expect(() =>
       normalizeSsrConfig({
-        applications: {
-          website: { app: './src/website/main.ts' },
-          store: { app: './src/store/main.ts' },
-        },
+        applications: [
+          defineApplication({ name: 'website' }),
+          defineApplication({ name: 'store' }),
+        ],
       })
     ).toThrow(/needs host routing/)
   })
 
-  it('rejects canonical template collisions while allowing distinct templates', () => {
-    expect(() =>
-      normalizeSsrConfig(
-        {
-          applications: {
-            website: {
-              app: './src/website/main.ts',
-              template: './index.html',
-              host: 'example.com',
-            },
-            admin: {
-              app: './src/admin/main.ts',
-              template: 'index.html',
-              host: 'admin.example.com',
-            },
-          },
-        },
-        { root: '/workspace/project' }
-      )
-    ).toThrow(
-      'Applications "website" and "admin" resolve to the same HTML template: /workspace/project/index.html'
-    )
-
-    expect(() =>
-      normalizeSsrConfig(
-        {
-          applications: {
-            website: {
-              app: './src/website/main.ts',
-              template: './index.html',
-              host: 'example.com',
-            },
-            admin: {
-              app: './src/admin/main.ts',
-              template: './admin.html',
-              host: 'admin.example.com',
-            },
-          },
-        },
-        { root: '/workspace/project' }
-      )
-    ).not.toThrow()
-  })
-
-  it('rejects ambiguous single and multi-app declarations', () => {
+  it('rejects duplicate application names', () => {
     expect(() =>
       normalizeSsrConfig({
-        app: './src/main.ts',
-        applications: {
-          website: { app: './src/website/main.ts', host: 'example.com' },
-        },
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+          defineApplication({ name: 'website', host: 'other.example.com' }),
+        ],
       })
-    ).toThrow(/single-application field `app` with applications/)
-    expect(() => normalizeSsrConfig({
-      siteSeo: { resolve: async () => ({ status: 'not-found' as const }) },
-      applications: {
-        website: { app: './src/website/main.ts', host: 'example.com' },
+    ).toThrow('Duplicate application name "website"')
+  })
+
+  it('rejects application ports and mixed single/multi-app fields', () => {
+    expect(() =>
+      defineApplication({
+        name: 'admin',
+        port: 3000,
+      } as never)
+    ).toThrow(/cannot declare a port/)
+    expect(() =>
+      normalizeSsrConfig({
+        render: 'ssr',
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+        ],
+      } as never)
+    ).toThrow(/single-application field `render` with applications/)
+    expect(() =>
+      normalizeSsrConfig({
+        seo: { site: { title: 'Tenant' } },
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+        ],
+      } as never)
+    ).toThrow(/single-application field `seo` with applications/)
+  })
+
+  it('rejects object-map application config', () => {
+    expect(() =>
+      normalizeSsrConfig({
+        applications: {
+          website: { name: 'website', host: 'example.com' },
+        },
+      } as never)
+    ).toThrow(/must be an array of defineApplication\(\) results/)
+  })
+
+  it('resolves application shell paths relative to the application module', () => {
+    const normalized = normalizeSsrConfig(
+      {
+        applications: [
+          defineApplication({
+            name: 'docs',
+            host: 'docs.example.com',
+            app: { main: './main.ts', root: './App.vue' },
+          }),
+        ],
       },
-    } as any)).toThrow(/single-application field `siteSeo` with applications/)
+      {
+        root: '/workspace/project',
+        applicationFiles: new Map([
+          ['docs', '/workspace/project/src/modules/docs/app.ts'],
+        ]),
+      }
+    )
+    expect(normalized.applications.docs.shell).toMatchObject({
+      main: './src/modules/docs/main.ts',
+      root: './src/modules/docs/App.vue',
+    })
+  })
+
+  it('rejects shell paths that escape the project root', () => {
+    expect(() =>
+      normalizeSsrConfig(
+        defineServer({
+          app: { main: '../outside/main.ts' },
+        }),
+        { root: '/workspace/project' }
+      )
+    ).toThrow(/resolves outside the project root/)
+  })
+
+  it('does not inherit shared main.ts routes onto explicit applications', async () => {
+    const compiled = await compileSsrConfig(
+      withSsrShells(
+        defineServer({
+          applications: [
+            defineApplication({
+              name: 'admin',
+              render: 'spa',
+              host: 'admin.example.com',
+              routes: [{ path: '/users', component: Root }],
+            }),
+          ],
+        }),
+        {
+          admin: {
+            root: Root,
+            main: {
+              default: () => undefined,
+              routes: [{ path: '/from-shared-main', component: Root }],
+            },
+          },
+        }
+      ),
+      {
+        root: '/workspace/project',
+        applicationFiles: new Map([
+          ['admin', '/workspace/project/src/modules/admin/app.ts'],
+        ]),
+      }
+    )
+    expect(compiled.applications[0]?.application?.routes).toEqual([
+      { path: '/users', component: Root },
+    ])
   })
 
   it('compiles app-centric domains and resolves context params', async () => {
     const compiled = await compileSsrConfig(
       {
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'demo',
           runtime: 'unified',
-          applications: {
-            erp: {
+          applications: [
+            defineApplication({
+              name: 'erp',
               render: 'spa',
-              application: {
-                module: './src/ErpBootstrap.ts',
-                exportName: 'createErpApplication',
-              },
-              template: 'index.html',
               roles: ['unified', 'erp'],
               domain: {
                 development: 'localhost',
@@ -160,14 +220,10 @@ describe('defineSsrConfig application domains', () => {
               publicConfig: {
                 api: { endpoint: 'http://localhost:4300/graphql', timeout: 8000 },
               },
-            },
-            storefront: {
+            }),
+            defineApplication({
+              name: 'storefront',
               render: 'ssr',
-              application: {
-                id: 'ignored-legacy-id',
-                root: {} as any,
-              },
-              template: 'site.html',
               roles: ['unified', 'storefront'],
               domain: {
                 development: 'shop.localhost',
@@ -181,14 +237,14 @@ describe('defineSsrConfig application domains', () => {
               publicConfig: {
                 api: { endpoint: 'http://localhost:4300/graphql', timeout: 8000 },
               },
-            },
-          },
+            }),
+          ],
         }),
       },
       { development: true }
     )
 
-    expect(compiled.applications.find((app) => app.id === 'storefront')?.application?.id).toBe(
+    expect(compiled.applications.find((app) => app.id === 'storefront')?.id).toBe(
       'storefront'
     )
 
@@ -225,78 +281,66 @@ describe('defineSsrConfig application domains', () => {
 
   it('defaults the production runtime to unified', async () => {
     const compiled = await compileSsrConfig(
-        {
-          default: defineSsrConfig({
-            name: 'demo',
-            applications: {
-              erp: {
-                render: 'spa',
-                application: {
-                  module: './src/Erp.ts',
-                  exportName: 'createErpApplication',
-                },
-                template: 'index.html',
-                domain: {
-                  development: 'localhost',
-                  production: 'app.example.com',
-                },
+      {
+        default: defineServer({
+          name: 'demo',
+          applications: [
+            defineApplication({
+              name: 'erp',
+              render: 'spa',
+              domain: {
+                development: 'localhost',
+                production: 'app.example.com',
               },
-            },
-          }),
-        },
-        { development: false }
-      )
+            }),
+          ],
+        }),
+      },
+      { development: false }
+    )
     expect(compiled.server.role).toBe('unified')
   })
 
   it('lets a single production application serve the incoming host', async () => {
     const compiled = await compileSsrConfig(
-        {
-          default: defineSsrConfig({
-            name: 'demo',
-            runtime: 'unified',
-            applications: {
-              erp: {
-                render: 'spa',
-                application: {
-                  module: './src/Erp.ts',
-                  exportName: 'createErpApplication',
-                },
-                template: 'index.html',
-                domain: {
-                  development: 'localhost',
-                  production: '',
-                },
+      {
+        default: defineServer({
+          name: 'demo',
+          runtime: 'unified',
+          applications: [
+            defineApplication({
+              name: 'erp',
+              render: 'spa',
+              domain: {
+                development: 'localhost',
+                production: '',
               },
-            },
-          }),
-        },
-        { development: false }
-      )
+            }),
+          ],
+        }),
+      },
+      { development: false }
+    )
     expect(compiled.applications[0]?.hosts).toEqual(['*'])
   })
 
   it('does not require publicConfig.api.endpoint in production', async () => {
     const compiled = await compileSsrConfig(
       {
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'demo',
           runtime: 'unified',
-          applications: {
-            erp: {
+          applications: [
+            defineApplication({
+              name: 'erp',
               render: 'spa',
-              application: {
-                module: './src/Erp.ts',
-                exportName: 'createErpApplication',
-              },
-              template: 'index.html',
               domain: {
                 development: 'localhost',
                 production: 'app.example.com',
               },
               publicConfig: { featureFlags: { darkMode: true } },
-            },
-          },
+            }),
+          ],
         }),
       },
       { development: false }
@@ -309,39 +353,31 @@ describe('defineSsrConfig application domains', () => {
   it('allows localAliases on root and subdomain apps without host collision', async () => {
     const compiled = await compileSsrConfig(
       {
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'demo',
           runtime: 'unified',
-          applications: {
-            erp: {
+          applications: [
+            defineApplication({
+              name: 'erp',
               render: 'spa',
-              application: {
-                module: './src/ErpBootstrap.ts',
-                exportName: 'createErpApplication',
-              },
-              template: 'index.html',
               domain: {
                 development: 'localhost',
                 production: 'app.example.com',
                 mode: 'root-and-subdomains',
                 localAliases: true,
               },
-            },
-            storefront: {
+            }),
+            defineApplication({
+              name: 'storefront',
               render: 'ssr',
-              application: {
-                id: 'storefront',
-                root: {} as any,
-              },
-              template: 'site.html',
               domain: {
                 development: 'shop.localhost',
                 production: 'shop.example.com',
                 mode: 'root-and-subdomains',
                 localAliases: true,
               },
-            },
-          },
+            }),
+          ],
         }),
       },
       { development: true }
@@ -363,24 +399,20 @@ describe('defineSsrConfig application domains', () => {
     const renderError = () => null
     const compiled = await compileSsrConfig(
       {
-        default: defineSsrConfig({
+        default: defineServer({
           name: 'demo',
           runtime: 'unified',
           server: { onMetrics, renderError },
-          applications: {
-            erp: {
+          applications: [
+            defineApplication({
+              name: 'erp',
               render: 'spa',
-              application: {
-                module: './src/Erp.ts',
-                exportName: 'createErpApplication',
-              },
-              template: 'index.html',
               domain: {
                 development: 'localhost',
                 production: 'app.example.com',
               },
-            },
-          },
+            }),
+          ],
         }),
       },
       { development: true }
@@ -389,74 +421,110 @@ describe('defineSsrConfig application domains', () => {
     expect(compiled.server.renderError).toBe(renderError)
   })
 
-  it('extracts Vite entries and generates virtual modules without regex rewrites', () => {
-    const config = defineSsrConfig({
+  it('extracts Vite entries and generates virtual modules without importing server-only app.ts', () => {
+    const config = defineServer({
       name: 'demo',
-      applications: {
-        erp: {
+      applications: [
+        defineApplication({
+          name: 'erp',
           render: 'spa',
-          application: {
-            module: './src/ErpBootstrap.ts',
-            exportName: 'createErpApplication',
-          },
-          template: 'index.html',
           domain: {
             development: 'localhost',
             production: 'app.example.com',
           },
-        },
-        storefront: {
+        }),
+        defineApplication({
+          name: 'storefront',
           render: 'ssr',
-          application: {
-            module: './src/ShopSsrApplication.ts',
-            exportName: 'shopSsrApplication',
-          },
-          template: 'site.html',
-          mountSelector: '#app',
           domain: {
             development: 'shop.localhost',
             production: 'shop.example.com',
             customDomains: true,
           },
-        },
-      },
+        }),
+      ],
     })
-    const entries = extractSsrViteEntries(config)
+    const entries = extractSsrViteEntries(config, {
+      root: '/app',
+      applicationFiles: new Map([
+        ['erp', '/app/src/modules/erp/app.ts'],
+        ['storefront', '/app/src/modules/storefront/app.ts'],
+      ]),
+    })
     expect(entries.applications.map((app) => app.id)).toEqual([
       'erp',
       'storefront',
     ])
+    expect(entries.applications[0]).toMatchObject({
+      id: 'erp',
+      kind: 'spa',
+      main: './src/main.ts',
+      root: './src/App.vue',
+      routesFromMain: false,
+    })
 
     const runtime = generateSsrRuntimeModule(
       '/app',
-      '/app/ssr.config.ts',
+      '/app/server.ts',
       entries.applications
     )
-    expect(runtime).toContain('import __ssrUserConfig from "/app/ssr.config.ts"')
-    expect(runtime).not.toContain('ErpBootstrap')
-    expect(runtime).toContain(
-      'import { shopSsrApplication as __ssrApp0 } from "/app/src/ShopSsrApplication.ts"'
-    )
-    expect(runtime).toContain('app: __ssrApp0')
-    expect(runtime).toContain('const viteBase = "/"')
-    expect(runtime).toContain('__vueSsrLiteViteBase: viteBase')
+    expect(runtime).toContain('import __ssrUserConfig from "/app/server.ts"')
+    expect(runtime).toContain('__vueSsrLiteApplicationFiles')
+    expect(runtime).toContain('/app/src/modules/erp/app.ts')
+    expect(runtime).not.toContain('ssr.config')
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
+    expect(runtime).toContain('const viteBase = "/"')
+    expect(runtime).toContain('/app/src/App.vue')
+    expect(runtime).toContain('/app/src/main.ts')
 
     const spaClient = generateSsrClientModule('/app', entries.applications[0])
     expect(spaClient).toContain('mountSpaApplication')
     expect(spaClient).toContain('id: "erp"')
-    expect(spaClient).toContain('from "/app/src/ErpBootstrap.ts"')
+    expect(spaClient).toContain('from "/app/src/App.vue"')
+    expect(spaClient).toContain('from "/app/src/main.ts"')
+    expect(spaClient).toContain('const routes = undefined')
+    expect(spaClient).toContain('export const definition')
+    expect(spaClient).not.toContain('src/modules/erp/app.ts')
 
     const ssrClient = generateSsrClientModule('/app', entries.applications[1])
     expect(ssrClient).toContain('hydrateSsrApplication')
     expect(ssrClient).toContain('id: "storefront"')
-    expect(ssrClient).toContain('from "/app/src/ShopSsrApplication.ts"')
+    expect(ssrClient).not.toContain('src/modules/storefront/app.ts')
+  })
 
-    expect(
-      generateSsrClientModule('/app', {
-        ...entries.applications[1],
-        definition: '@/ShopSsrApplication.ts',
-      })
-    ).toContain('from "@/ShopSsrApplication.ts"')
+  it('projects universal runtime fields into the generated client', () => {
+    const client = generateSsrClientModule('/app', {
+      id: 'app',
+      kind: 'ssr',
+      main: './src/main.ts',
+      root: './src/App.vue',
+      template: './index.html',
+      mountSelector: '#app',
+      routesFromMain: true,
+      universalProjection: {
+        imports: [
+          'import { analyticsExtension } from "/app/src/extensions/custom-analytics"',
+        ],
+        fields: {
+          extensions: '[analyticsExtension({ propertyId: "UA-123456" })]',
+          createInitialState: '() => ({ marker: "ADVANCED_INITIAL_STATE" })',
+          scrollBehavior: '(to) => ({ el: to.hash })',
+        },
+      },
+    })
+    expect(client).toContain('UA-123456')
+    expect(client).toContain('extensions:')
+    expect(client).toContain('createInitialState:')
+    expect(client).toContain('scrollBehavior:')
+    expect(client).not.toContain('server.ts')
+  })
+
+  it('uses main.ts routes for the single-app client module', () => {
+    const entries = extractSsrViteEntries(defineServer({ render: 'ssr' }), {
+      root: '/app',
+    })
+    expect(entries.applications[0]?.routesFromMain).toBe(true)
+    const client = generateSsrClientModule('/app', entries.applications[0])
+    expect(client).toContain('const routes = __ssrMain.routes')
   })
 })
