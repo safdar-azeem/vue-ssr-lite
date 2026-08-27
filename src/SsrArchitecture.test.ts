@@ -3,11 +3,10 @@ import { defineComponent, h, ref } from 'vue'
 import { RouterView } from 'vue-router'
 import { defineExtension } from './core/extensions/defineExtension'
 import { useSeo } from './extensions/seo/useSeo'
-import { defineApplication } from './index'
 import { serializeManagedHead } from './SsrManagedHead'
 import { renderSsrApplication } from './SsrRenderRuntime'
 import { setResponseStatus } from './SsrResponseStatus'
-import { createTestRenderRequest } from './SsrTestFixtures'
+import { createTestApplication, createTestRenderRequest } from './SsrTestFixtures'
 
 const Shell = defineComponent({
   setup: () => () => h(RouterView),
@@ -29,7 +28,7 @@ const request = (path: string, host = 'ex.test') =>
 
 describe('approved architecture acceptance', () => {
   it('renders useSeo tags during SSR without onMounted', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'seo-ssr',
       root: Shell,
       routes: [
@@ -63,7 +62,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('isolates concurrent requests and extension state', async () => {
-    const titled = defineApplication({
+    const titled = createTestApplication({
       id: 'iso-title',
       root: Shell,
       routes: [
@@ -88,7 +87,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('uses async setup data in the settled head', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'async-seo',
       root: Shell,
       routes: [
@@ -114,7 +113,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('applies route status, runtime override, and error noindex', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'status',
       root: Shell,
       routes: [
@@ -151,7 +150,7 @@ describe('approved architecture acceptance', () => {
 
   it('keeps HTTP status when SEO is disabled', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'disabled',
       root: Shell,
       routes: [
@@ -177,7 +176,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('keeps titles in private mode and omits canonical', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'private',
       root: Shell,
       routes: [
@@ -195,7 +194,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('rejects invalid response statuses', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'invalid-status',
       root: Shell,
       routes: [
@@ -218,7 +217,7 @@ describe('approved architecture acceptance', () => {
         context.contributeHead({ title: 'From extension' })
       },
     })
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'override',
       root: Shell,
       routes: [{ path: '/', component: page(() => useSeo({ title: 'Page' })) }],
@@ -230,7 +229,7 @@ describe('approved architecture acceptance', () => {
   })
 
   it('escapes JSON-LD and does not trust a spoofed host for canonicals', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'secure',
       root: Shell,
       routes: [
@@ -266,6 +265,26 @@ describe('approved architecture acceptance', () => {
     )?.[1]
     expect(jsonLd).toBeTruthy()
     expect(jsonLd).not.toContain('</script>')
+  })
+
+  it('isolates plugin state across concurrent SSR requests', async () => {
+    const stores: string[] = []
+    const application = createTestApplication({
+      id: 'plugin-isolation',
+      root: Shell,
+      routes: [{ path: '/', component: page(() => undefined) }],
+      install: ({ app, server }) => {
+        const id = `${server ? 'ssr' : 'client'}-${stores.length}`
+        stores.push(id)
+        app.provide('store', id)
+      },
+    })
+    await Promise.all([
+      renderSsrApplication(application, request('/')),
+      renderSsrApplication(application, request('/')),
+    ])
+    expect(stores).toHaveLength(2)
+    expect(new Set(stores).size).toBe(2)
   })
 
   it('warns about setup misuse separately from SEO being disabled', () => {
