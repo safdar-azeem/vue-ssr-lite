@@ -1,4 +1,4 @@
-import type { SsrConfig } from './SsrConfigTypes'
+import type { ServerConfig } from './SsrConfigTypes'
 
-/** Identity helper for typed flat SSR configuration modules. */
-export const defineSsrConfig = <T extends SsrConfig>(config: T): T => config
+/** Identity helper for typed `server.ts` modules. */
+export const defineServer = <T extends ServerConfig>(config: T): T => config
