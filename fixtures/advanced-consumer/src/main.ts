@@ -1,5 +1,6 @@
 import { defineComponent, h } from 'vue'
-import { defineApplication, usePublicConfig, useSeo } from '../../../src/index'
+import type { AppContext } from '../../../src/index'
+import { usePublicConfig, useSeo } from '../../../src/index'
 import { analyticsExtension } from './extensions/custom-analytics'
 
 const Home = defineComponent({
@@ -14,19 +15,12 @@ const Home = defineComponent({
   },
 })
 
-const App = defineComponent({
-  name: 'AdvancedApp',
-  setup() {
-    return () => h(Home)
-  },
-})
+const routes = [{ path: '/', component: Home }]
 
-export default defineApplication({
-  root: App,
-  routes: [{ path: '/', component: Home }],
-  seo: {
-    siteName: 'Advanced',
-    titleTemplate: '%s | Advanced',
-  },
-  extensions: [analyticsExtension({ propertyId: 'UA-123456' })],
-})
+export { routes }
+
+export default (_context: AppContext) => {
+  // Custom extensions are registered through server.ts.
+}
+
+export { analyticsExtension }
