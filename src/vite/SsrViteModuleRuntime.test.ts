@@ -1,18 +1,23 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type ViteDevServer } from 'vite'
+import vue from '@vitejs/plugin-vue'
 import {
   compileSsrConfig,
   SSR_RUNTIME_VIRTUAL_ID,
 } from '../SsrConfigCompileRuntime'
 import { vueSsrLite } from './SsrVitePlugin'
 import { importSsrViteModule } from './SsrViteModuleRuntime'
+import { defineComponent, h } from 'vue'
+import { closeViteDevServer, provisionHostVuePeers, withSsrShells } from '../SsrTestFixtures'
+import { defineServer } from '../SsrConfigRuntime'
 
 let root = ''
 let server: ViteDevServer | undefined
+let hmrServer: Server | undefined
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-module-runner-'))
@@ -20,20 +25,17 @@ beforeEach(async () => {
   await writeFile(
     join(root, 'src/main.ts'),
     [
-      "export const namedApplication = { root: {}, marker: 'named' }",
-      "export default { root: {}, marker: 'default' }",
+      'export const marker = "named"',
+      'export default () => {}',
       '',
     ].join('\n')
   )
+  await writeFile(join(root, 'src/App.vue'), '<template><div class="shell" /></template>\n')
   await writeFile(
-    join(root, 'ssr.config.mjs'),
+    join(root, 'server.ts'),
     [
       'export default {',
       '  server: { port: 0 },',
-      '  application: {',
-      "    module: './src/main.ts',",
-      "    exportName: 'namedApplication',",
-      '  },',
       '}',
       '',
     ].join('\n')
@@ -42,23 +44,26 @@ beforeEach(async () => {
     join(root, 'index.html'),
     '<!doctype html><html><body><div id="app"></div></body></html>'
   )
+  await provisionHostVuePeers(root)
+  hmrServer = createHttpServer()
   server = await createServer({
     root,
     configFile: false,
     logLevel: 'silent',
     future: { removeSsrLoadModule: 'warn' },
-    plugins: [vueSsrLite({ root })],
+    plugins: [vueSsrLite({ root }), vue()],
     server: {
       middlewareMode: true,
-      hmr: { server: createHttpServer() },
+      hmr: { server: hmrServer },
     },
     appType: 'custom',
   })
 })
 
 afterEach(async () => {
-  await server?.close()
+  await closeViteDevServer(server, hmrServer)
   server = undefined
+  hmrServer = undefined
   if (root) await rm(root, { recursive: true, force: true })
   root = ''
 })
@@ -102,47 +107,47 @@ describe('Vite SSR ModuleRunner imports', () => {
 
   it('imports application default and named exports through ModuleRunner', async () => {
     const applicationModule = await importSsrViteModule<{
-      default: { marker: string }
-      namedApplication: { marker: string }
+      default: () => void
+      marker: string
     }>(server!, '/src/main.ts')
 
-    expect(applicationModule.default.marker).toBe('default')
-    expect(applicationModule.namedApplication.marker).toBe('named')
+    expect(applicationModule.marker).toBe('named')
+    expect(typeof applicationModule.default).toBe('function')
   })
 
-  it('supplies relative application modules to config compilation unchanged', async () => {
+  it('binds Core-owned shells during config compilation', async () => {
+    const Root = defineComponent({ setup: () => () => h('div', 'shell') })
     const compiled = await compileSsrConfig(
-      {
-        server: { port: 0 },
-        application: {
-          module: './src/main.ts',
-          exportName: 'namedApplication',
-        },
-      },
+      withSsrShells(
+        defineServer({
+          server: { port: 0 },
+        }),
+        { app: { root: Root, main: { default: () => undefined } } }
+      ),
       {
         development: true,
         root,
-        importModule: (specifier) => importSsrViteModule(server!, specifier),
       }
     )
 
     expect(compiled.applications[0].application).toMatchObject({
-      marker: 'named',
+      id: 'app',
+      root: Root,
     })
   })
 
   it('evaluates the virtual SSR runtime through the plugin pipeline', async () => {
     const runtime = await importSsrViteModule<{
       default: () => Promise<{
-        app: { marker: string }
         __vueSsrLiteViteBase: string
+        __vueSsrLiteShells: Record<string, { root: unknown; main: unknown }>
       }>
     }>(server!, SSR_RUNTIME_VIRTUAL_ID)
 
-    await expect(runtime.default()).resolves.toMatchObject({
-      app: { marker: 'named' },
-      __vueSsrLiteViteBase: '/',
-    })
+    const generated = await runtime.default()
+    expect(generated.__vueSsrLiteViteBase).toBe('/')
+    expect(generated.__vueSsrLiteShells.app).toBeDefined()
+    expect(generated.__vueSsrLiteShells.app.main).toBeDefined()
   })
 
   it('observes an updated module after Vite handles its file change', async () => {
