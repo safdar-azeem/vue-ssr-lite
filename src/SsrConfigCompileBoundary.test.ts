@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  bundleSsrConfigModule,
   collectApplicationDeclarationFiles,
+  resolveSsrConfigGraphModule,
   resolveApplicationRoutesModule,
   type SsrConfigModuleGraph,
 } from './SsrConfigCompileBoundary'
@@ -16,6 +18,28 @@ afterEach(async () => {
 })
 
 describe('application source discovery contract', () => {
+  it('records authoritative alias and external-package resolution identities', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-resolution-graph-'))
+    await writeFile(
+      join(root, 'tsconfig.json'),
+      JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@state': ['./state.ts'] } } })
+    )
+    await writeFile(join(root, 'state.ts'), 'export const state = {}\n')
+    await writeFile(
+      join(root, 'server.ts'),
+      `import { state } from '@state'\nimport 'safe-package/subpath'\nexport default state\n`
+    )
+    const { graph } = await bundleSsrConfigModule(root, join(root, 'server.ts'))
+    expect(resolveSsrConfigGraphModule(graph, join(root, 'server.ts'), '@state')).toMatchObject({
+      identity: join(root, 'state.ts'),
+      path: join(root, 'state.ts'),
+      external: false,
+    })
+    expect(
+      resolveSsrConfigGraphModule(graph, join(root, 'server.ts'), 'safe-package/subpath')
+    ).toEqual({ identity: 'external:safe-package/subpath', external: true })
+  })
+
   it('walks helper factories instead of stopping at defineApplication imports', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-discovery-'))
     await mkdir(join(root, 'src', 'website'), { recursive: true })
