@@ -1,30 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
 import { open, readFile, realpath, stat } from 'node:fs/promises'
-import { extname, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import type { ViteDevServer } from 'vite'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrConfigCompileRuntime'
-import { resolveSsrDomainContext } from '../SsrDomainRuntime'
-import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../SsrObservability'
-import { resolvePublicConfigValue } from '../SsrPublicConfig'
-import { renderSsrApplication } from '../SsrRenderRuntime'
+import { safeSsrLog } from '../SsrObservability'
 import {
   assertProductionSeoOriginConfigured,
-  readPublicUrl,
   requiresProductionSeoOrigin,
-  resolveServerSiteOrigin,
 } from './SsrSiteOriginRuntime'
-import { resolveSiteSeoForRequest, SeoProviderFailure } from '../extensions/seo/SeoEndpoints'
-import { isPrivateSeoMode } from '../extensions/seo/types'
-import type {
-  SsrHeaders,
-  SsrEndpointTools,
-  SsrHttpRequest,
-  SsrHttpResponse,
-  SsrPublicConfigRequest,
-} from '../SsrRuntimeTypes'
-import { serializeSsrState } from '../SsrSerialization'
+import type { SsrHeaders, SsrHttpResponse } from '../SsrRuntimeTypes'
 import {
   parseSsrProductionAssetMetadata,
   SSR_PRODUCTION_ASSET_METADATA_PATH,
@@ -42,23 +28,21 @@ import {
 import {
   assertSupportedSsrViteBase,
   parseSsrViteManifest,
-  resolveRenderedApplicationAssets,
   type SsrViteManifest,
 } from '../SsrRenderedAssetRuntime'
 import {
   resolveRenderedStyleDependencies,
   runWithSsrViteAssetResolutionContext,
 } from '../vite/SsrViteAssetRuntime'
-import {
-  filterSsrCookieHeader,
-  resolveSsrForwardedHost,
-  resolveSsrForwardedProtocol,
-  resolveSsrHostEntry,
-} from './SsrHostRuntime'
-import { injectSsrHtml, prepareSsrHtmlTemplate, renderSsrErrorDocument, SSR_HTML_TEMPLATE } from './SsrHtmlRuntime'
-import { isSsrResponseCacheable, resolveSsrResponseCacheKey } from './SsrResponseCacheRuntime'
+import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from './SsrHtmlRuntime'
 import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
+import {
+  createSsrRequestScope,
+  handleSsrRequest,
+  SsrRequestCancelledError,
+  type SsrNormalizedRequest,
+} from './SsrRequestHandler'
 
 export interface SsrManagedServerOptions {
   production: boolean
@@ -72,117 +56,6 @@ export interface SsrManagedServer {
   listen: () => Promise<void>
   close: () => Promise<void>
   address: () => { host: string; port: number }
-}
-
-class SsrRequestTimeoutError extends Error {
-  constructor() {
-    super('SSR request timed out.')
-    this.name = 'SsrRequestTimeoutError'
-  }
-}
-
-class SsrRequestCancelledError extends Error {
-  constructor() {
-    super('SSR request was cancelled.')
-    this.name = 'SsrRequestCancelledError'
-  }
-}
-
-class SsrErrorRendererTimeoutError extends Error {
-  constructor() {
-    super('SSR error renderer timed out.')
-    this.name = 'SsrErrorRendererTimeoutError'
-  }
-}
-
-// Error rendering is a failure-response escape hatch, not a second request
-// lifetime. Keep it bounded even when the original request has already
-// reached its deadline (and therefore has an aborted request signal).
-const SSR_ERROR_RENDER_TIMEOUT_MS = 250
-
-const runBoundedErrorRenderer = async <T>(
-  work: () => T | Promise<T>,
-  signal: AbortSignal
-): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let onAbort: (() => void) | undefined
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new SsrErrorRendererTimeoutError()),
-      SSR_ERROR_RENDER_TIMEOUT_MS
-    )
-  })
-  const aborted = signal.aborted
-    ? undefined
-    : new Promise<never>((_resolve, reject) => {
-        onAbort = () =>
-          reject(signal.reason instanceof Error ? signal.reason : new SsrRequestCancelledError())
-        signal.addEventListener('abort', onAbort, { once: true })
-      })
-  try {
-    const workResult = Promise.resolve().then(work)
-    return await Promise.race(aborted ? [workResult, timeout, aborted] : [workResult, timeout])
-  } finally {
-    if (timer) clearTimeout(timer)
-    if (onAbort) signal.removeEventListener('abort', onAbort)
-  }
-}
-
-interface SsrRequestScope {
-  readonly signal: AbortSignal
-  readonly remainingMs: () => number
-  cancel(reason?: Error): void
-  run<T>(work: () => T | Promise<T>): Promise<T>
-  throwIfAborted(): void
-  dispose(): void
-}
-
-const createRequestScope = (timeoutMs: number): SsrRequestScope => {
-  const controller = new AbortController()
-  const finiteTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0
-  const deadline = finiteTimeout ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  if (finiteTimeout) {
-    timer = setTimeout(() => {
-      controller.abort(new SsrRequestTimeoutError())
-    }, timeoutMs)
-  }
-
-  const abortReason = (): Error =>
-    controller.signal.reason instanceof Error
-      ? controller.signal.reason
-      : new SsrRequestCancelledError()
-
-  return {
-    signal: controller.signal,
-    remainingMs: () => (Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 0),
-    cancel: (reason = new SsrRequestCancelledError()) => {
-      if (!controller.signal.aborted) controller.abort(reason)
-    },
-    throwIfAborted: () => {
-      if (controller.signal.aborted) throw abortReason()
-    },
-    run: async <T>(work: () => T | Promise<T>): Promise<T> => {
-      if (controller.signal.aborted) throw abortReason()
-      let onAbort: (() => void) | undefined
-      const aborted = new Promise<never>((_resolve, reject) => {
-        onAbort = () => reject(abortReason())
-        controller.signal.addEventListener('abort', onAbort, { once: true })
-      })
-      try {
-        return await Promise.race([Promise.resolve().then(work), aborted])
-      } finally {
-        if (onAbort) controller.signal.removeEventListener('abort', onAbort)
-      }
-    },
-    dispose: () => {
-      if (timer) clearTimeout(timer)
-      if (!controller.signal.aborted) {
-        controller.abort(new SsrRequestCancelledError())
-      }
-    },
-  }
 }
 
 const parsePort = (value: number | undefined): number => {
@@ -251,39 +124,6 @@ const resolveRuntime = async (
   return definition
 }
 
-const injectSpaDomainState = (
-  template: string,
-  applicationId: string,
-  domain: ReturnType<typeof resolveSsrDomainContext>,
-  publicConfig: unknown
-): string => {
-  const payload = serializeSsrState({
-    version: 1,
-    applicationId,
-    domain,
-    publicConfig,
-  })
-  const tag = `<script type="application/json" id="vue-ssr-lite-domain">${payload}</script>`
-  if (template.includes('</body>')) {
-    return template.replace(/<\/body>/i, `\t${tag}\n</body>`)
-  }
-  return `${template}\n${tag}`
-}
-
-const htmlSecurityHeaders = {
-  'referrer-policy': 'strict-origin-when-cross-origin',
-  'x-content-type-options': 'nosniff',
-  'x-frame-options': 'SAMEORIGIN',
-}
-
-const isHtmlNavigation = (request: IncomingMessage, pathname: string): boolean => {
-  if (request.method !== 'GET' && request.method !== 'HEAD') return false
-  if (request.headers['sec-fetch-mode'] === 'navigate') return true
-  const accept = String(request.headers.accept || '')
-  if (accept.includes('text/html')) return true
-  return (!accept || accept === '*/*') && !extname(pathname)
-}
-
 const endResponse = (
   request: IncomingMessage,
   response: ServerResponse,
@@ -300,7 +140,8 @@ const sendResponse = (
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) {
       throw new Error(`[vue-ssr-lite] Invalid response header name "${name}".`)
     }
-    if (/[\u0000-\u001f\u007f]/.test(value)) {
+    const values = Array.isArray(value) ? value : [value]
+    if (values.some((item) => /[\u0000-\u001f\u007f]/.test(item))) {
       throw new Error(`[vue-ssr-lite] Response header "${name}" contains control characters.`)
     }
   }
@@ -391,21 +232,6 @@ export const writeSsrProductionAsset = async (
   return true
 }
 
-const sendJson = (
-  request: IncomingMessage,
-  response: ServerResponse,
-  statusCode: number,
-  payload: Record<string, unknown>
-) =>
-  sendResponse(request, response, {
-    statusCode,
-    body: JSON.stringify(payload),
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-    },
-  })
-
 const snapshotRequestHeaders = (request: IncomingMessage): SsrHeaders =>
   Object.freeze(
     Object.fromEntries(
@@ -415,14 +241,6 @@ const snapshotRequestHeaders = (request: IncomingMessage): SsrHeaders =>
       ])
     )
   ) as SsrHeaders
-
-const snapshotRequestDomain = (
-  domain: ReturnType<typeof resolveSsrDomainContext>
-): ReturnType<typeof resolveSsrDomainContext> =>
-  Object.freeze({
-    ...domain,
-    params: Object.freeze({ ...domain.params }),
-  })
 
 const runViteMiddleware = (
   vite: ViteDevServer,
@@ -711,13 +529,8 @@ export const createSsrManagedServer = async (
     const startedAt = Date.now()
     const requestId =
       String(request.headers['x-request-id'] || '').trim() ||
-      `${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-    let pathname = '/'
-    let rawAssetPathname = '/'
-    let selectedEntryId = 'unknown'
-    let activeRenderRequest: SsrHttpRequest<any> | undefined
-    let activeDefinition = lastDefinition
-    const scope = createRequestScope(lastDefinition.server.requestTimeoutMs)
+      startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+    const scope = createSsrRequestScope(lastDefinition.server.requestTimeoutMs)
     const cancelDisconnectedRequest = () => scope.cancel()
     const cancelClosedResponse = () => {
       if (!response.writableEnded) scope.cancel()
@@ -725,9 +538,6 @@ export const createSsrManagedServer = async (
     const closeIdleAfterResponse = () => {
       response.off('finish', closeIdleAfterResponse)
       response.off('close', closeIdleAfterResponse)
-      // A connection carrying legitimate in-flight work was not idle when
-      // shutdown began. Once its response finishes or closes it is safe to
-      // reap resulting keep-alive sockets without disturbing application work.
       if (shuttingDown) nodeServer.closeIdleConnections?.()
     }
     request.once('aborted', cancelDisconnectedRequest)
@@ -736,527 +546,62 @@ export const createSsrManagedServer = async (
     response.once('close', closeIdleAfterResponse)
 
     try {
-      const definition = await scope.run(loadDefinition)
-      activeDefinition = definition
-      const serverOptions = definition.server
-      const requestUrl = new URL(request.url || '/', 'http://internal')
-      pathname = requestUrl.pathname
-      // WHATWG URL parsing normalizes encoded dot segments. Keep the raw path
-      // for filesystem security checks so `%2e%2e` cannot be erased before the
-      // asset resolver has a chance to reject it.
-      rawAssetPathname = (request.url || '/').split('?', 1)[0]
-      const healthPath = serverOptions.healthPath
-      const readinessPath = serverOptions.readinessPath
-
-      if (pathname === healthPath) {
-        return sendJson(request, response, 200, {
-          status: 'ok',
-          service: definition.name,
-          role: serverOptions.role || 'default',
-          timestamp: new Date(startedAt).toISOString(),
-        })
-      }
-      if (pathname === readinessPath) {
-        if (shuttingDown) {
-          return sendJson(request, response, 503, {
-            status: 'error',
-            service: definition.name,
-            message: 'Server is shutting down.',
-          })
-        }
-        try {
-          await scope.run(() => assertReady(definition))
-          return sendJson(request, response, 200, {
-            status: 'ok',
-            service: definition.name,
-            role: serverOptions.role || 'default',
-          })
-        } catch {
-          return sendJson(request, response, 503, {
-            status: 'error',
-            service: definition.name,
-            message: 'A required dependency is unavailable.',
-          })
-        }
-      }
-
-      // Reserved Vite/framework metadata is never an application route. Make
-      // this decision at the HTTP boundary so HTML Accept headers and browser
-      // navigation hints cannot turn an unresolved private asset into the
-      // SPA/SSR document fallback. Check both the raw path (for filesystem
-      // security) and WHATWG-normalized pathname (for encoded dot segments).
-      if (
-        options.production &&
-        (isSsrPrivateProductionAssetPath(rawAssetPathname, viteBase) ||
-          isSsrPrivateProductionAssetPath(pathname, viteBase))
-      ) {
-        return sendJson(request, response, 404, {
-          status: 'error',
-          service: definition.name,
-          message: 'Resource not found.',
-        })
-      }
-
-      const incomingHost = resolveSsrForwardedHost(
-        request.headers['x-forwarded-host'],
-        request.headers.host,
-        serverOptions.trustProxy
-      )
-      if (!incomingHost) {
-        return sendResponse(request, response, {
-          statusCode: 400,
-          body: isHtmlNavigation(request, pathname)
-            ? renderSsrErrorDocument('Invalid request', 'The Host header is invalid.')
-            : JSON.stringify({
-                status: 'error',
-                message: 'Invalid Host header.',
-              }),
-          headers: {
-            'content-type': isHtmlNavigation(request, pathname)
-              ? 'text/html; charset=utf-8'
-              : 'application/json; charset=utf-8',
-            'cache-control': 'no-store',
-            ...htmlSecurityHeaders,
-          },
-        })
-      }
-      const hostResolution = resolveSsrHostEntry(
-        definition.applications,
-        incomingHost,
-        definition.defaultApplicationId
-      )
-      if (!hostResolution) {
-        return sendJson(request, response, 421, {
-          status: 'error',
-          service: definition.name,
-          message: 'No application serves this host.',
-        })
-      }
-      const entry = hostResolution.entry
-      selectedEntryId = entry.id
-      const requestRender = entry.resolveRouteRender
-        ? await scope.run(() =>
-            entry.resolveRouteRender!(`${pathname}${requestUrl.search}`)
-          )
-        : entry.kind
-      safeSsrLog(serverOptions.logger, 'debug', 'ssr.host_resolved', {
-        entryId: entry.id,
-        category: hostResolution.category,
-        specificity: hostResolution.specificity,
-        matchedPattern: hostResolution.matchedPattern,
-        hostname: hostResolution.normalizedHostname,
-        role: serverOptions.role || 'default',
-      })
-      if (entry.roles?.length && serverOptions.role && !entry.roles.includes(serverOptions.role)) {
-        const message = `Runtime role does not serve application "${entry.id}".`
-        return sendResponse(request, response, {
-          statusCode: 421,
-          body: isHtmlNavigation(request, pathname)
-            ? renderSsrErrorDocument('Misdirected request', message)
-            : JSON.stringify({ status: 'error', message }),
-          headers: {
-            'content-type': isHtmlNavigation(request, pathname)
-              ? 'text/html; charset=utf-8'
-              : 'application/json; charset=utf-8',
-            'cache-control': 'no-store',
-            ...htmlSecurityHeaders,
-          },
-        })
-      }
-
-      const protocol = resolveSsrForwardedProtocol(
-        request.headers['x-forwarded-proto'],
-        (request.socket as any).encrypted ? 'https' : 'http',
-        serverOptions.trustProxy
-      )
-      const domain = snapshotRequestDomain(
-        resolveSsrDomainContext(incomingHost, entry, definition.development, protocol)
-      )
-      const cookie = filterSsrCookieHeader(
-        request.headers.cookie,
-        entry.cookieAllowlist,
-        entry.cookieDenylist
-      )
-      const headers = snapshotRequestHeaders(request)
-      const method = request.method || 'GET'
-      const url = new URL(
-        `${requestUrl.pathname}${requestUrl.search}`,
-        `${protocol}://${incomingHost}`
-      ).href
-      const publicConfigRequest: SsrPublicConfigRequest = Object.freeze({
+      const normalizedRequest: SsrNormalizedRequest = Object.freeze({
         requestId,
-        url,
-        host: incomingHost,
-        protocol,
-        method,
-        headers,
-        cookie,
-        domain,
-        signal: scope.signal,
-        pathname,
-        search: requestUrl.search,
-        entryId: entry.id,
+        startedAt,
+        method: request.method || 'GET',
+        url: request.url || '/',
+        headers: snapshotRequestHeaders(request),
+        protocol: (request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
       })
-      const publicConfig = await scope.run(() =>
-        resolvePublicConfigValue(
-          entry.publicConfigFactory ?? entry.publicConfig,
-          publicConfigRequest
-        )
-      )
-      const renderRequest: SsrHttpRequest<any> = {
-        requestId,
-        url,
-        host: incomingHost,
-        protocol,
-        method,
-        headers,
-        cookie,
-        publicConfig,
-        signal: scope.signal,
-        domain,
-        pathname,
-        search: requestUrl.search,
-        entryId: entry.id,
-      }
-      activeRenderRequest = renderRequest
-      renderRequest.siteOrigin = await scope.run(() =>
-        resolveServerSiteOrigin({
-          siteUrl: entry.application?.seo?.siteUrl,
-          publicUrl: readPublicUrl(),
-          resolveSiteUrl: definition.resolveSiteUrl,
-          request: renderRequest,
-          production: options.production,
-          requireProductionOrigin: requiresProductionSeoOrigin(
-            requestRender === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
-            entry.application?.seo
-          ),
-          allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
-        })
-      )
-      const needsSiteSeo =
-        isHtmlNavigation(request, pathname) ||
-        pathname === '/robots.txt' ||
-        pathname === '/sitemap.xml' ||
-        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
-      if (needsSiteSeo) {
-        const siteSeoResolution = await scope.run(() =>
-          resolveSiteSeoForRequest(
-            renderRequest,
-            entry.id,
-            renderRequest.siteOrigin!,
-            entry.siteSeo
-          )
-        )
-        if (siteSeoResolution?.status === 'not-found') {
-          return sendResponse(request, response, {
-            statusCode: siteSeoResolution.responseStatus ?? 404,
-            headers: { 'cache-control': 'private, no-store' },
-          })
-        }
-      }
-      const endpointTools: SsrEndpointTools = {
-        signal: scope.signal,
-        logger: createSafeSsrLogger(serverOptions.logger),
-      }
-
-      for (const endpoint of entry.endpoints) {
-        if (!endpoint.match(renderRequest)) continue
-        const result = await scope.run(() => endpoint.handle(renderRequest, endpointTools))
-        if (result) return sendResponse(request, response, result)
-      }
-
-      if (options.production && (request.method === 'GET' || request.method === 'HEAD')) {
-        const asset = await scope.run(() =>
-          resolveSsrProductionAsset({
+      const result = await handleSsrRequest(normalizedRequest, {
+        production: options.production,
+        scope,
+        loadDefinition,
+        fallbackDefinition: () => lastDefinition,
+        shuttingDown: () => shuttingDown,
+        assertReady,
+        viteBase,
+        ssrManifest,
+        loadTemplate,
+        loadPreparedSsrTemplate,
+        resolveDevelopmentAssets: (applicationId, modules) =>
+          options.vite
+            ? resolveRenderedStyleDependencies(options.vite!, applicationId, modules)
+            : Promise.resolve([]),
+        isPrivateProductionAssetPath: (pathname) =>
+          isSsrPrivateProductionAssetPath(pathname, viteBase),
+        serveProductionAsset: async (pathname, protectedTemplates, signal) => {
+          const asset = await resolveSsrProductionAsset({
             clientRoot,
-            pathname: rawAssetPathname,
-            protectedTemplates: definition.applications.map(({ template }) => template),
+            pathname,
+            protectedTemplates,
             viteBase,
             immutableAssetPaths,
-            signal: scope.signal,
+            signal,
           })
-        )
-        if (
-          asset &&
-          (await scope.run(() => writeSsrProductionAsset(request, response, asset, scope.signal)))
-        ) {
-          return
-        }
-      } else if (
-        options.vite &&
-        (pathname.startsWith('/src/') ||
-          pathname.startsWith('/@') ||
-          pathname.includes('.') ||
-          pathname === '/__vite_ping')
-      ) {
-        await scope.run(() => runViteMiddleware(options.vite!, request, response))
-        if (response.writableEnded) return
-      }
-
-      if (!isHtmlNavigation(request, pathname)) {
-        return sendJson(request, response, 404, {
-          status: 'error',
-          service: definition.name,
-          message: 'Resource not found.',
-        })
-      }
-
-      const privateSeoHtml =
-        requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
-      const responseCache =
-        requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
-      let responseCacheKey: string | null = null
-      try {
-        responseCacheKey = await scope.run(() =>
-          resolveSsrResponseCacheKey(entry.id, renderRequest, responseCache)
-        )
-      } catch (error) {
-        scope.throwIfAborted()
-        safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.key.failed', {
-          entryId: entry.id,
-          requestId: renderRequest.requestId,
-          error: error instanceof Error ? error.message : 'Unknown cache error',
-        })
-      }
-      if (responseCache && responseCacheKey) {
-        try {
-          const cached = await scope.run(() =>
-            responseCache.store.get(responseCacheKey!, {
-              signal: scope.signal,
-            })
-          )
-          if (cached) {
-            return sendResponse(request, response, {
-              ...cached,
-              headers: {
-                ...cached.headers,
-                'server-timing': 'cache;desc="hit"',
-              },
-            })
-          }
-        } catch (error) {
-          scope.throwIfAborted()
-          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.read.failed', {
-            entryId: entry.id,
-            requestId: renderRequest.requestId,
-            error: error instanceof Error ? error.message : 'Unknown cache error',
-          })
-        }
-      }
-
-      if (requestRender === 'spa') {
-        const template = await scope.run(() =>
-          loadTemplate(definition, entry, request.url || '/', scope.signal)
-        )
-        return sendResponse(request, response, {
-          statusCode: 200,
-          body: injectSpaDomainState(template, entry.id, domain, publicConfig),
-          headers: {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': entry.cacheControl || 'private, no-store',
-            vary: 'Host, X-Forwarded-Host',
-            ...htmlSecurityHeaders,
-          },
-        })
-      }
-
-      const application = entry.application!
-      const template = await scope.run(() =>
-        loadPreparedSsrTemplate(definition, entry, request.url || '/', scope.signal)
-      )
-      const remainingRequestMs = scope.remainingMs()
-      const configuredResolutionMs = serverOptions.resolutionDeadlineMs
-      const resolutionDeadlineMs =
-        remainingRequestMs > 0
-          ? Math.min(configuredResolutionMs, remainingRequestMs)
-          : configuredResolutionMs
-      const rendered = await scope.run(() =>
-        renderSsrApplication(application, renderRequest, {
-          maxResolutionPasses: serverOptions.maxResolutionPasses,
-          resolutionDeadlineMs,
-          diagnostics: serverOptions.diagnostics,
-          logger: serverOptions.logger,
-        })
-      )
-      if (rendered.response.redirect) {
-        const redirect = rendered.response.redirect
-        const target = new URL(redirect.location, renderRequest.url)
-        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-          throw new Error('SSR redirects must use HTTP or HTTPS.')
-        }
-        if (target.username || target.password || /[\u0000-\u001f\u007f]/.test(redirect.location)) {
-          throw new Error('SSR redirects must not contain credentials or control characters.')
-        }
-        if (!redirect.allowExternal && target.origin !== new URL(renderRequest.url).origin) {
-          throw new Error('Cross-origin redirect requires allowExternal: true.')
-        }
-        return sendResponse(request, response, {
-          statusCode: redirect.statusCode ?? 302,
-          headers: {
-            location: target.href,
-            'cache-control': 'no-store',
-          },
-        })
-      }
-      const renderedAssets = options.production
-        ? resolveRenderedApplicationAssets({
-            applicationId: application.id,
-            moduleIds: rendered.renderedModules,
-            base: viteBase,
-            manifest: ssrManifest!,
-          })
-        : options.vite
-          ? await scope.run(() =>
-              resolveRenderedStyleDependencies(
-                options.vite!,
-                application.id,
-                rendered.renderedModules
-              )
-            )
-          : []
-      const document = injectSsrHtml(template, {
-        applicationId: application.id,
-        html: rendered.html,
-        teleports: rendered.teleports,
-        head: rendered.head,
-        state: rendered.hydrationState,
-        assets: renderedAssets,
+          return asset
+            ? writeSsrProductionAsset(request, response, asset, signal)
+            : false
+        },
+        serveViteRequest: options.vite
+          ? async () => {
+              await runViteMiddleware(options.vite!, request, response)
+              return response.writableEnded
+            }
+          : undefined,
       })
-      safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
-      safeSsrLog(serverOptions.logger, 'info', 'ssr.render.complete', rendered.metrics as any)
-      const responseHeaders: Record<string, string> = {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': entry.cacheControl || 'private, no-store',
-        vary: 'Host, X-Forwarded-Host',
-        'server-timing': [
-          `context;dur=${rendered.metrics.contextDurationMs.toFixed(1)}`,
-          `route;dur=${rendered.metrics.routeDurationMs.toFixed(1)}`,
-          `render;dur=${rendered.metrics.renderDurationMs.toFixed(1)}`,
-        ].join(', '),
-        ...rendered.response.headers,
-        ...htmlSecurityHeaders,
-      }
-      if (privateSeoHtml) {
-        for (const name of Object.keys(responseHeaders)) {
-          if (name.toLowerCase() === 'cache-control') delete responseHeaders[name]
-        }
-        responseHeaders['cache-control'] = 'private, no-store'
-      }
-      const result: SsrHttpResponse = {
-        statusCode: rendered.response.statusCode,
-        body: document,
-        headers: responseHeaders,
-      }
-      if (
-        responseCache &&
-        responseCacheKey &&
-        isSsrResponseCacheable(result, renderRequest, responseCache)
-      ) {
-        try {
-          const consumerTags = await scope.run(() => responseCache.tags?.(renderRequest) ?? [])
-          const tags = [
-            ...consumerTags,
-            ...(renderRequest.siteSeoMeta?.cacheTags ?? []),
-          ]
-          await scope.run(() =>
-            responseCache.store.set(responseCacheKey!, result, {
-              ttlMs: responseCache.ttlMs,
-              tags,
-              signal: scope.signal,
-            })
-          )
-        } catch (error) {
-          scope.throwIfAborted()
-          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.write.failed', {
-            entryId: entry.id,
-            requestId: renderRequest.requestId,
-            error: error instanceof Error ? error.message : 'Unknown cache error',
-          })
-        }
-      }
-      return sendResponse(request, response, result)
+      if (result && !response.writableEnded) sendResponse(request, response, result)
     } catch (error) {
-      const definition = activeDefinition
-      const cancelled = error instanceof SsrRequestCancelledError
-      if (cancelled) {
+      if (error instanceof SsrRequestCancelledError) {
         if (!response.destroyed) response.destroy()
         return
       }
-      safeSsrLog(definition.server.logger, 'error', 'ssr.request.failed', {
+      safeSsrLog(lastDefinition.server.logger, 'error', 'ssr.transport.failed', {
         requestId,
-        entryId: selectedEntryId,
-        pathname,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error.message : 'Unknown transport error',
       })
-      if (response.writableEnded) return
-      if (response.headersSent) return response.destroy()
-      let timeout =
-        error instanceof SsrRequestTimeoutError ||
-        scope.signal.reason instanceof SsrRequestTimeoutError
-      const seoProviderFailure =
-        error instanceof SeoProviderFailure ||
-        pathname === '/robots.txt' ||
-        pathname === '/sitemap.xml' ||
-        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
-      let statusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
-      if (definition.server.renderError) {
-        try {
-          const renderedError = await runBoundedErrorRenderer(
-            () =>
-              definition.server.renderError!({
-                error,
-                kind: timeout ? 'timeout' : 'internal',
-                production: options.production,
-                request: activeRenderRequest,
-                entryId: selectedEntryId === 'unknown' ? undefined : selectedEntryId,
-              }),
-            scope.signal
-          )
-          if (renderedError) {
-            return sendResponse(request, response, {
-              ...renderedError,
-              statusCode: renderedError.statusCode >= 400 ? renderedError.statusCode : statusCode,
-              headers: {
-                ...renderedError.headers,
-                'cache-control': 'no-store',
-                ...htmlSecurityHeaders,
-              },
-            })
-          }
-        } catch (renderError) {
-          if (renderError instanceof SsrRequestTimeoutError) {
-            timeout = true
-            statusCode = 504
-          }
-          safeSsrLog(definition.server.logger, 'error', 'ssr.error-renderer.failed', {
-            entryId: selectedEntryId,
-            error:
-              renderError instanceof Error ? renderError.message : 'Unknown error renderer failure',
-          })
-        }
-      }
-      if (isHtmlNavigation(request, pathname)) {
-        return sendResponse(request, response, {
-          statusCode,
-          body: renderSsrErrorDocument(
-            timeout ? 'Request timed out' : 'Application unavailable',
-            options.production
-              ? 'The application could not render this page. Please try again.'
-              : error instanceof Error
-                ? error.message
-                : 'Unknown rendering failure.'
-          ),
-          headers: {
-            'content-type': 'text/html; charset=utf-8',
-            'cache-control': 'no-store',
-            ...htmlSecurityHeaders,
-          },
-        })
-      }
-      return sendJson(request, response, statusCode, {
-        status: 'error',
-        service: definition.name,
-      })
+      if (!response.destroyed) response.destroy()
     } finally {
       request.off('aborted', cancelDisconnectedRequest)
       response.off('close', cancelClosedResponse)
@@ -1268,7 +613,6 @@ export const createSsrManagedServer = async (
       }
     }
   }
-
   const nodeServer = createServer((request, response) =>
     options.vite
       ? runWithSsrViteAssetResolutionContext(() => handleRequest(request, response))
