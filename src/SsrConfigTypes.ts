@@ -1,5 +1,14 @@
-import type { SsrApplicationDefinition } from './SsrRuntimeTypes'
-import type { SiteRobotsConfig, SiteSeoConfig } from './extensions/seo/types'
+import type { Component } from 'vue'
+import type { Router, RouterHistory, RouterScrollBehavior, RouteRecordRaw } from 'vue-router'
+import type { ExtensionDefinition } from './core/extensions/ExtensionDefinition'
+import type { SitemapProvider } from './extensions/seo/sitemap'
+import type {
+  SeoSiteDefaults,
+  SiteRobotsConfig,
+  SiteSeoConfig,
+  RobotsConfig,
+} from './extensions/seo/types'
+import type { AppContext } from './SsrAppContext'
 import type {
   SsrEndpointDefinition,
   SsrErrorRenderContext,
@@ -31,11 +40,11 @@ export interface SsrDomainParamDefinition {
 }
 
 export interface SsrApplicationDomainConfig {
-  /** Apex used while `NODE_ENV !== 'production'`. */
+  /** Apex or `*.apex` used while `NODE_ENV !== 'production'`. */
   development?: string
-  /** Apex used in production. Optional when host routing is not required. */
+  /** Apex or `*.apex` used in production. Optional when host routing is not required. */
   production?: string
-  /** Defaults to `root-and-subdomains`. */
+  /** Defaults to `root-and-subdomains`. Ignored when the active domain value is already `*.host`. */
   mode?: SsrDomainMode
   /** Register loopback aliases in development. Defaults to false. */
   localAliases?: boolean
@@ -55,57 +64,75 @@ export interface SsrApplicationCookiesConfig {
   deny?: readonly string[]
 }
 
-export type SsrApplicationLoader =
-  | SsrApplicationDefinition<any, any>
-  | (() => SsrApplicationDefinition<any, any> | Promise<SsrApplicationDefinition<any, any>>)
-
-/**
- * Path-based application reference. Prefer this in `ssr.config` so Vite can
- * generate client entries without importing browser-only modules into Node.
- */
-export interface SsrApplicationModuleRef {
-  /** Project-root-relative module path (e.g. `./src/runtime/ErpBootstrap.ts`). */
-  module: string
-  /** Named export. Defaults to the module's `default` export. */
-  exportName?: string
+/** Optional shell overrides. Paths in `defineApplication()` are relative to that module. */
+export interface SsrAppShellConfig {
+  /** Initializer module. Defaults to `/src/main.ts`. */
+  main?: string
+  /** Root Vue component. Defaults to `/src/App.vue`. */
+  root?: string
 }
 
-/**
- * Low-level programmatic source accepted by server compilation APIs. The
- * consumer-facing `SsrApplicationConfig.app` intentionally accepts only a
- * statically analyzable module path/ref so Vite can generate browser entries.
- */
-export type SsrApplicationSource = SsrApplicationLoader | SsrApplicationModuleRef
+export type SsrSiteSeoInput = SeoSiteDefaults | SiteSeoConfig
+export type SsrRobotsInput = SiteRobotsConfig | RobotsConfig
 
 /**
- * One self-contained SPA or SSR application. The object key under
- * `applications` is the canonical application ID everywhere.
+ * Explicit SEO configuration for a server or application.
+ * There is no automatic `sitemap.config.ts` lookup.
  */
-export interface SsrApplicationConfig {
-  /** Statically analyzable application module. Defaults to `./src/main.ts`. */
-  app?: SsrApplicationModuleRef | string
-  /** Browser SPA shell or server-rendered application. Defaults to SSR. */
+export interface SsrSeoConfig {
+  site?: SsrSiteSeoInput
+  sitemap?: SitemapProvider
+  robots?: SsrRobotsInput
+  /** Private applications emit conservative robots and skip public sitemaps. */
+  mode?: 'public' | 'private'
+  enabled?: boolean
+  siteUrl?: string
+  allowHttpOrigin?: boolean
+  trailingSlash?: boolean
+}
+
+export type SsrAppInitializer = (context: AppContext) => void | Promise<void>
+
+export interface SsrMainModule {
+  default: SsrAppInitializer
+  routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+}
+
+/** Advanced request-safe router factory. Core supplies memory or web history. */
+export type SsrRouterFactory = (options: {
+  history: RouterHistory
+  server: boolean
+}) => Router
+
+/**
+ * Multi-application registration. Identity is `name`, never array index.
+ * Applications are always registered explicitly on `defineServer()`.
+ */
+export interface ApplicationConfig {
+  name: string
   render?: SsrRenderMode
-  /** Existing Vite HTML entry. Defaults to `./index.html`. */
-  template?: string
-  roles?: readonly string[]
+  domain?: SsrApplicationDomainConfig
   /** Simple host pattern(s), primarily for multi-application routing. */
   host?: string | readonly string[]
-  domain?: SsrApplicationDomainConfig
+  /** Existing Vite HTML entry. Defaults to `./index.html` when present. */
+  template?: string
+  roles?: readonly string[]
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
   mount?: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
-  /**
-   * Opaque public configuration delivered to the selected application.
-   * Transport-only — the library does not interpret GraphQL, REST, etc.
-   */
   publicConfig?: SsrPublicConfigSource
-  /** Server-only, site-stable tenant SEO resolution. */
-  siteSeo?: SiteSeoConfig
-  /** Server-only dynamic robots.txt resolution. */
-  siteRobots?: SiteRobotsConfig
+  seo?: SsrSeoConfig
+  /** Application-specific shell. Paths resolve relative to the `app.ts` module. */
+  app?: SsrAppShellConfig
+  routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+  router?: SsrRouterFactory
+  scrollBehavior?: RouterScrollBehavior
+  /** Universal-safe custom runtime extensions. Built-in SEO is auto-attached. */
+  extensions?: readonly ExtensionDefinition[]
+  cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
+  createInitialState?: import('./SsrRuntimeTypes').SsrApplicationDefinition['createInitialState']
 }
 
 export interface SsrConfigServerOptions {
@@ -129,10 +156,6 @@ export interface SsrConfigServerOptions {
   ) => SsrHttpResponse | null | Promise<SsrHttpResponse | null>
 }
 
-/**
- * Optional convention overrides. Single-application options stay flat;
- * `applications.<id>` is introduced only for multi-application projects.
- */
 export interface SsrConfigShared {
   name?: string
   server?: SsrConfigServerOptions
@@ -148,19 +171,36 @@ export interface SsrConfigShared {
   resolveSiteUrl?: (
     request: SsrHttpRequest<any>
   ) => string | undefined | Promise<string | undefined>
+  /** Global shell override. Paths resolve relative to the project root. */
+  app?: SsrAppShellConfig
 }
 
 /** Flat convention overrides for one application. */
-export type SsrSingleApplicationConfig = SsrConfigShared &
-  SsrApplicationConfig & {
-    applications?: never
-  }
+export type SsrSingleApplicationConfig = SsrConfigShared & {
+  applications?: never
+  render?: SsrRenderMode
+  template?: string
+  roles?: readonly string[]
+  host?: string | readonly string[]
+  domain?: SsrApplicationDomainConfig
+  cookies?: SsrApplicationCookiesConfig
+  endpoints?: SsrEndpointDefinition<any>[]
+  mount?: string
+  cacheControl?: string
+  responseCache?: SsrResponseCacheStrategy<any>
+  publicConfig?: SsrPublicConfigSource
+  seo?: SsrSeoConfig
+  routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+  router?: SsrRouterFactory
+  scrollBehavior?: RouterScrollBehavior
+  extensions?: readonly ExtensionDefinition[]
+  cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
+  createInitialState?: import('./SsrRuntimeTypes').SsrApplicationDefinition['createInitialState']
+}
 
-/** Multi-application configuration. Single-app fields are intentionally forbidden. */
+/** Multi-application configuration. Per-app fields belong on `defineApplication()`. */
 export type SsrMultiApplicationConfig = SsrConfigShared & {
-  applications: Record<string, SsrApplicationConfig>
-  app?: never
-  application?: never
+  applications: readonly ApplicationConfig[]
   render?: never
   template?: never
   host?: never
@@ -168,21 +208,25 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
   cookies?: never
   endpoints?: never
   mount?: never
-  mountSelector?: never
   cacheControl?: never
   responseCache?: never
   publicConfig?: never
-  siteSeo?: never
-  siteRobots?: never
+  seo?: never
+  routes?: never
+  router?: never
+  scrollBehavior?: never
+  extensions?: never
 }
 
-export type SsrConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfig
+export type ServerConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfig
+/** @internal Normalized alias used by the compile/runtime pipeline. */
+export type SsrConfig = ServerConfig
 
 export type SsrConfigExport = SsrConfig | (() => SsrConfig | Promise<SsrConfig>)
 
 /** Serializable domain snapshot attached to every request and hydration state. */
 export interface SsrDomainContext {
-  /** Selected application id (the `applications` object key). */
+  /** Selected application id (`defineApplication({ name })` or the single-app default). */
   entry: string
   /** Normalized request authority, including the active port when present. */
   authority: string
@@ -200,4 +244,22 @@ export interface SsrDomainContext {
   development: boolean
   /** Values declared via `domain.params`. */
   params: Record<string, string>
+}
+
+/** Internal compile-time shell graph for one application. */
+export interface SsrResolvedAppShell {
+  main: string
+  root: string
+  /** Set when routes are owned by `defineApplication()`, not `main.ts`. */
+  routesModule?: string
+  /** Directory of the application module, when registered from a file. */
+  applicationDir?: string
+  /** Absolute path of the `defineApplication()` module, when registered from a file. */
+  applicationFile?: string
+}
+
+/** Runtime Vue shell bound by the generated server module. */
+export interface SsrBoundAppShell {
+  root: Component
+  main: SsrMainModule
 }
