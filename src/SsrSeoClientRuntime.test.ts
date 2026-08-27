@@ -2,7 +2,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { KeepAlive, computed, defineComponent, h, nextTick, ref } from 'vue'
 import { RouterView, type Router } from 'vue-router'
-import { defineApplication } from './index'
 import { useSeo } from './extensions/seo/useSeo'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import {
