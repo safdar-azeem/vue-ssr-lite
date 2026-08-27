@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { existsSync } from 'node:fs'
 import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { extname, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -54,7 +55,7 @@ import {
   resolveSsrForwardedProtocol,
   resolveSsrHostEntry,
 } from './SsrHostRuntime'
-import { injectSsrHtml, prepareSsrHtmlTemplate, renderSsrErrorDocument } from './SsrHtmlRuntime'
+import { injectSsrHtml, prepareSsrHtmlTemplate, renderSsrErrorDocument, SSR_HTML_TEMPLATE } from './SsrHtmlRuntime'
 import { isSsrResponseCacheable, resolveSsrResponseCacheKey } from './SsrResponseCacheRuntime'
 import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
@@ -222,14 +223,23 @@ const resolveRuntime = async (
       !application.roles?.length ||
       !definition.server.role ||
       application.roles.includes(definition.server.role)
-    if (application.kind === 'ssr' && enabledForRole && !application.application) {
-      throw new Error(`SSR application "${application.id}" requires an ssr application definition.`)
+    if (
+      (application.kind === 'ssr' || application.hasRouteRenderOverrides) &&
+      enabledForRole &&
+      !application.application
+    ) {
+      throw new Error(
+        `SSR application "${application.id}" requires ${application.shell.main} and ${application.shell.root}.`
+      )
     }
     if (
       options.production &&
       enabledForRole &&
       application.application &&
-      requiresProductionSeoOrigin(application.kind, application.application.seo)
+      requiresProductionSeoOrigin(
+        application.kind === 'spa' && !application.hasRouteRenderOverrides ? 'spa' : 'ssr',
+        application.application.seo
+      )
     ) {
       assertProductionSeoOriginConfigured({
         siteUrl: application.application.seo?.siteUrl,
@@ -598,47 +608,59 @@ export const createSsrManagedServer = async (
     return loadingDefinition
   }
 
-  const resolveTemplatePath = (definition: SsrCompiledConfig, templateName: string) =>
-    resolve(options.production ? clientRoot : definition.server.root, templateName)
+  const resolveTemplatePath = (
+    definition: SsrCompiledConfig,
+    entry: { id: string; template: string }
+  ) => {
+    if (!options.production) {
+      return resolve(definition.server.root, entry.template)
+    }
+    const split = resolve(clientRoot, '.vue-ssr-lite', `${entry.id}.html`)
+    if (existsSync(split)) return split
+    return resolve(clientRoot, entry.template)
+  }
 
   const loadTemplate = async (
     definition: SsrCompiledConfig,
-    templateName: string,
+    entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
     signal?: AbortSignal
   ) => {
-    const templatePath = resolveTemplatePath(definition, templateName)
+    const templatePath = resolveTemplatePath(definition, entry)
     if (productionTemplates) {
       return productionTemplates.load(productionTemplatePaths.get(templatePath) ?? templatePath)
     }
-    const template = await readFile(templatePath, { encoding: 'utf8', signal })
+    const template = entry.templateMissing
+      ? SSR_HTML_TEMPLATE
+      : await readFile(templatePath, { encoding: 'utf8', signal })
     if (!options.vite) return template
-    const templateUrl = `/${templateName.replaceAll('\\', '/').replace(/^\/+/, '')}`
+    // Keep the selected application id in the URL Vite uses as the HTML
+    // identity. Shared templates (one index.html, several hosts) cannot be
+    // disambiguated from the filesystem filename alone.
+    const templateUrl = `/@vue-ssr-lite/html/${entry.id}`
     return options.vite.transformIndexHtml(templateUrl, template, requestUrl)
   }
 
   const loadPreparedSsrTemplate = async (
     definition: SsrCompiledConfig,
-    templateName: string,
-    mountSelector: string,
+    entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
     signal?: AbortSignal
   ) => {
     if (productionTemplates) {
-      const templatePath = resolveTemplatePath(definition, templateName)
+      const templatePath = resolveTemplatePath(definition, entry)
       return productionTemplates.prepare(
         productionTemplatePaths.get(templatePath) ?? templatePath,
-        mountSelector
+        entry.mountSelector
       )
     }
     return prepareSsrHtmlTemplate(
-      await loadTemplate(definition, templateName, requestUrl, signal),
-      mountSelector
+      await loadTemplate(definition, entry, requestUrl, signal),
+      entry.mountSelector
     )
   }
 
   const assertReady = async (definition: SsrCompiledConfig) => {
-    const runtimeRoot = definition.server.root
     const enabledApplications = definition.applications.filter(
       (application) =>
         !application.roles?.length ||
@@ -647,9 +669,8 @@ export const createSsrManagedServer = async (
     )
     await Promise.all(
       enabledApplications.map(async (application) => {
-        const information = await stat(
-          resolve(options.production ? clientRoot : runtimeRoot, application.template)
-        )
+        if (application.templateMissing && !options.production) return
+        const information = await stat(resolveTemplatePath(definition, application))
         if (!information.isFile()) {
           throw new Error(`SSR client entry is missing: ${application.template}`)
         }
@@ -668,9 +689,9 @@ export const createSsrManagedServer = async (
   )
   const initialTemplatePaths = [
     ...new Set(
-      initialEnabledApplications.map((application) =>
-        resolveTemplatePath(initialRuntime, application.template)
-      )
+      initialEnabledApplications
+        .filter((application) => options.production || !application.templateMissing)
+        .map((application) => resolveTemplatePath(initialRuntime, application))
     ),
   ]
   await Promise.all(
@@ -813,6 +834,11 @@ export const createSsrManagedServer = async (
       }
       const entry = hostResolution.entry
       selectedEntryId = entry.id
+      const requestRender = entry.resolveRouteRender
+        ? await scope.run(() =>
+            entry.resolveRouteRender!(`${pathname}${requestUrl.search}`)
+          )
+        : entry.kind
       safeSsrLog(serverOptions.logger, 'debug', 'ssr.host_resolved', {
         entryId: entry.id,
         category: hostResolution.category,
@@ -900,7 +926,10 @@ export const createSsrManagedServer = async (
           resolveSiteUrl: definition.resolveSiteUrl,
           request: renderRequest,
           production: options.production,
-          requireProductionOrigin: requiresProductionSeoOrigin(entry.kind, entry.application?.seo),
+          requireProductionOrigin: requiresProductionSeoOrigin(
+            requestRender === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
+            entry.application?.seo
+          ),
           allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
         })
       )
@@ -973,9 +1002,9 @@ export const createSsrManagedServer = async (
       }
 
       const privateSeoHtml =
-        entry.kind === 'ssr' && isPrivateSeoMode(entry.application?.seo)
+        requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
       const responseCache =
-        entry.kind === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
+        requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
       let responseCacheKey: string | null = null
       try {
         responseCacheKey = await scope.run(() =>
@@ -1015,9 +1044,9 @@ export const createSsrManagedServer = async (
         }
       }
 
-      if (entry.kind === 'spa') {
+      if (requestRender === 'spa') {
         const template = await scope.run(() =>
-          loadTemplate(definition, entry.template, request.url || '/', scope.signal)
+          loadTemplate(definition, entry, request.url || '/', scope.signal)
         )
         return sendResponse(request, response, {
           statusCode: 200,
@@ -1033,13 +1062,7 @@ export const createSsrManagedServer = async (
 
       const application = entry.application!
       const template = await scope.run(() =>
-        loadPreparedSsrTemplate(
-          definition,
-          entry.template,
-          entry.mountSelector,
-          request.url || '/',
-          scope.signal
-        )
+        loadPreparedSsrTemplate(definition, entry, request.url || '/', scope.signal)
       )
       const remainingRequestMs = scope.remainingMs()
       const configuredResolutionMs = serverOptions.resolutionDeadlineMs
