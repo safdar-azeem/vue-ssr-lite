@@ -49,6 +49,23 @@ let productionOutDir = ''
 let viteCacheDir = ''
 let coldConsumerRoot = ''
 
+const importEphemeralDevelopmentRuntime = async (server: ViteDevServer) => {
+  const runtime = await importSsrViteModule<{
+    default: () => Promise<Record<string, any>>
+  }>(server, SSR_RUNTIME_VIRTUAL_ID)
+  const loadedConfig = await runtime.default()
+  return {
+    ...runtime,
+    default: {
+      ...loadedConfig,
+      server: {
+        ...loadedConfig.server,
+        port: 0,
+      },
+    },
+  }
+}
+
 afterEach(async () => {
   await devServer?.close()
   await managedServer?.close().catch(() => undefined)
@@ -239,7 +256,7 @@ describe('zero-config clean consumer fixture', () => {
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
+      loadRuntime: () => importEphemeralDevelopmentRuntime(devServer!),
     })
     await managedServer.listen()
     const origin = `http://127.0.0.1:${managedServer.address().port}`
@@ -287,7 +304,7 @@ describe('zero-config clean consumer fixture', () => {
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
+      loadRuntime: () => importEphemeralDevelopmentRuntime(devServer!),
     })
     await managedServer.listen()
 
@@ -371,7 +388,7 @@ describe('zero-config clean consumer fixture', () => {
       production: false,
       root: coldConsumerRoot,
       vite: devServer,
-      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
+      loadRuntime: () => importEphemeralDevelopmentRuntime(devServer!),
     })
     await managedServer.listen()
     expect(hasGeneratedClientEntry()).toBe(false)
@@ -435,7 +452,7 @@ describe('zero-config clean consumer fixture', () => {
       production: false,
       root: fixtureRoot,
       vite: devServer,
-      loadRuntime: () => importSsrViteModule(devServer!, SSR_RUNTIME_VIRTUAL_ID),
+      loadRuntime: () => importEphemeralDevelopmentRuntime(devServer!),
     })
     await managedServer.listen()
     const origin = `http://127.0.0.1:${managedServer.address().port}`
