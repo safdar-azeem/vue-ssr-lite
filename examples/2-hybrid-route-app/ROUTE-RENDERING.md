@@ -1,4 +1,4 @@
-# Proposed Route Rendering Contract
+# Route Rendering Contract
 
 Global default:
 
@@ -24,7 +24,7 @@ nearest matched route with meta.render
         ↓
 parent route meta.render
         ↓
-global server render mode
+global application render mode
 ```
 
 Direct request behavior:
@@ -46,9 +46,7 @@ GET /admin/users
   -> SPA document
 ```
 
-Recommended navigation-boundary behavior:
-
-When client-side navigation crosses between different render modes, the runtime should perform a full-document navigation by default.
+When client-side navigation crosses render modes, Core performs a full-document navigation.
 
 Example:
 
@@ -56,6 +54,6 @@ Example:
 /app/projects (SPA) -> /about (SSR)
 ```
 
-should load `/about` as a new document so the route actually receives SSR semantics.
+loads `/about` as a new document so the route receives SSR semantics.
 
-Within the same rendering tree, normal Vue Router client navigation remains unchanged.
+Within the same rendering tree, ordinary Vue Router navigation is unchanged.
