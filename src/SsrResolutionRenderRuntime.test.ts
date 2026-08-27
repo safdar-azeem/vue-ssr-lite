@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent, h, inject, onServerPrefetch, ref, useSSRContext } from 'vue'
-import { defineApplication } from './index'
+import { createTestApplication } from './SsrTestFixtures'
 import { SSR_REQUEST_RESOLUTION } from './SsrRequestResolution'
 import { ssrWatch } from './SsrReactivityRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
@@ -25,7 +25,7 @@ const createDeferredStore = (loadDelayMs: number) => {
 
 describe('renderSsrApplication resolution passes', () => {
   it('completes a fully resolvable page in a single pass', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'one-pass',
       root: defineComponent({
         setup: () => () => h('main', 'ready'),
@@ -38,7 +38,7 @@ describe('renderSsrApplication resolution passes', () => {
 
   it('re-renders when a plugin resolves work after the first pass', async () => {
     const store = createDeferredStore(5)
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'resolve-later',
       root: defineComponent({
         setup() {
@@ -62,7 +62,7 @@ describe('renderSsrApplication resolution passes', () => {
 
   it('returns modules from only the final accepted render pass', async () => {
     const store = createDeferredStore(5)
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'final-assets',
       root: defineComponent({
         setup() {
@@ -89,7 +89,7 @@ describe('renderSsrApplication resolution passes', () => {
   })
 
   it('is bounded: never exceeds maxResolutionPasses when work never settles', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'never-settles',
       root: defineComponent({
         setup() {
@@ -114,7 +114,7 @@ describe('renderSsrApplication resolution passes', () => {
 
 describe('ssrWatch under server render', () => {
   it('is active during SSR: reacts to state settled in onServerPrefetch', async () => {
-    const application = defineApplication({
+    const application = createTestApplication({
       id: 'ssr-watch',
       root: defineComponent({
         setup() {
