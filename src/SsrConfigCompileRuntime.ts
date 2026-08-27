@@ -7,9 +7,13 @@ import {
   bundleSsrConfigModule,
   collectApplicationDeclarationFiles,
   isEvaluatedApplicationConfig,
+  resolveSsrConfigGraphModule,
   resolveApplicationRoutesModule,
+  type SsrConfigModuleGraph,
 } from './SsrConfigCompileBoundary'
 import {
+  assertNoImportedUniversalConfigMutation,
+  isDefineApplicationModuleSource,
   projectUniversalRuntimeSource,
   assertUniversalProjectionCoverage,
   type SsrUniversalRuntimeProjection,
@@ -276,13 +280,29 @@ const evaluateBundledConfigModule = async (
 
 export const discoverApplicationSourceFiles = async (
   root: string,
-  configPath: string
+  configPath: string,
+  authoritativeGraph?: SsrConfigModuleGraph
 ): Promise<SsrDiscoveredApplicationSources> => {
   const walked = await collectApplicationDeclarationFiles(configPath, 0, new Set(), root)
+  const isProjectFile = (file: string) => {
+    const relativePath = relative(root, file)
+    return !relativePath.startsWith('..') && !isAbsolute(relativePath)
+  }
+  const authoritativeFiles = authoritativeGraph
+    ? [
+        ...authoritativeGraph.imports.keys(),
+        ...[...authoritativeGraph.imports.values()].flat(),
+      ].filter((file) => file !== configPath && isProjectFile(file))
+    : []
+  const candidateFiles = [...new Set([...walked.files, ...authoritativeFiles])]
+  const moduleResolver = authoritativeGraph
+    ? (importer: string, specifier: string) =>
+        resolveSsrConfigGraphModule(authoritativeGraph, importer, specifier)
+    : undefined
   const files = new Map<string, string>()
   const routesModules = new Map<string, string>()
   const projections = new Map<string, SsrUniversalRuntimeProjection>()
-  for (const file of walked.files) {
+  for (const file of candidateFiles) {
     const { code, graph } = await bundleSsrConfigModule(root, file)
     const namespace = await evaluateBundledConfigModule(root, code)
     if (!isEvaluatedApplicationConfig(namespace.default)) continue
@@ -303,7 +323,7 @@ export const discoverApplicationSourceFiles = async (
       )
     }
     const source = await readFile(file, 'utf8')
-    const projection = await projectUniversalRuntimeSource(source, file)
+    const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
     assertUniversalProjectionCoverage(application, projection, file)
     if (projection) projections.set(application.name, projection)
   }
@@ -750,8 +770,58 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     await assertConventionFiles(root, config)
     return config
   }
-  const discovered = await discoverApplicationSourceFiles(root, absoluteConfig)
-  const { code } = await bundleSsrConfigModule(root, absoluteConfig)
+  const configSource = await readFile(absoluteConfig, 'utf8')
+  const { code, graph } = await bundleSsrConfigModule(root, absoluteConfig)
+  const moduleResolver = (importer: string, specifier: string) =>
+    resolveSsrConfigGraphModule(graph, importer, specifier)
+  const isProjectFile = (file: string) => {
+    const relativePath = relative(root, file)
+    return !relativePath.startsWith('..') && !isAbsolute(relativePath)
+  }
+  const reachableConfigModules = [
+    ...new Set([
+      ...graph.imports.keys(),
+      ...[...graph.imports.values()].flat(),
+    ]),
+  ].filter(isProjectFile)
+  const preEvaluationProjections = new Map<string, SsrUniversalRuntimeProjection>()
+  const preEvaluationApplicationFiles = new Set<string>()
+  for (const file of [absoluteConfig, ...reachableConfigModules]) {
+    const source = file === absoluteConfig ? configSource : await readFile(file, 'utf8')
+    const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
+    if (projection) {
+      preEvaluationProjections.set(file, projection)
+      if (file !== absoluteConfig && (await isDefineApplicationModuleSource(source, file))) {
+        preEvaluationApplicationFiles.add(file)
+      }
+    }
+  }
+  const protectedUniversalDependencies = [
+    ...new Set(
+      [...preEvaluationProjections.values()]
+        .flatMap((projection) => projection.dependencyFiles ?? [])
+    ),
+  ]
+  const protectedUniversalIdentities = [
+    ...new Set(
+      [...preEvaluationProjections.values()].flatMap(
+        (projection) => projection.dependencyIdentities ?? []
+      )
+    ),
+  ]
+  await assertNoImportedUniversalConfigMutation(
+    configSource,
+    absoluteConfig,
+    preEvaluationApplicationFiles,
+    protectedUniversalDependencies,
+    reachableConfigModules,
+    moduleResolver,
+    protectedUniversalIdentities
+  )
+  const discovered = await discoverApplicationSourceFiles(root, absoluteConfig, graph)
+  const singleApplicationProjection = discovered.files.size
+    ? undefined
+    : preEvaluationProjections.get(absoluteConfig)
   const loaded = (await evaluateBundledConfigModule(root, code)) as {
     default?: SsrConfigExport
   }
@@ -784,8 +854,7 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
         )
     }
   } else {
-    const source = await readFile(absoluteConfig, 'utf8')
-    const projection = await projectUniversalRuntimeSource(source, absoluteConfig)
+    const projection = singleApplicationProjection
     assertUniversalProjectionCoverage(config, projection, absoluteConfig)
     if (projection) discovered.projections.set(SSR_DEFAULT_APPLICATION_ID, projection)
   }
