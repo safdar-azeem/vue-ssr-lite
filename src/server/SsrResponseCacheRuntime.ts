@@ -27,7 +27,14 @@ const byteLength = (body: SsrHttpResponse['body']): number =>
 const cloneResponse = (response: SsrHttpResponse): SsrHttpResponse => ({
   statusCode: response.statusCode,
   body: response.body instanceof Uint8Array ? response.body.slice() : response.body,
-  headers: response.headers ? { ...response.headers } : undefined,
+  headers: response.headers
+    ? Object.fromEntries(
+        Object.entries(response.headers).map(([name, value]) => [
+          name,
+          Array.isArray(value) ? [...value] : value,
+        ])
+      )
+    : undefined,
 })
 
 export const createSsrMemoryResponseCache = (
