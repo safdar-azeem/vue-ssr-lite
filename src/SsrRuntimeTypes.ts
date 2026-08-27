@@ -160,6 +160,8 @@ export interface SsrApplicationDefinition<
    * an application's existing behaviour exactly when adopting the definition.
    */
   scrollBehavior?: RouterScrollBehavior
+  /** Application default render mode. Route `meta.render` may override it. */
+  defaultRender?: import('./SsrConfigTypes').SsrRenderMode
   /**
    * Vue plugins installed for every isolated server/browser app. Prefer a
    * factory for stateful plugins so concurrent SSR requests never share state.
