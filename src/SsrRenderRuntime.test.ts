@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { RouterView, type RouteRecordRaw } from 'vue-router'
-import { defineApplication, useSeo } from './index'
+import { useSeo } from './index'
+import { createTestApplication } from './SsrTestFixtures'
 import { useSsrRequestContext } from './SsrRequestContext'
 import { renderSsrApplication } from './SsrRenderRuntime'
 import { createTestRenderRequest } from './SsrTestFixtures'
@@ -15,7 +16,7 @@ const Root = defineComponent({
 })
 
 const routes: RouteRecordRaw[] = [{ path: '/:path(.*)*', component: Root }]
-const application = defineApplication({
+const application = createTestApplication({
   id: 'isolation',
   root: defineComponent({ setup: () => () => h(RouterView) }),
   routes,
@@ -49,7 +50,7 @@ describe('SSR request isolation', () => {
   })
 
   it('returns 404 when the router has no matching route', async () => {
-    const unmatched = defineApplication({
+    const unmatched = createTestApplication({
       id: 'unmatched',
       root: defineComponent({ setup: () => () => h(RouterView) }),
       routes: [{ path: '/', component: Root }],
