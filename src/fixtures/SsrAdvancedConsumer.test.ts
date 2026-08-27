@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { RouterView } from 'vue-router'
 import { analyticsExtension } from '../../fixtures/advanced-consumer/src/extensions/custom-analytics'
-import { defineApplication } from '../index'
+import { createTestApplication } from '../SsrTestFixtures'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import { serializeManagedHead } from '../SsrManagedHead'
 import { createTestRenderRequest } from '../SsrTestFixtures'
@@ -21,7 +21,7 @@ describe('advanced consumer fixture', () => {
       setup: () => () => h('main', 'advanced'),
     })
     const rendered = await renderSsrApplication(
-      defineApplication({
+      createTestApplication({
         id: 'advanced',
         root: defineComponent({ setup: () => () => h(RouterView) }),
         routes: [{ path: '/', component: Home }],
@@ -46,7 +46,25 @@ describe('advanced consumer fixture', () => {
     )
     expect(source).not.toMatch(/node:fs|process\.env|vue-ssr-lite\/server/)
     const main = await readFile(join(fixtureRoot, 'src/main.ts'), 'utf8')
-    expect(main).toContain('extensions:')
+    expect(main).not.toContain('extensions:')
     expect(main).not.toContain('seoExtension')
+    const server = await readFile(join(fixtureRoot, 'server.ts'), 'utf8')
+    expect(server).toContain('extensions:')
+    expect(server).toContain('defineServer')
+  })
+})
+
+describe('advanced consumer browser projection', () => {
+  it('projects server-registered extensions into the generated client without importing server.ts', async () => {
+    const { loadSsrConfigFile, extractSsrViteEntries, generateSsrClientModule } =
+      await import('../SsrConfigCompileRuntime')
+    const config = await loadSsrConfigFile(fixtureRoot)
+    const entries = extractSsrViteEntries(config, { root: fixtureRoot })
+    const client = generateSsrClientModule(fixtureRoot, entries.applications[0])
+    expect(client).toContain('UA-123456')
+    expect(client).toContain('extensions:')
+    expect(client).toContain('custom-analytics')
+    expect(client).not.toMatch(/from ["'].*server\.ts["']/)
+    expect(client).not.toContain('SeoEndpoints')
   })
 })
