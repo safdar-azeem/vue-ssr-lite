@@ -23,6 +23,8 @@ export default defineConfig({
         'esbuild',
         'es-module-lexer',
         'vite',
+        'rollup',
+        /^rollup(?:\/|$)/,
         /^vue(?:\/|$)/,
         /^vue-router(?:\/|$)/,
       ],
