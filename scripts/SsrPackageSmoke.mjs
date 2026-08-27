@@ -90,39 +90,42 @@ const assertDependencyOwnership = (manifest, options = {}) => {
   }
 }
 
-const writeSsrConfig = (consumerRoot, revision) =>
+const writeServerConfig = (consumerRoot, revision) =>
   writeFile(
-    join(consumerRoot, 'ssr.config.mjs'),
-    `import { defineSsrConfig } from 'vue-ssr-lite/server'
+    join(consumerRoot, 'server.ts'),
+    `import { defineServer } from 'vue-ssr-lite'
 
-export default defineSsrConfig({
+export default defineServer({
   server: {
     port: Number(process.env.SMOKE_PORT || 4173),
     logger: { error: (event, details) => console.error(event, details) },
   },
-  siteSeo: {
-    resolve: async ({ domain, siteOrigin, signal }) => {
-      if (signal.aborted) throw signal.reason
-      return {
-        status: 'resolved',
-        defaults: {
-          siteName: 'Packed Tenant',
-          titleTemplate: '%s | Packed Tenant',
-          description: 'Packed tenant defaults for ' + domain.hostname,
-        },
-        revision: 'packed-site-seo-v1',
-      }
-    },
-  },
-  siteRobots: {
-    resolve: async ({ siteOrigin }) => ({
-      status: 'resolved',
-      config: {
-        groups: [{ userAgents: '*', allow: ['/'], disallow: ['/private'] }],
-        sitemaps: [siteOrigin + '/sitemap.xml'],
+  seo: {
+    siteUrl: 'https://packed-smoke.test',
+    site: {
+      resolve: async ({ domain, siteOrigin, signal }) => {
+        if (signal.aborted) throw signal.reason
+        return {
+          status: 'resolved',
+          defaults: {
+            siteName: 'Packed Tenant',
+            titleTemplate: '%s | Packed Tenant',
+            description: 'Packed tenant defaults for ' + domain.hostname,
+          },
+          revision: 'packed-site-seo-v1',
+        }
       },
-      revision: 'packed-robots-v1',
-    }),
+    },
+    robots: {
+      resolve: async ({ siteOrigin }) => ({
+        status: 'resolved',
+        config: {
+          groups: [{ userAgents: '*', allow: ['/'], disallow: ['/private'] }],
+          sitemaps: [siteOrigin + '/sitemap.xml'],
+        },
+        revision: 'packed-robots-v1',
+      }),
+    },
   },
   publicConfig: ({ host, pathname, headers, domain }) => ({
     host,
@@ -158,7 +161,7 @@ export default defineConfig({
 `,
     'utf8'
   )
-  await writeSsrConfig(consumerRoot, 'before-hmr')
+  await writeServerConfig(consumerRoot, 'before-hmr')
   await writeFile(
     join(sourceRoot, 'Home.vue'),
     `<script setup>
@@ -240,27 +243,28 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
   )
   await writeFile(
     join(sourceRoot, 'main.ts'),
-    `import { defineApplication } from 'vue-ssr-lite'
+    `import type { AppContext } from 'vue-ssr-lite'
 import Home from './Home.vue'
 import About from './About.vue'
 import NotFound from './NotFound.vue'
-import App from './App.vue'
 import './style.css'
 
-export default defineApplication({
-  root: App,
-  routes: [
-    { path: '/', component: Home, meta: { forceLight: true, seo: { title: 'Home' } } },
-    { path: '/about', component: About, meta: { forceLight: false, seo: { title: 'About' } } },
-    { path: '/lazy', component: () => import('./Lazy.vue'), meta: { seo: { title: 'Lazy' } } },
-    {
-      path: '/:pathMatch(.*)*',
-      component: NotFound,
-      meta: { forceLight: true, seo: { title: 'Not Found' } },
-    },
-  ],
-  seo: { siteUrl: 'https://packed-smoke.test' },
-})
+const routes = [
+  { path: '/', component: Home, meta: { forceLight: true, seo: { title: 'Home' } } },
+  { path: '/about', component: About, meta: { forceLight: false, seo: { title: 'About' } } },
+  { path: '/lazy', component: () => import('./Lazy.vue'), meta: { seo: { title: 'Lazy' } } },
+  {
+    path: '/:pathMatch(.*)*',
+    component: NotFound,
+    meta: { forceLight: true, seo: { title: 'Not Found' } },
+  },
+]
+
+export { routes }
+
+export default (_context: AppContext) => {
+  // Plugins and providers belong here. Core owns createApp / mount.
+}
 `,
     'utf8'
   )
@@ -586,6 +590,19 @@ const main = async () => {
       await pathExists(join(consumerRoot, 'node_modules/vue-ssr-lite/LICENSE')),
       'the packed package must include the MIT license text.'
     )
+    const packedRoot = await import(
+      pathToFileURL(join(consumerRoot, 'node_modules/vue-ssr-lite/dist/index.mjs')).href
+    )
+    assert(typeof packedRoot.defineServer === 'function', 'defineServer must export from vue-ssr-lite.')
+    assert(
+      typeof packedRoot.defineApplication === 'function',
+      'defineApplication must export from vue-ssr-lite.'
+    )
+    assert(typeof packedRoot.useSeo === 'function', 'useSeo must export from vue-ssr-lite.')
+    assert(
+      packedRoot.defineSsrConfig === undefined,
+      'defineSsrConfig must not exist on the packaged root export.'
+    )
     await assertSingleFrameworkResolution(consumerRoot)
 
     const devPort = await reservePort()
@@ -638,7 +655,7 @@ const main = async () => {
         lazy.includes('data-vue-ssr-lite-rendered-style'),
         'development lazy route lacks request-rendered CSS.'
       )
-      await writeSsrConfig(consumerRoot, 'after-hmr')
+      await writeServerConfig(consumerRoot, 'after-hmr')
       let updatedHtml = ''
       await waitFor(async () => {
         const response = await fetch(`${origin}/`)
@@ -904,9 +921,9 @@ export default defineConfig({
     }
 
     await writeFile(
-      join(consumerRoot, 'ssr.config.mjs'),
-      `import { defineSsrConfig } from 'vue-ssr-lite/server'
-export default defineSsrConfig({
+      join(consumerRoot, 'server.ts'),
+      `import { defineServer } from 'vue-ssr-lite'
+export default defineServer({
   server: { port: Number(process.env.SMOKE_PORT) },
   render: 'spa',
 })
