@@ -1,0 +1,23 @@
+{
+  "private": true,
+  "version": "0.0.0-example",
+  "type": "module",
+  "scripts": {
+    "dev": "vue-ssr-lite dev --config server.ts",
+    "build": "vue-ssr-lite build --config server.ts",
+    "start": "vue-ssr-lite start --config server.ts"
+  },
+  "dependencies": {
+    "vue": "^3.5.0",
+    "vue-router": "^4.6.0",
+    "pinia": "^3.0.0",
+    "vue-ssr-lite": "^0.2.19"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "vite": "^7.0.0",
+    "typescript": "^5.9.0"
+  },
+  "name": "vue-ssr-lite-multi-subdomain-apps",
+  "note": "Conceptual target architecture; proposed APIs may require implementation in vue-ssr-lite."
+}
