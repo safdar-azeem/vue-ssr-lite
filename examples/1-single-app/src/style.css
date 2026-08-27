@@ -1,0 +1,16 @@
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+.shell {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+nav {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 32px;
+}
