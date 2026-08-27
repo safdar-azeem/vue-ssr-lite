@@ -1,31 +1,50 @@
 import { randomBytes } from 'node:crypto'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import type { RouteRecordRaw } from 'vue-router'
+import {
+  bundleSsrConfigModule,
+  collectApplicationDeclarationFiles,
+  isEvaluatedApplicationConfig,
+  resolveApplicationRoutesModule,
+} from './SsrConfigCompileBoundary'
+import {
+  projectUniversalRuntimeSource,
+  assertUniversalProjectionCoverage,
+  type SsrUniversalRuntimeProjection,
+} from './SsrUniversalProjection'
 import type {
-  SsrApplicationConfig,
+  ApplicationConfig,
+  SsrAppShellConfig,
   SsrApplicationDomainConfig,
-  SsrApplicationLoader,
-  SsrApplicationModuleRef,
-  SsrApplicationSource,
+  SsrBoundAppShell,
   SsrConfig,
   SsrConfigExport,
   SsrDomainMode,
   SsrPublicConfigFactory,
   SsrRenderMode,
+  SsrResolvedAppShell,
+  SsrRobotsInput,
+  SsrSeoConfig,
+  SsrSiteSeoInput,
 } from './SsrConfigTypes'
 import { createSeoEndpoints } from './extensions/seo/SeoEndpoints'
-import { defineSsrConfig } from './SsrConfigRuntime'
+import type { SitemapProvider } from './extensions/seo/sitemap'
+import type {
+  SeoApplicationConfig,
+  SeoSiteDefaults,
+  SiteRobotsConfig,
+  SiteSeoConfig,
+} from './extensions/seo/types'
+import { validateSeoSiteDefaults } from './extensions/seo/normalize'
+import { defineServer } from './SsrConfigRuntime'
 import {
   readPublicUrl,
   requiresProductionSeoOrigin,
   resolveServerSiteOrigin,
 } from './server/SsrSiteOriginRuntime'
-import {
-  importSitemapProvider,
-  loadSitemapProvider,
-  resolveSitemapConfigPath,
-} from './server/SsrSitemapConfig'
+import { loadSitemapProvider } from './server/SsrSitemapConfig'
 import { normalizeSsrHost, stripSsrHostPort } from './SsrHostnameRuntime'
 import type {
   SsrEndpointDefinition,
@@ -36,35 +55,44 @@ import type {
   SsrServerOptions,
 } from './SsrRuntimeTypes'
 import { SsrHostConfigurationError, validateSsrHostEntries } from './server/SsrHostRuntime'
-import { prepareSsrHtmlTemplate } from './server/SsrHtmlRuntime'
+import {
+  prepareSsrHtmlTemplate,
+  SSR_HTML_TEMPLATE,
+} from './server/SsrHtmlRuntime'
 import {
   generateSsrDevelopmentRenderedStylesheetHandoff,
   generateSsrDevelopmentStylesheetHandoff,
 } from './SsrApplicationAssetRuntime'
+import { getSsrStateElementId } from './SsrSerialization'
+import {
+  createRouteRenderMatcher,
+  validateRouteRenderBoundaries,
+  type SsrRouteRenderMatcher,
+} from './SsrRouteRenderRuntime'
 
-export { defineSsrConfig }
+export { defineServer }
+export { bundleSsrConfigModule } from './SsrConfigCompileBoundary'
 
-export const SSR_DEFAULT_APPLICATION_ENTRY = './src/main.ts'
+export const SSR_DEFAULT_MAIN = './src/main.ts'
+export const SSR_DEFAULT_ROOT = './src/App.vue'
+export const SSR_DEFAULT_APPLICATION_ENTRY = SSR_DEFAULT_MAIN
 export const SSR_DEFAULT_TEMPLATE = './index.html'
 export const SSR_DEFAULT_MOUNT = '#app'
 export const SSR_DEFAULT_APPLICATION_ID = 'app'
 
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '::1'] as const
 const LOOPBACK_HOST_SET = new Set<string>(LOOPBACK_HOSTS)
-const CONFIG_CANDIDATES = [
-  'ssr.config.ts',
-  'ssr.config.mts',
-  'ssr.config.js',
-  'ssr.config.mjs',
-] as const
+const CONFIG_CANDIDATES = ['server.ts'] as const
 
 export const SSR_RUNTIME_VIRTUAL_ID = 'virtual:vue-ssr-lite/runtime'
 export const SSR_CLIENT_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/client/'
+export const SSR_HTML_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/html/'
 
 export interface SsrCompiledApplication {
   id: string
   kind: SsrEntryKind
   template: string
+  templateMissing: boolean
   hosts: string[]
   roles?: string[]
   application?: SsrResolvedApplicationDefinition<any, any>
@@ -76,9 +104,12 @@ export interface SsrCompiledApplication {
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
   publicConfigFactory?: SsrPublicConfigFactory
-  siteSeo?: SsrApplicationConfig['siteSeo']
-  siteRobots?: SsrApplicationConfig['siteRobots']
-  applicationModule?: SsrApplicationModuleRef
+  siteSeo?: SiteSeoConfig
+  siteRobots?: SiteRobotsConfig
+  sitemapProvider?: SitemapProvider
+  shell: SsrResolvedAppShell
+  hasRouteRenderOverrides: boolean
+  resolveRouteRender?: SsrRouteRenderMatcher['resolve']
   domain: {
     development: string
     production: string
@@ -99,7 +130,6 @@ export interface SsrCompiledConfig {
   /** Vite's resolved client `base`, carried by the generated SSR runtime. */
   viteBase?: string
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
-  sitemapProvider?: import('./extensions/seo/sitemap').SitemapProvider
 }
 
 export type SsrResolvedServerOptions = Omit<
@@ -134,10 +164,15 @@ export type SsrResolvedServerOptions = Omit<
 export interface SsrViteApplicationEntry {
   id: string
   kind: SsrRenderMode
-  definition: string
-  exportName?: string
+  main: string
+  root: string
+  routesModule?: string
+  /** When true, the client reads `routes` from `main.ts` (single-app convention). */
+  routesFromMain?: boolean
   template: string
   mountSelector: string
+  applicationFile?: string
+  universalProjection?: SsrUniversalRuntimeProjection
 }
 
 export interface SsrViteEntries {
@@ -147,32 +182,25 @@ export interface SsrViteEntries {
 export interface SsrNormalizedApplicationConfig {
   id: string
   render: SsrRenderMode
-  application: SsrApplicationSource
   template: string
+  templateMissing: boolean
   mountSelector: string
   hosts: string[]
   roles?: readonly string[]
   domain: SsrApplicationDomainConfig
-  cookies?: SsrApplicationConfig['cookies']
-  endpoints?: SsrApplicationConfig['endpoints']
+  cookies?: ApplicationConfig['cookies']
+  endpoints?: ApplicationConfig['endpoints']
   cacheControl?: string
-  responseCache?: SsrApplicationConfig['responseCache']
-  publicConfig?: SsrApplicationConfig['publicConfig']
-  siteSeo?: SsrApplicationConfig['siteSeo']
-  siteRobots?: SsrApplicationConfig['siteRobots']
-}
-
-/** Runtime-only shape for already-loaded legacy/programmatic modules. */
-type SsrLoadedApplicationConfig = SsrApplicationConfig & {
-  app?: SsrApplicationSource | string
-  application?: SsrApplicationSource
-  mountSelector?: string
-}
-
-type SsrLoadedConfig = SsrConfig & {
-  applications?: Record<string, SsrLoadedApplicationConfig>
-  app?: SsrApplicationSource | string
-  application?: SsrApplicationSource
+  responseCache?: ApplicationConfig['responseCache']
+  publicConfig?: ApplicationConfig['publicConfig']
+  seo?: SsrSeoConfig
+  shell: SsrResolvedAppShell
+  routes?: ApplicationConfig['routes']
+  router?: ApplicationConfig['router']
+  scrollBehavior?: ApplicationConfig['scrollBehavior']
+  extensions?: ApplicationConfig['extensions']
+  cleanup?: ApplicationConfig['cleanup']
+  createInitialState?: ApplicationConfig['createInitialState']
 }
 
 export interface SsrNormalizedConfig {
@@ -188,40 +216,99 @@ export interface SsrNormalizedConfig {
 export interface NormalizeSsrConfigOptions {
   root?: string
   development?: boolean
+  applicationFiles?: ReadonlyMap<string, string>
+  routesModules?: ReadonlyMap<string, string>
 }
 
 export interface CompileSsrConfigOptions extends NormalizeSsrConfigOptions {
   importModule?: (specifier: string) => Promise<Record<string, unknown>>
 }
 
-const assertUniqueApplicationTemplates = (
-  applications: Record<string, SsrNormalizedApplicationConfig>,
-  root: string
-) => {
-  const owners = new Map<string, string>()
-  for (const application of Object.values(applications)) {
-    const templatePath = resolve(root, application.template)
-    const existing = owners.get(templatePath)
-    if (existing) {
-      throw new Error(
-        `Applications "${existing}" and "${application.id}" resolve to the same HTML template: ${templatePath}. Each application must currently use a unique template.`
-      )
-    }
-    owners.set(templatePath, application.id)
+const exists = async (filePath: string): Promise<boolean> => {
+  try {
+    await access(filePath)
+    return true
+  } catch {
+    return false
   }
 }
 
-export const isSsrApplicationModuleRef = (value: unknown): value is SsrApplicationModuleRef =>
-  Boolean(
-    value &&
-    typeof value === 'object' &&
-    'module' in value &&
-    typeof (value as SsrApplicationModuleRef).module === 'string'
-  )
+export const resolveProjectPath = (
+  root: string,
+  fromDir: string,
+  input: string,
+  label: string
+): string => {
+  const absolute = resolve(fromDir, input)
+  const relativeToRoot = relative(root, absolute)
+  if (relativeToRoot.startsWith('..') || isAbsolute(relativeToRoot)) {
+    throw new Error(`${label} resolves outside the project root: ${input}`)
+  }
+  return absolute.replaceAll('\\', '/')
+}
 
-const asApplicationSource = (
-  value: SsrApplicationSource | string | undefined
-): SsrApplicationSource => (typeof value === 'string' ? { module: value } : value!)
+const toProjectRelative = (root: string, absolute: string): string => {
+  const relativePath = relative(root, absolute).replaceAll('\\', '/')
+  return relativePath.startsWith('.') ? relativePath : `./${relativePath}`
+}
+
+export interface SsrDiscoveredApplicationSources {
+  files: Map<string, string>
+  routesModules: Map<string, string>
+  projections: Map<string, SsrUniversalRuntimeProjection>
+  truncated: boolean
+}
+
+const evaluateBundledConfigModule = async (
+  root: string,
+  code: string
+): Promise<Record<string, unknown>> => {
+  const cacheDirectory = resolve(root, 'node_modules', '.cache', 'vue-ssr-lite')
+  await mkdir(cacheDirectory, { recursive: true })
+  const outfile = resolve(cacheDirectory, `server.${randomBytes(6).toString('hex')}.mjs`)
+  try {
+    await writeFile(outfile, code, 'utf8')
+    return (await import(pathToFileURL(outfile).href)) as Record<string, unknown>
+  } finally {
+    await rm(outfile, { force: true })
+  }
+}
+
+export const discoverApplicationSourceFiles = async (
+  root: string,
+  configPath: string
+): Promise<SsrDiscoveredApplicationSources> => {
+  const walked = await collectApplicationDeclarationFiles(configPath, 0, new Set(), root)
+  const files = new Map<string, string>()
+  const routesModules = new Map<string, string>()
+  const projections = new Map<string, SsrUniversalRuntimeProjection>()
+  for (const file of walked.files) {
+    const { code, graph } = await bundleSsrConfigModule(root, file)
+    const namespace = await evaluateBundledConfigModule(root, code)
+    if (!isEvaluatedApplicationConfig(namespace.default)) continue
+    const application = namespace.default
+    const existing = files.get(application.name)
+    if (existing && existing !== file) {
+      throw new Error(
+        `Application "${application.name}" is default-exported from both ${existing} and ${file}. Import each defineApplication() module once.`
+      )
+    }
+    files.set(application.name, file)
+    const routesAbsolute = resolveApplicationRoutesModule(file, graph, application.name)
+    if (routesAbsolute) {
+      routesModules.set(application.name, toProjectRelative(root, routesAbsolute))
+    } else if (application.routes) {
+      throw new Error(
+        `Application "${application.name}" must import a dedicated routes module so the client graph does not import ${file}.`
+      )
+    }
+    const source = await readFile(file, 'utf8')
+    const projection = await projectUniversalRuntimeSource(source, file)
+    assertUniversalProjectionCoverage(application, projection, file)
+    if (projection) projections.set(application.name, projection)
+  }
+  return { files, routesModules, projections, truncated: walked.truncated }
+}
 
 const normalizeHostname = (value: string, label: string): string => {
   const normalized = stripSsrHostPort(normalizeSsrHost(value) || value)
@@ -231,6 +318,17 @@ const normalizeHostname = (value: string, label: string): string => {
     )
   }
   return normalized.replace(/^\[|\]$/g, '')
+}
+
+const parseDomainValue = (
+  value: string,
+  label: string
+): { wildcard: boolean; hostname: string } => {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('*.')) {
+    return { wildcard: true, hostname: normalizeHostname(trimmed.slice(2), label) }
+  }
+  return { wildcard: false, hostname: normalizeHostname(trimmed, label) }
 }
 
 const pushUnique = (target: string[], value: string) => {
@@ -246,25 +344,33 @@ const expandApplicationHosts = (
   const productionBase = String(domain.production || '').trim()
   const activeRaw = development ? developmentBase || productionBase : productionBase
   if (!activeRaw) return domain.customDomains ? ['*'] : []
-  const activeBase = normalizeHostname(
+  const active = parseDomainValue(
     activeRaw,
     development ? 'domain.development' : 'domain.production'
   )
   const hosts: string[] = []
-  if (mode === 'root' || mode === 'root-and-subdomains') pushUnique(hosts, activeBase)
-  if (mode === 'subdomains' || mode === 'root-and-subdomains') {
-    pushUnique(hosts, `*.${activeBase}`)
+  if (active.wildcard) {
+    pushUnique(hosts, `*.${active.hostname}`)
+  } else {
+    if (mode === 'root' || mode === 'root-and-subdomains') pushUnique(hosts, active.hostname)
+    if (mode === 'subdomains' || mode === 'root-and-subdomains') {
+      pushUnique(hosts, `*.${active.hostname}`)
+    }
   }
   if (development && productionBase) {
-    const production = normalizeHostname(productionBase, 'domain.production')
-    if (production !== activeBase) {
-      if (mode === 'root' || mode === 'root-and-subdomains') pushUnique(hosts, production)
-      if (mode === 'subdomains' || mode === 'root-and-subdomains') {
-        pushUnique(hosts, `*.${production}`)
+    const production = parseDomainValue(productionBase, 'domain.production')
+    if (production.hostname !== active.hostname || production.wildcard !== active.wildcard) {
+      if (production.wildcard) {
+        pushUnique(hosts, `*.${production.hostname}`)
+      } else {
+        if (mode === 'root' || mode === 'root-and-subdomains') pushUnique(hosts, production.hostname)
+        if (mode === 'subdomains' || mode === 'root-and-subdomains') {
+          pushUnique(hosts, `*.${production.hostname}`)
+        }
       }
     }
   }
-  if (development && domain.localAliases && LOOPBACK_HOST_SET.has(activeBase)) {
+  if (development && domain.localAliases && LOOPBACK_HOST_SET.has(active.hostname)) {
     for (const alias of LOOPBACK_HOSTS) pushUnique(hosts, alias)
   }
   for (const extra of domain.additionalHosts ?? []) {
@@ -294,44 +400,129 @@ const baseFromHosts = (hosts: readonly string[]): string => {
   return candidate.replace(/^\*\./, '')
 }
 
-const normalizeApplication = (
+const resolveShellPath = (
+  root: string,
+  fromDir: string,
+  input: string | undefined,
+  fallback: string,
+  label: string
+): string => {
+  const value = input?.trim() || fallback
+  return toProjectRelative(root, resolveProjectPath(root, fromDir, value, label))
+}
+
+const resolveApplicationShell = (
+  root: string,
   id: string,
-  input: SsrLoadedApplicationConfig,
-  options: { development: boolean; single: boolean; applicationCount: number }
+  application: Pick<ApplicationConfig, 'app'>,
+  globalApp: SsrAppShellConfig | undefined,
+  applicationFile?: string
+): SsrResolvedAppShell => {
+  const applicationDir = applicationFile ? dirname(applicationFile) : root
+  const fromApp = application.app
+  const mainFrom = fromApp?.main ? applicationDir : root
+  const rootFrom = fromApp?.root ? applicationDir : root
+  return {
+    main: resolveShellPath(
+      root,
+      mainFrom,
+      fromApp?.main ?? globalApp?.main,
+      SSR_DEFAULT_MAIN,
+      `Application "${id}" app.main`
+    ),
+    root: resolveShellPath(
+      root,
+      rootFrom,
+      fromApp?.root ?? globalApp?.root,
+      SSR_DEFAULT_ROOT,
+      `Application "${id}" app.root`
+    ),
+    applicationDir: applicationFile ? applicationDir : undefined,
+    applicationFile,
+  }
+}
+
+export const isStaticSiteSeo = (value: SsrSiteSeoInput | undefined): value is SeoSiteDefaults =>
+  Boolean(value && typeof value === 'object' && typeof (value as SiteSeoConfig).resolve !== 'function')
+
+export const normalizeSiteSeoConfig = (site?: SsrSiteSeoInput): SiteSeoConfig | undefined => {
+  if (!site) return undefined
+  if (!isStaticSiteSeo(site)) return site
+  validateSeoSiteDefaults(site)
+  const defaults = site
+  return {
+    resolve: async () => ({ status: 'resolved', defaults }),
+  }
+}
+
+export const siteSeoToApplicationConfig = (
+  site?: SsrSiteSeoInput
+): SeoApplicationConfig | undefined => (isStaticSiteSeo(site) ? { ...site } : undefined)
+
+const isSiteRobotsConfig = (value: SsrRobotsInput): value is SiteRobotsConfig =>
+  'resolve' in value && typeof value.resolve === 'function'
+
+export const normalizeRobotsConfig = (robots?: SsrRobotsInput): SiteRobotsConfig | undefined => {
+  if (!robots) return undefined
+  if (isSiteRobotsConfig(robots)) return robots
+  return {
+    resolve: async () => ({ status: 'resolved' as const, config: robots }),
+  }
+}
+
+const normalizeApplication = (
+  input: ApplicationConfig,
+  options: {
+    development: boolean
+    single: boolean
+    applicationCount: number
+    root: string
+    globalApp?: SsrAppShellConfig
+    applicationFile?: string
+    templateMissing: boolean
+  }
 ): SsrNormalizedApplicationConfig => {
   if (!input || typeof input !== 'object') {
-    throw new Error(`Application "${id}" must be an object.`)
+    throw new Error('Application must be an object returned by defineApplication().')
   }
-  if (input.app && input.application) {
-    throw new Error(`Application "${id}" cannot declare both app and application. Use app.`)
+  const id = input.name
+  if (typeof id !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(id)) {
+    throw new Error(
+      'defineApplication() name must be a stable identifier matching /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.'
+    )
   }
   const render = input.render ?? 'ssr'
   if (render !== 'ssr' && render !== 'spa') {
     throw new Error(`Application "${id}" render must be "ssr" or "spa".`)
   }
-  const application = asApplicationSource(
-    input.app ?? input.application ?? SSR_DEFAULT_APPLICATION_ENTRY
-  )
+  if (input.routes && input.router) {
+    throw new Error(`Application "${id}" cannot declare both routes and router.`)
+  }
   const explicitHosts = normalizeHostPatterns(input.host, id)
   const domain = { ...(input.domain || {}) }
-  let hosts = explicitHosts.length
-    ? explicitHosts
-    : expandApplicationHosts(domain, options.development)
+  let hosts = explicitHosts.length ? explicitHosts : expandApplicationHosts(domain, options.development)
   if (!hosts.length && (options.single || options.applicationCount === 1)) {
     hosts = ['*']
   }
   if (!hosts.length) {
     throw new Error(
-      `Application "${id}" needs host routing because multiple applications are configured. Add host: "example.com" (wildcards are supported).`
+      `Application "${id}" needs host routing because multiple applications are configured. Add domain or host: "example.com" (wildcards are supported).`
     )
   }
   const derivedBase = baseFromHosts(hosts)
+  const shell = resolveApplicationShell(
+    options.root,
+    id,
+    input,
+    options.globalApp,
+    options.applicationFile
+  )
   return {
     id,
     render,
-    application,
     template: input.template ?? SSR_DEFAULT_TEMPLATE,
-    mountSelector: input.mount ?? input.mountSelector ?? SSR_DEFAULT_MOUNT,
+    templateMissing: options.templateMissing && !input.template,
+    mountSelector: input.mount ?? SSR_DEFAULT_MOUNT,
     hosts,
     roles: input.roles,
     domain: {
@@ -345,8 +536,83 @@ const normalizeApplication = (
     cacheControl: input.cacheControl,
     responseCache: input.responseCache,
     publicConfig: input.publicConfig,
-    siteSeo: input.siteSeo,
-    siteRobots: input.siteRobots,
+    seo: input.seo,
+    shell,
+    routes: input.routes,
+    router: input.router,
+    scrollBehavior: input.scrollBehavior,
+    extensions: input.extensions,
+    cleanup: input.cleanup,
+    createInitialState: input.createInitialState,
+  }
+}
+
+const asApplicationList = (
+  config: SsrConfig,
+  root: string
+): { applications: ApplicationConfig[]; single: boolean } => {
+  if (config.applications != null) {
+    if (!Array.isArray(config.applications)) {
+      throw new Error(
+        'defineServer({ applications }) must be an array of defineApplication() results. Object-map application config is not supported.'
+      )
+    }
+    if (!config.applications.length) {
+      throw new Error('defineServer({ applications }) cannot be empty.')
+    }
+    const singleApplicationKeys = [
+      'render',
+      'template',
+      'host',
+      'domain',
+      'cookies',
+      'endpoints',
+      'mount',
+      'cacheControl',
+      'responseCache',
+      'publicConfig',
+      'seo',
+      'routes',
+      'router',
+      'scrollBehavior',
+      'extensions',
+    ] as const
+    const configRecord = config as unknown as Record<string, unknown>
+    const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
+    if (mixedKey) {
+      throw new Error(
+        `Server config cannot use single-application field \`${mixedKey}\` with applications. Move it into the relevant defineApplication() result.`
+      )
+    }
+    return { applications: [...config.applications], single: false }
+  }
+  const single = config as ApplicationConfig & SsrConfig
+  return {
+    applications: [
+      {
+        name: SSR_DEFAULT_APPLICATION_ID,
+        render: single.render,
+        template: single.template,
+        roles: single.roles,
+        host: single.host,
+        domain: single.domain,
+        cookies: single.cookies,
+        endpoints: single.endpoints,
+        mount: single.mount,
+        cacheControl: single.cacheControl,
+        responseCache: single.responseCache,
+        publicConfig: single.publicConfig,
+        seo: single.seo,
+        app: undefined,
+        routes: single.routes,
+        router: single.router,
+        scrollBehavior: single.scrollBehavior,
+        extensions: single.extensions,
+        cleanup: single.cleanup,
+        createInitialState: single.createInitialState,
+      },
+    ],
+    single: true,
   }
 }
 
@@ -355,56 +621,35 @@ export const normalizeSsrConfig = (
   input: SsrConfig | null | undefined,
   options: NormalizeSsrConfigOptions = {}
 ): SsrNormalizedConfig => {
-  const config = (input ?? {}) as SsrLoadedConfig
+  const config = (input ?? {}) as SsrConfig
   if (!config || typeof config !== 'object') {
-    throw new Error('ssr.config must export an object or a function returning one.')
+    throw new Error('server.ts must export an object or a function returning one.')
   }
   const development =
     options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
-  const hasApplications = config.applications != null
-  if (hasApplications) {
-    const singleApplicationKeys = [
-      'app',
-      'application',
-      'render',
-      'template',
-      'host',
-      'domain',
-      'cookies',
-      'endpoints',
-      'mount',
-      'mountSelector',
-      'cacheControl',
-      'responseCache',
-      'publicConfig',
-      'siteSeo',
-      'siteRobots',
-    ] as const
-    const configRecord = config as unknown as Record<string, unknown>
-    const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
-    if (mixedKey) {
-      throw new Error(
-        `SSR config cannot use single-application field \`${mixedKey}\` with applications. Move it into the relevant applications entry.`
-      )
-    }
-  }
-  const sourceApplications: Record<string, SsrLoadedApplicationConfig> = hasApplications
-    ? config.applications!
-    : { [SSR_DEFAULT_APPLICATION_ID]: config }
-  const ids = Object.keys(sourceApplications)
-  if (!ids.length) throw new Error('SSR config applications cannot be empty.')
-  const applications = Object.fromEntries(
-    ids.map((id) => [
-      id,
-      normalizeApplication(id, sourceApplications[id], {
-        development,
-        single: !hasApplications,
-        applicationCount: ids.length,
-      }),
-    ])
-  )
   const root = resolve(options.root || process.cwd())
-  assertUniqueApplicationTemplates(applications, root)
+  const { applications: sourceApplications, single } = asApplicationList(config, root)
+  const names = new Set<string>()
+  const applications: Record<string, SsrNormalizedApplicationConfig> = {}
+  for (const application of sourceApplications) {
+    const id = application.name
+    if (names.has(id)) {
+      throw new Error(`Duplicate application name "${id}". Application identity must be unique.`)
+    }
+    names.add(id)
+    const normalizedApp = normalizeApplication(application, {
+      development,
+      single,
+      applicationCount: sourceApplications.length,
+      root,
+      globalApp: config.app,
+      applicationFile: options.applicationFiles?.get(id),
+      templateMissing: false,
+    })
+    const routesModule = options.routesModules?.get(id)
+    if (routesModule) normalizedApp.shell.routesModule = routesModule
+    applications[id] = normalizedApp
+  }
   return {
     name: String(config.name || basename(root) || 'app'),
     runtime: config.runtime,
@@ -426,7 +671,7 @@ export const resolveSsrConfigPath = async (
       await access(fullPath)
       return fullPath
     } catch {
-      throw new Error(`vue-ssr-lite could not find the configured SSR config: ${fullPath}`)
+      throw new Error(`vue-ssr-lite could not find the configured server file: ${fullPath}`)
     }
   }
   for (const candidate of CONFIG_CANDIDATES) {
@@ -435,44 +680,65 @@ export const resolveSsrConfigPath = async (
       await access(fullPath)
       return fullPath
     } catch {
-      // Configuration is optional; keep looking for another supported extension.
+      // Configuration is optional; convention files still apply.
     }
   }
   return undefined
 }
 
-const assertConventionFiles = async (root: string, config: SsrConfig) => {
-  const normalized = normalizeSsrConfig(config, { root })
+const assertConventionFiles = async (
+  root: string,
+  config: SsrConfig,
+  applicationFiles?: ReadonlyMap<string, string>
+) => {
+  const normalized = normalizeSsrConfig(config, { root, applicationFiles })
   for (const application of Object.values(normalized.applications)) {
-    if (isSsrApplicationModuleRef(application.application)) {
-      const modulePath = application.application.module
-      if (modulePath.startsWith('.') || modulePath.startsWith('/')) {
-        const absolute = resolve(root, modulePath)
-        try {
-          await access(absolute)
-        } catch {
-          throw new Error(
-            `Application "${application.id}" entry was not found at ${absolute}. Create ${SSR_DEFAULT_APPLICATION_ENTRY}, or set app in ssr.config to the correct entry.`
-          )
-        }
-      }
+    const mainPath = resolve(root, application.shell.main)
+    const rootPath = resolve(root, application.shell.root)
+    if (!(await exists(mainPath))) {
+      throw new Error(
+        `Application "${application.id}" main was not found at ${mainPath}. Create ${SSR_DEFAULT_MAIN}, or set app.main.`
+      )
+    }
+    if (!(await exists(rootPath))) {
+      throw new Error(
+        `Application "${application.id}" root component was not found at ${rootPath}. Create ${SSR_DEFAULT_ROOT}, or set app.root.`
+      )
     }
     const templatePath = resolve(root, application.template)
-    let source: string
-    try {
-      source = await readFile(templatePath, 'utf8')
-    } catch {
+    if (await exists(templatePath)) {
+      const source = await readFile(templatePath, 'utf8')
+      try {
+        prepareSsrHtmlTemplate(source, application.mountSelector)
+      } catch (error) {
+        throw new Error(
+          `Application "${application.id}" template ${templatePath} is invalid: ${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+    } else if (application.template !== SSR_DEFAULT_TEMPLATE) {
       throw new Error(
-        `Application "${application.id}" HTML template was not found at ${templatePath}. Create ${SSR_DEFAULT_TEMPLATE}, or set template in ssr.config.`
+        `Application "${application.id}" HTML template was not found at ${templatePath}.`
       )
+    } else {
+      try {
+        prepareSsrHtmlTemplate(SSR_HTML_TEMPLATE, application.mountSelector)
+      } catch (error) {
+        throw new Error(
+          `Application "${application.id}" default HTML template is invalid: ${error instanceof Error ? error.message : String(error)}`
+        )
+      }
     }
-    try {
-      prepareSsrHtmlTemplate(source, application.mountSelector)
-    } catch (error) {
-      throw new Error(
-        `Application "${application.id}" template ${templatePath} is invalid: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+  }
+}
+
+const attachClientGraph = (
+  applications: Record<string, SsrNormalizedApplicationConfig>,
+  routesModules?: ReadonlyMap<string, string>
+) => {
+  if (!routesModules) return
+  for (const application of Object.values(applications)) {
+    const routesModule = routesModules.get(application.id)
+    if (routesModule) application.shell.routesModule = routesModule
   }
 }
 
@@ -484,61 +750,95 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     await assertConventionFiles(root, config)
     return config
   }
-  const esbuild = await import('esbuild')
-  const result = await esbuild.build({
-    absWorkingDir: root,
-    entryPoints: [absoluteConfig],
-    bundle: true,
-    write: false,
-    platform: 'node',
-    format: 'esm',
-    target: 'node22',
-    packages: 'external',
-    logLevel: 'silent',
-  })
-  const code = result.outputFiles?.[0]?.text
-  if (!code) throw new Error(`Failed to bundle SSR config: ${absoluteConfig}`)
-  const directory = join(root, 'node_modules', '.cache', 'vue-ssr-lite')
-  await mkdir(directory, { recursive: true })
-  const outfile = join(directory, `ssr.config.${randomBytes(6).toString('hex')}.mjs`)
-  try {
-    await writeFile(outfile, code, 'utf8')
-    const loaded = (await import(pathToFileURL(outfile).href)) as {
-      default?: SsrConfigExport
-    }
-    const exported = loaded.default ?? (loaded as unknown as SsrConfigExport)
-    const config = typeof exported === 'function' ? await exported() : exported
-    if (!config || typeof config !== 'object') {
-      throw new Error('The SSR config module must export an object.')
-    }
-    await assertConventionFiles(root, config)
-    return config
-  } finally {
-    await rm(outfile, { force: true })
+  const discovered = await discoverApplicationSourceFiles(root, absoluteConfig)
+  const { code } = await bundleSsrConfigModule(root, absoluteConfig)
+  const loaded = (await evaluateBundledConfigModule(root, code)) as {
+    default?: SsrConfigExport
   }
+  const exported = loaded.default ?? (loaded as unknown as SsrConfigExport)
+  const config = typeof exported === 'function' ? await exported() : exported
+  if (!config || typeof config !== 'object') {
+    throw new Error('The server.ts module must export an object.')
+  }
+  if (Array.isArray(config.applications)) {
+    for (const application of config.applications) {
+      if (!isEvaluatedApplicationConfig(application)) {
+        throw new Error(
+          'defineServer({ applications }) must contain defineApplication() results.'
+        )
+      }
+        if (application.routes && !discovered.routesModules.has(application.name)) {
+          throw new Error(
+            `Application "${application.name}" must import a dedicated routes module from its own defineApplication() file` +
+              (discovered.truncated
+                ? ' (application discovery stopped at import depth 4)'
+                : '') +
+              '. Inline defineApplication({ routes }) and deep barrels are not supported.'
+          )
+        }
+        const applicationFile = discovered.files.get(application.name) ?? absoluteConfig
+        assertUniversalProjectionCoverage(
+          application,
+          discovered.projections.get(application.name),
+          applicationFile
+        )
+    }
+  } else {
+    const source = await readFile(absoluteConfig, 'utf8')
+    const projection = await projectUniversalRuntimeSource(source, absoluteConfig)
+    assertUniversalProjectionCoverage(config, projection, absoluteConfig)
+    if (projection) discovered.projections.set(SSR_DEFAULT_APPLICATION_ID, projection)
+  }
+  await assertConventionFiles(root, config, discovered.files)
+  const normalized = normalizeSsrConfig(config, {
+    root,
+    applicationFiles: discovered.files,
+    routesModules: discovered.routesModules,
+  })
+  attachClientGraph(normalized.applications, discovered.routesModules)
+  Object.defineProperty(config, '__vueSsrLiteApplicationFiles', {
+    value: discovered.files,
+    enumerable: false,
+  })
+  Object.defineProperty(config, '__vueSsrLiteRoutesModules', {
+    value: discovered.routesModules,
+    enumerable: false,
+  })
+  Object.defineProperty(config, '__vueSsrLiteUniversalProjections', {
+    value: discovered.projections,
+    enumerable: false,
+  })
+  Object.defineProperty(config, '__vueSsrLiteNormalized', {
+    value: normalized,
+    enumerable: false,
+  })
+  return config
 }
 
 export const extractSsrViteEntries = (
   config: SsrConfig,
   options: NormalizeSsrConfigOptions = {}
 ): SsrViteEntries => {
-  const normalized = normalizeSsrConfig(config, options)
-  const applications = Object.values(normalized.applications).map((app) => {
-    if (!isSsrApplicationModuleRef(app.application)) {
-      throw new Error(
-        `Application "${app.id}" must use an app module path so Vite can generate its browser entry.`
-      )
-    }
-    return {
+  const attached = (config as { __vueSsrLiteNormalized?: SsrNormalizedConfig }).__vueSsrLiteNormalized
+  const projections = (
+    config as { __vueSsrLiteUniversalProjections?: Map<string, SsrUniversalRuntimeProjection> }
+  ).__vueSsrLiteUniversalProjections
+  const normalized = attached ?? normalizeSsrConfig(config, options)
+  if (!attached) attachClientGraph(normalized.applications, options.routesModules)
+  return {
+    applications: Object.values(normalized.applications).map((app) => ({
       id: app.id,
       kind: app.render,
-      definition: app.application.module,
-      exportName: app.application.exportName,
+      main: app.shell.main,
+      root: app.shell.root,
+      routesModule: app.shell.routesModule,
+      routesFromMain: !app.shell.applicationDir,
       template: app.template,
       mountSelector: app.mountSelector,
-    }
-  })
-  return { applications }
+      applicationFile: app.shell.applicationFile,
+      universalProjection: projections?.get(app.id),
+    })),
+  }
 }
 
 export const resolveSsrViteEntries = async (
@@ -548,45 +848,52 @@ export const resolveSsrViteEntries = async (
   extractSsrViteEntries(await loadSsrConfigFile(root, configPath), { root })
 
 const absoluteImportPath = (root: string, filePath: string): string => {
-  // Preserve Vite aliases and package specifiers for Vite's resolver. Relative,
-  // absolute, and conventional root-relative filesystem entries remain stable.
   if (/^[@~#]/.test(filePath)) return filePath.replaceAll('\\', '/')
   return resolve(root, filePath).replaceAll('\\', '/')
 }
+
+const shellAlias = (kind: 'root' | 'main', id: string, index: number): string =>
+  `__ssr${kind === 'root' ? 'Root' : 'Main'}${index}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`
 
 export const generateSsrRuntimeModule = (
   root: string,
   configPath: string | undefined,
   entries: SsrViteApplicationEntry[],
-  sitemapPath?: string,
   viteBase = '/'
 ): string => {
   const importLines: string[] = configPath
     ? [`import __ssrUserConfig from ${JSON.stringify(absoluteImportPath(root, configPath))}`]
     : []
-  if (sitemapPath) {
-    importLines.push(
-      `import __ssrSitemap from ${JSON.stringify(absoluteImportPath(root, sitemapPath))}`
-    )
-  }
-  const bindLines: string[] = []
-  let firstSsrAlias: string | undefined
+  const shellBindings: string[] = ['  const __vueSsrLiteShells = {']
+  const imported = new Map<string, string>()
   entries
     .filter((entry) => entry.kind === 'ssr')
     .forEach((entry, index) => {
-      const alias = `__ssrApp${index}`
-      firstSsrAlias ??= alias
-      const definitionPath = absoluteImportPath(root, entry.definition)
-      importLines.push(
-        entry.exportName
-          ? `import { ${entry.exportName} as ${alias} } from ${JSON.stringify(definitionPath)}`
-          : `import ${alias} from ${JSON.stringify(definitionPath)}`
-      )
-      bindLines.push(
-        `  const { application: __ssrConfiguredApplication${index}, ...__ssrApplicationConfig${index} } = applications[${JSON.stringify(entry.id)}]`,
-        `  applications[${JSON.stringify(entry.id)}] = { ...__ssrApplicationConfig${index}, app: ${alias} }`
+      const rootPath = absoluteImportPath(root, entry.root)
+      const mainPath = absoluteImportPath(root, entry.main)
+      const rootAlias =
+        imported.get(`root:${rootPath}`) ?? shellAlias('root', entry.id, index)
+      const mainAlias =
+        imported.get(`main:${mainPath}`) ?? shellAlias('main', entry.id, index)
+      if (!imported.has(`root:${rootPath}`)) {
+        importLines.push(`import ${rootAlias} from ${JSON.stringify(rootPath)}`)
+        imported.set(`root:${rootPath}`, rootAlias)
+      }
+      if (!imported.has(`main:${mainPath}`)) {
+        importLines.push(`import * as ${mainAlias} from ${JSON.stringify(mainPath)}`)
+        imported.set(`main:${mainPath}`, mainAlias)
+      }
+      shellBindings.push(
+        `    ${JSON.stringify(entry.id)}: { root: ${imported.get(`root:${rootPath}`)}, main: ${imported.get(`main:${mainPath}`)} },`
       )
     })
+  shellBindings.push('  }')
+  const applicationFiles = entries
+    .filter((entry) => entry.applicationFile)
+    .map(
+      (entry) =>
+        `    [${JSON.stringify(entry.id)}, ${JSON.stringify(absoluteImportPath(root, entry.applicationFile!))}],`
+    )
   return [
     ...importLines,
     '',
@@ -594,16 +901,12 @@ export const generateSsrRuntimeModule = (
     configPath
       ? '  const exported = __ssrUserConfig?.default ?? __ssrUserConfig\n  const config = typeof exported === "function" ? await exported() : exported'
       : '  const config = {}',
-    sitemapPath ? '  config.sitemap = __ssrSitemap?.default ?? __ssrSitemap' : '',
     `  const viteBase = ${JSON.stringify(viteBase)}`,
-    '  if (config?.applications) {',
-    '    const applications = { ...config.applications }',
-    ...bindLines,
-    '    return { ...config, applications, __vueSsrLiteViteBase: viteBase }',
-    '  }',
-    firstSsrAlias
-      ? `  const { application: __ssrConfiguredApplication, ...__ssrApplicationConfig } = config\n  return { ...__ssrApplicationConfig, app: ${firstSsrAlias}, __vueSsrLiteViteBase: viteBase }`
-      : '  return { ...config, __vueSsrLiteViteBase: viteBase }',
+    ...shellBindings,
+    '  const __vueSsrLiteApplicationFiles = new Map([',
+    ...applicationFiles,
+    '  ])',
+    '  return { ...config, __vueSsrLiteViteBase: viteBase, __vueSsrLiteShells, __vueSsrLiteApplicationFiles }',
     '}',
     '',
     'export default resolveConfig',
@@ -612,32 +915,85 @@ export const generateSsrRuntimeModule = (
 }
 
 export const generateSsrClientModule = (root: string, entry: SsrViteApplicationEntry): string => {
-  const definitionPath = absoluteImportPath(root, entry.definition)
-  const importStatement = entry.exportName
-    ? `import { ${entry.exportName} as loadApplication } from ${JSON.stringify(definitionPath)}`
-    : `import loadApplication from ${JSON.stringify(definitionPath)}`
-  const mountFunction = entry.kind === 'spa' ? 'mountSpaApplication' : 'hydrateSsrApplication'
-  const label = entry.kind === 'spa' ? 'SPA mount' : 'hydration'
-  return [
-    importStatement,
-    `import { ${mountFunction} } from 'vue-ssr-lite/client'`,
-    ...(entry.kind === 'ssr' ? generateSsrDevelopmentStylesheetHandoff(entry.id) : []),
-    ...(entry.kind === 'ssr' ? generateSsrDevelopmentRenderedStylesheetHandoff(entry.id) : []),
-    'const definition = typeof loadApplication === "function"',
-    '  ? await loadApplication()',
-    '  : loadApplication',
-    'if (!definition?.root) {',
-    `  throw new Error(${JSON.stringify(`Application "${entry.id}" must default-export defineApplication({ root, ... }).`)})`,
+  const rootPath = absoluteImportPath(root, entry.root)
+  const mainPath = absoluteImportPath(root, entry.main)
+  const routesPath = entry.routesModule
+    ? absoluteImportPath(root, entry.routesModule)
+    : undefined
+  const hydrate = entry.kind !== 'spa'
+  const mountSelector = JSON.stringify(entry.mountSelector)
+  const projection = entry.universalProjection
+  const lines = [
+    `import App from ${JSON.stringify(rootPath)}`,
+    `import * as __ssrMain from ${JSON.stringify(mainPath)}`,
+  ]
+  if (routesPath) {
+    lines.push(`import applicationRoutes from ${JSON.stringify(routesPath)}`)
+  }
+  if (projection?.imports.length) {
+    lines.push(...projection.imports)
+  }
+  if (projection?.statements?.length) {
+    lines.push(...projection.statements)
+  }
+  lines.push(
+    `import { ${hydrate ? 'hydrateSsrApplication, mountSpaApplication' : 'mountSpaApplication'} } from 'vue-ssr-lite/client'`
+  )
+  const projectedFields = projection
+    ? Object.entries(projection.fields).map(([key, value]) => `  ${key}: ${value},`)
+    : []
+  lines.push(
+    'const initialize = __ssrMain.default',
+    routesPath
+      ? 'const routes = applicationRoutes'
+      : entry.routesFromMain === false
+        ? 'const routes = undefined'
+        : 'const routes = __ssrMain.routes',
+    'if (typeof initialize !== "function") {',
+    `  throw new Error(${JSON.stringify(`Application "${entry.id}" main module must default-export an initializer function.`)})`,
     '}',
-    `void ${mountFunction}(`,
-    `  { ...definition, id: ${JSON.stringify(entry.id)} },`,
-    `  { mountSelector: ${JSON.stringify(entry.mountSelector)} },`,
-    ').catch((error) => {',
-    `  console.error('[vue-ssr-lite] ${label} failed', error)`,
-    '  throw error',
-    '})',
-    '',
-  ].join('\n')
+    'if (!App) {',
+    `  throw new Error(${JSON.stringify(`Application "${entry.id}" root component is missing.`)})`,
+    '}',
+    'export const definition = {',
+    `  id: ${JSON.stringify(entry.id)},`,
+    '  root: App,',
+    '  routes,',
+    `  defaultRender: ${JSON.stringify(entry.kind)},`,
+    '  install: initialize,',
+    ...projectedFields,
+    '}',
+  )
+  if (hydrate) {
+    lines.push(
+      `const __ssrStateId = ${JSON.stringify(getSsrStateElementId(entry.id))}`,
+      'export const ready = (async () => {',
+      '  const __ssrStateElement = document.getElementById(__ssrStateId)',
+      '  if (__ssrStateElement?.textContent) {',
+      ...generateSsrDevelopmentStylesheetHandoff(entry.id).map((line) => `    ${line}`),
+      ...generateSsrDevelopmentRenderedStylesheetHandoff(entry.id).map((line) => `    ${line}`),
+      `    await hydrateSsrApplication(definition, { mountSelector: ${mountSelector} })`,
+      '    return',
+      '  }',
+      `  return mountSpaApplication(definition, { mountSelector: ${mountSelector} })`,
+      '})()',
+      'void ready.catch((error) => {',
+      "  console.error('[vue-ssr-lite] hydration failed', error)",
+      '  throw error',
+      '})',
+      '',
+    )
+  } else {
+    lines.push(
+      `export const ready = mountSpaApplication(definition, { mountSelector: ${mountSelector} })`,
+      'void ready.catch((error) => {',
+      "  console.error('[vue-ssr-lite] SPA mount failed', error)",
+      '  throw error',
+      '})',
+      '',
+    )
+  }
+  return lines.join('\n')
 }
 
 const parseCookieList = (value: string | readonly string[] | undefined): string[] => {
@@ -646,46 +1002,57 @@ const parseCookieList = (value: string | readonly string[] | undefined): string[
   return values.map((item) => String(item).trim()).filter(Boolean)
 }
 
-const isApplicationDefinition = (
-  value: unknown
-): value is SsrResolvedApplicationDefinition<any, any> =>
-  Boolean(value && typeof value === 'object' && (value as any).root)
-
-const pickModuleExport = (
-  mod: Record<string, unknown>,
-  exportName: string | undefined,
-  applicationId: string
-): SsrApplicationLoader => {
-  const resolved = exportName ? mod[exportName] : mod.default
-  if (resolved == null) {
-    throw new Error(
-      `Application "${applicationId}" module must export${exportName ? ` "${exportName}"` : ' a default defineApplication(...) value'}.`
-    )
-  }
-  return resolved as SsrApplicationLoader
+const readRoutes = (
+  routes: ApplicationConfig['routes'] | undefined
+): RouteRecordRaw[] | undefined => {
+  if (!routes) return undefined
+  return typeof routes === 'function' ? routes() : routes
 }
 
-const resolveApplicationSource = async (
-  source: SsrApplicationSource,
-  applicationId: string,
-  options: CompileSsrConfigOptions
-): Promise<SsrResolvedApplicationDefinition<any, any>> => {
-  let loader: SsrApplicationLoader = source as SsrApplicationLoader
-  if (isSsrApplicationModuleRef(source)) {
-    const root = options.root || process.cwd()
-    const specifier = source.module.startsWith('.') ? resolve(root, source.module) : source.module
-    const mod = options.importModule
-      ? await options.importModule(source.module)
-      : ((await import(pathToFileURL(specifier).href)) as Record<string, unknown>)
-    loader = pickModuleExport(mod, source.exportName, applicationId)
-  }
-  const resolved = typeof loader === 'function' ? await loader() : loader
-  if (!isApplicationDefinition(resolved)) {
+const bindInternalApplication = (
+  app: SsrNormalizedApplicationConfig,
+  shell: SsrBoundAppShell | undefined
+): SsrResolvedApplicationDefinition<any, any> | undefined => {
+  if (!shell?.root) return undefined
+  const initializer = shell.main?.default
+  if (typeof initializer !== 'function') {
     throw new Error(
-      `Application "${applicationId}" must export defineApplication({ root, ... }). A browser createApp(...).mount(...) entry cannot run universally.`
+      `Application "${app.id}" main module must default-export an initializer function (${app.shell.main}).`
     )
   }
-  return { ...resolved, id: applicationId }
+  const declaredRoutes = readRoutes(app.routes)
+  const mainRoutes = readRoutes(shell.main.routes)
+  const routes =
+    declaredRoutes ?? (app.shell.applicationDir ? undefined : mainRoutes)
+  if (routes && app.router) {
+    throw new Error(`Application "${app.id}" cannot declare both routes and router.`)
+  }
+  return {
+    id: app.id,
+    root: shell.root,
+    routes,
+    router: app.router,
+    scrollBehavior: app.scrollBehavior,
+    extensions: app.extensions,
+    seo: {
+      ...siteSeoToApplicationConfig(app.seo?.site),
+      mode: app.seo?.mode,
+      enabled: app.seo?.enabled,
+      siteUrl: app.seo?.siteUrl,
+      allowHttpOrigin: app.seo?.allowHttpOrigin,
+      trailingSlash: app.seo?.trailingSlash,
+    },
+    defaultRender: app.render,
+    cleanup: app.cleanup,
+    createInitialState: app.createInitialState,
+    install: (setup) =>
+      initializer({
+        app: setup.app,
+        router: setup.router,
+        server: setup.server,
+        hydration: setup.hydration,
+      }),
+  }
 }
 
 const normalizeNonNegativeDuration = (
@@ -743,49 +1110,81 @@ const normalizeCompiledServerOptions = (
   }
 }
 
+const readBoundShells = (
+  loaded: unknown
+): Record<string, SsrBoundAppShell> | undefined => {
+  const record = loaded as { __vueSsrLiteShells?: Record<string, SsrBoundAppShell> }
+  if (record.__vueSsrLiteShells) return record.__vueSsrLiteShells
+  const exported = (loaded as { default?: { __vueSsrLiteShells?: Record<string, SsrBoundAppShell> } })
+    .default
+  return exported?.__vueSsrLiteShells
+}
+
 export const compileSsrConfig = async (
   loaded: unknown,
   options: CompileSsrConfigOptions = {}
 ): Promise<SsrCompiledConfig> => {
-  const moduleValue = loaded as { default?: SsrConfigExport }
+  const moduleValue = loaded as {
+    default?: SsrConfigExport
+    __vueSsrLiteShells?: Record<string, SsrBoundAppShell>
+  }
   const exported = moduleValue?.default ?? (loaded as SsrConfigExport)
   const raw = typeof exported === 'function' ? await exported() : exported
   const development =
     options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
-  const config = normalizeSsrConfig((raw || {}) as SsrConfig, {
+  const loadedRecord = (raw || {}) as SsrConfig & {
+    __vueSsrLiteViteBase?: unknown
+    __vueSsrLiteShells?: Record<string, SsrBoundAppShell>
+    __vueSsrLiteApplicationFiles?: Map<string, string>
+    __vueSsrLiteRoutesModules?: Map<string, string>
+  }
+  const applicationFiles =
+    options.applicationFiles ??
+    loadedRecord.__vueSsrLiteApplicationFiles ??
+    (moduleValue as { __vueSsrLiteApplicationFiles?: Map<string, string> })
+      .__vueSsrLiteApplicationFiles
+  const routesModules =
+    options.routesModules ??
+    loadedRecord.__vueSsrLiteRoutesModules ??
+    (moduleValue as { __vueSsrLiteRoutesModules?: Map<string, string> })
+      .__vueSsrLiteRoutesModules
+  const config = normalizeSsrConfig(loadedRecord, {
     root: options.root,
     development,
+    applicationFiles,
+    routesModules,
   })
-  const loadedRecord = raw as SsrConfig & {
-    sitemap?: unknown
-    __vueSsrLiteViteBase?: unknown
-  }
+  attachClientGraph(config.applications, routesModules)
   const viteBase =
     typeof loadedRecord.__vueSsrLiteViteBase === 'string'
       ? loadedRecord.__vueSsrLiteViteBase
       : undefined
-  const sitemapPath = options.root ? await resolveSitemapConfigPath(options.root) : undefined
-  const sitemapProvider =
-    (await loadSitemapProvider(loadedRecord?.sitemap)) ??
-    (sitemapPath ? await importSitemapProvider(sitemapPath, options.importModule) : undefined)
-  const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord?.resolveSiteUrl
+  const shells = loadedRecord.__vueSsrLiteShells ?? readBoundShells(loaded) ?? {}
+  const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord.resolveSiteUrl
   const applications: SsrCompiledApplication[] = []
   for (const app of Object.values(config.applications)) {
-    const applicationModule = isSsrApplicationModuleRef(app.application)
-      ? app.application
-      : undefined
-    const application =
-      app.render === 'ssr'
-        ? await resolveApplicationSource(app.application, app.id, options)
-        : undefined
+    const templatePath = resolve(options.root || process.cwd(), app.template)
+    const templateMissing = app.templateMissing || !(await exists(templatePath))
+    const shell = shells[app.id]
+    const application = bindInternalApplication(app, shell)
+    const routes = readRoutes(application?.routes ?? app.routes)
+    const hasRouteRenderOverrides = validateRouteRenderBoundaries(
+      routes,
+      app.render,
+      app.id
+    )
     const developmentDomain = String(app.domain.development || '')
     const productionDomain = String(app.domain.production || '')
     const publicConfigFactory =
       typeof app.publicConfig === 'function' ? app.publicConfig : undefined
+    const siteSeo = normalizeSiteSeoConfig(app.seo?.site)
+    const siteRobots = normalizeRobotsConfig(app.seo?.robots)
+    const sitemapProvider = await loadSitemapProvider(app.seo?.sitemap)
     const compiled: SsrCompiledApplication = {
       id: app.id,
       kind: app.render,
       template: app.template,
+      templateMissing: templateMissing && app.template === SSR_DEFAULT_TEMPLATE,
       hosts: [...app.hosts],
       roles: app.roles ? [...app.roles] : undefined,
       application,
@@ -799,15 +1198,21 @@ export const compileSsrConfig = async (
         ? {}
         : { ...((app.publicConfig as Record<string, unknown>) || {}) },
       publicConfigFactory,
-      siteSeo: app.siteSeo,
-      siteRobots: app.siteRobots,
-      applicationModule,
+      siteSeo,
+      siteRobots,
+      sitemapProvider,
+      shell: app.shell,
+      hasRouteRenderOverrides,
+      resolveRouteRender:
+        hasRouteRenderOverrides && routes
+          ? createRouteRenderMatcher(routes, app.render).resolve
+          : undefined,
       domain: {
         development: developmentDomain
-          ? normalizeHostname(developmentDomain, `${app.id}.domain.development`)
+          ? parseDomainValue(developmentDomain, `${app.id}.domain.development`).hostname
           : '',
         production: productionDomain
-          ? normalizeHostname(productionDomain, `${app.id}.domain.production`)
+          ? parseDomainValue(productionDomain, `${app.id}.domain.production`).hostname
           : '',
         mode: app.domain.mode ?? 'root-and-subdomains',
         localAliases: Boolean(app.domain.localAliases),
@@ -815,26 +1220,31 @@ export const compileSsrConfig = async (
         params: app.domain.params,
       },
     }
-    if (application) {
+    const seoRoutes = routes
+    if (app.seo || application) {
       compiled.endpoints.push(
         ...(await createSeoEndpoints({
           applicationId: app.id,
-          routes: application.routes,
-          seo: application.seo,
+          routes: seoRoutes,
+          seo: application?.seo ?? siteSeoToApplicationConfig(app.seo?.site),
           root: options.root || process.cwd(),
           sitemapProvider,
           existingEndpoints: compiled.endpoints,
-          siteSeo: app.siteSeo,
-          siteRobots: app.siteRobots,
+          siteSeo,
+          siteRobots,
+          defaultRender: app.render,
           resolveSiteUrl: (request) =>
             resolveServerSiteOrigin({
-              siteUrl: application.seo?.siteUrl,
+              siteUrl: application?.seo?.siteUrl,
               publicUrl: readPublicUrl(),
               resolveSiteUrl,
               request,
               production: !development,
-              requireProductionOrigin: requiresProductionSeoOrigin(app.render, application.seo),
-              allowHttpOrigin: application.seo?.allowHttpOrigin,
+              requireProductionOrigin: requiresProductionSeoOrigin(
+                app.render === 'spa' && !hasRouteRenderOverrides ? 'spa' : 'ssr',
+                application?.seo
+              ),
+              allowHttpOrigin: application?.seo?.allowHttpOrigin,
             }),
         }))
       )
@@ -858,7 +1268,6 @@ export const compileSsrConfig = async (
     viteBase,
     readiness: config.readiness,
     resolveSiteUrl,
-    sitemapProvider,
     server: normalizeCompiledServerOptions(config, options, development),
   }
 }
