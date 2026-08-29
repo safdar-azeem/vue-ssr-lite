@@ -4,6 +4,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { init as initEsModuleLexer, parse as parseEsModule } from 'es-module-lexer'
 import type { Plugin } from 'esbuild'
 import type { ApplicationConfig } from './SsrConfigTypes'
+import {
+  resolveApplicationRoutesImportBindings,
+  resolveApplicationRoutesImportSpecifiers,
+  type SsrApplicationRoutesImportBinding,
+} from './SsrUniversalProjection'
 
 const MODULE_EXTENSIONS = ['', '.ts', '.mts', '.js', '.mjs', '.tsx', '.jsx'] as const
 const SCRIPT_EXTENSIONS = new Set(['.ts', '.mts', '.js', '.mjs', '.tsx', '.jsx'])
@@ -17,9 +22,17 @@ export const SSR_CONFIG_UNIVERSAL_MODULE_RE =
 
 export const SSR_CONFIG_UNIVERSAL_NAMESPACE = 'vue-ssr-lite-config-universal'
 
+/** Dedicated routes modules owned by Vite, not the Node config evaluator. */
+export const SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE =
+  'vue-ssr-lite-config-application-routes'
+
 export interface SsrConfigModuleGraph {
   imports: Map<string, string[]>
   universalImporters: Set<string>
+  /** Dedicated `defineApplication({ routes })` modules stubbed out of Node evaluation. */
+  applicationRoutesModules?: Set<string>
+  /** Route export names required by each synthetic application-routes module. */
+  applicationRoutesExports?: Map<string, Set<string>>
   /** Every esbuild resolution edge, including aliases and external packages. */
   resolutions?: SsrConfigModuleResolution[]
 }
@@ -41,6 +54,8 @@ export interface SsrConfigResolvedModuleIdentity {
 export const createSsrConfigModuleGraph = (): SsrConfigModuleGraph => ({
   imports: new Map(),
   universalImporters: new Set(),
+  applicationRoutesModules: new Set(),
+  applicationRoutesExports: new Map(),
   resolutions: [],
 })
 
@@ -172,6 +187,84 @@ export const resolveSsrConfigGraphModule = (
 const isUniversalSpecifier = (specifier: string): boolean =>
   SSR_CONFIG_UNIVERSAL_MODULE_RE.test(specifier)
 
+export const sourceImportsUniversalModules = async (source: string): Promise<boolean> => {
+  await initEsModuleLexer
+  const [imports] = parseEsModule(source)
+  return imports.some((item) => Boolean(item.n && isUniversalSpecifier(item.n)))
+}
+
+const routesBindingCache = new WeakMap<
+  SsrConfigModuleGraph,
+  Map<string, Promise<SsrApplicationRoutesImportBinding[]>>
+>()
+
+const readApplicationRoutesBindings = (
+  graph: SsrConfigModuleGraph,
+  filePath: string
+): Promise<SsrApplicationRoutesImportBinding[]> => {
+  const cache = routesBindingCache.get(graph) ??
+    new Map<string, Promise<SsrApplicationRoutesImportBinding[]>>()
+  routesBindingCache.set(graph, cache)
+  const existing = cache.get(filePath)
+  if (existing) return existing
+  const pending = (async () => {
+    if (!isScriptModule(filePath)) return []
+    try {
+      return await resolveApplicationRoutesImportBindings(
+        await readFile(filePath, 'utf8'),
+        filePath
+      )
+    } catch {
+      return []
+    }
+  })()
+  cache.set(filePath, pending)
+  return pending
+}
+
+const stubApplicationRoutesModule = (
+  graph: SsrConfigModuleGraph,
+  importer: string,
+  specifier: string,
+  resolvedPath: string,
+  importedBindings: readonly string[]
+) => {
+  const normalized = normalizeResolutionPath(resolvedPath)
+  recordImport(graph, importer, normalized)
+  recordResolution(graph, importer, specifier, normalized, false)
+  graph.universalImporters.add(normalized)
+  graph.applicationRoutesModules ??= new Set()
+  graph.applicationRoutesModules.add(normalized)
+  graph.applicationRoutesExports ??= new Map()
+  const exports = graph.applicationRoutesExports.get(normalized) ?? new Set<string>()
+  for (const imported of importedBindings) exports.add(imported)
+  graph.applicationRoutesExports.set(normalized, exports)
+  return {
+    path: normalized,
+    namespace: SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE,
+    external: false,
+  }
+}
+
+const IDENTIFIER_NAME = /^[$A-Z_a-z][$\w]*$/u
+
+const applicationRoutesStub = (
+  graph: SsrConfigModuleGraph,
+  filePath: string
+): string => {
+  const normalized = normalizeResolutionPath(filePath)
+  const imported = graph.applicationRoutesExports?.get(normalized) ?? new Set<string>()
+  const named = [...imported]
+    .filter((name) => name !== 'default' && IDENTIFIER_NAME.test(name))
+    .map((name) => `export { applicationRoutes as ${name} };`)
+  return [
+    'const applicationRoutes = [];',
+    'export default applicationRoutes;',
+    ...named,
+    '',
+  ].join('\n')
+}
+
 export const createSsrConfigBoundaryPlugin = (
   graph: SsrConfigModuleGraph
 ): Plugin => ({
@@ -179,8 +272,54 @@ export const createSsrConfigBoundaryPlugin = (
   setup(build) {
     build.onResolve({ filter: /.*/ }, async (args) => {
       if (args.pluginData?.vueSsrLiteConfigBoundary) return undefined
-      if (args.namespace === SSR_CONFIG_UNIVERSAL_NAMESPACE) {
-        return { path: args.path, namespace: SSR_CONFIG_UNIVERSAL_NAMESPACE }
+      if (
+        args.namespace === SSR_CONFIG_UNIVERSAL_NAMESPACE ||
+        args.namespace === SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE
+      ) {
+        return { path: args.path, namespace: args.namespace }
+      }
+      if (args.importer && isScriptModule(args.importer)) {
+        const routesBindings = await readApplicationRoutesBindings(graph, args.importer)
+        const matchingBindings = routesBindings.filter(
+          (binding) => binding.specifier === args.path
+        )
+        if (matchingBindings.length) {
+          const resolved = await build.resolve(args.path, {
+            kind: args.kind,
+            importer: args.importer,
+            namespace: args.namespace,
+            resolveDir: args.resolveDir,
+            pluginData: { vueSsrLiteConfigBoundary: true },
+          })
+          const fallback =
+            args.path.startsWith('.') || args.path.startsWith('/') || isAbsolute(args.path)
+              ? await resolveExistingModule(
+                  resolve(args.resolveDir || dirname(args.importer), args.path)
+                )
+              : undefined
+          const resolvedPath =
+            resolved.path && !resolved.errors.length ? resolved.path : fallback
+          if (resolvedPath) {
+            return stubApplicationRoutesModule(
+              graph,
+              args.importer,
+              args.path,
+              resolvedPath,
+              matchingBindings.map((binding) => binding.imported)
+            )
+          }
+          const normalized = normalizeResolutionPath(args.path)
+          graph.applicationRoutesExports ??= new Map()
+          graph.applicationRoutesExports.set(
+            normalized,
+            new Set(matchingBindings.map((binding) => binding.imported))
+          )
+          return {
+            path: args.path,
+            namespace: SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE,
+            external: false,
+          }
+        }
       }
       if (isUniversalSpecifier(args.path)) {
         if (args.importer) graph.universalImporters.add(args.importer)
@@ -220,6 +359,13 @@ export const createSsrConfigBoundaryPlugin = (
         loader: 'js',
       })
     )
+    build.onLoad(
+      { filter: /.*/, namespace: SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE },
+      (args) => ({
+        contents: applicationRoutesStub(graph, args.path),
+        loader: 'js',
+      })
+    )
   },
 })
 
@@ -247,7 +393,7 @@ export const bundleSsrConfigModule = async (
 }
 
 const normalizeGraphPath = (filePath: string): string =>
-  filePath.replaceAll('\\', '/')
+  filePath.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
 
 const lookupGraphList = (
   graph: Map<string, string[]>,
@@ -336,6 +482,33 @@ const readRelativeSpecifiers = async (filePath: string): Promise<string[]> => {
   return specifiers
 }
 
+export const collectSkippedApplicationRoutesFiles = async (
+  files: readonly string[]
+): Promise<Set<string>> => {
+  const skipped = new Set<string>()
+  for (const file of files) {
+    if (!isScriptModule(file)) continue
+    let source: string
+    try {
+      source = await readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (await sourceImportsUniversalModules(source)) {
+      skipped.add(normalizeGraphPath(file))
+    }
+    const specifiers = await resolveApplicationRoutesImportSpecifiers(source, file)
+    for (const specifier of specifiers) {
+      if (!(specifier.startsWith('.') || specifier.startsWith('/') || isAbsolute(specifier))) {
+        continue
+      }
+      const resolved = await resolveExistingModule(resolve(dirname(file), specifier))
+      if (resolved) skipped.add(normalizeGraphPath(resolved))
+    }
+  }
+  return skipped
+}
+
 const isInsideRoot = (filePath: string, root?: string): boolean => {
   if (!root) return true
   const normalizedRoot = normalizeGraphPath(root).replace(/\/$/, '')
@@ -360,7 +533,11 @@ export const collectApplicationDeclarationFiles = async (
   if (!isScriptModule(entryFile) && depth > 0) return { files: [], truncated: false }
   const files = depth > 0 ? [entryFile] : []
   let truncated = false
+  const routesSpecifiers = isScriptModule(entryFile)
+    ? await resolveApplicationRoutesImportSpecifiers(await readFile(entryFile, 'utf8'), entryFile)
+    : []
   for (const specifier of await readRelativeSpecifiers(entryFile)) {
+    if (routesSpecifiers.includes(specifier)) continue
     const resolved = await resolveExistingModule(resolve(dirname(entryFile), specifier))
     if (!resolved || !isScriptModule(resolved) || !isInsideRoot(resolved, root)) continue
     const nested = await collectApplicationDeclarationFiles(resolved, depth + 1, seen, root)
