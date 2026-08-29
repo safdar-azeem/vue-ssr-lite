@@ -56,30 +56,10 @@ const physicalFileExists = async (root: string, fileName: string): Promise<boole
   try { await access(resolve(root, 'public', fileName)); return true } catch { return false }
 }
 
-const dummyRequest = (pathname: string, applicationId: string): SsrHttpRequest<any> => ({
-  requestId: 'seo-endpoint-collision',
-  url: `https://vue-ssr-lite.test${pathname}`,
-  host: 'vue-ssr-lite.test', protocol: 'https', method: 'GET', headers: {}, publicConfig: {},
-  signal: new AbortController().signal,
-  domain: {
-    entry: applicationId, authority: 'vue-ssr-lite.test', protocol: 'https', port: '',
-    hostname: 'vue-ssr-lite.test', baseDomain: 'vue-ssr-lite.test', subdomain: null,
-    isCustomDomain: false, development: true, params: {},
-  },
-  pathname, search: '', entryId: applicationId,
-})
-
-const assertUniqueEndpoint = (
+const ownedEndpoint = (
   existing: readonly SsrEndpointDefinition<any>[],
-  pathname: string,
-  applicationId: string,
-  source: string
-) => {
-  const conflict = existing.find((endpoint) => endpoint.match(dummyRequest(pathname, applicationId)))
-  if (conflict) {
-    throw new Error(`[vue-ssr-lite] Duplicate endpoint GET ${pathname}. "${conflict.id}" conflicts with "${source}".`)
-  }
-}
+  pathname: string
+) => existing.find((endpoint) => endpoint.ownedPaths?.includes(pathname))
 
 const endpointHeaders = (contentType: string) => ({
   'content-type': contentType,
@@ -242,10 +222,14 @@ export const createSeoEndpoints = async (
   const robotsId = `${options.applicationId}-robots`
   const hasPhysicalSitemap = await physicalFileExists(options.root, 'sitemap.xml')
 
-  if (!privateMode && !hasPhysicalSitemap) {
-    assertUniqueEndpoint(options.existingEndpoints, '/sitemap.xml', options.applicationId, sitemapId)
+  if (
+    !privateMode &&
+    !hasPhysicalSitemap &&
+    !ownedEndpoint(options.existingEndpoints, '/sitemap.xml')
+  ) {
     endpoints.push({
       id: sitemapId,
+      ownedPaths: ['/sitemap.xml'],
       match: (request) => request.pathname === '/sitemap.xml' || /^\/sitemap-[1-9]\d*\.xml$/.test(request.pathname),
       async handle(request) {
         const siteOrigin = request.siteOrigin ?? await options.resolveSiteUrl(request)
@@ -290,10 +274,16 @@ export const createSeoEndpoints = async (
     })
   }
 
-  if (privateMode || !(await physicalFileExists(options.root, 'robots.txt'))) {
-    assertUniqueEndpoint([...options.existingEndpoints, ...endpoints], '/robots.txt', options.applicationId, robotsId)
+  if (
+    (privateMode || !(await physicalFileExists(options.root, 'robots.txt'))) &&
+    !ownedEndpoint(
+      [...options.existingEndpoints, ...endpoints],
+      '/robots.txt'
+    )
+  ) {
     endpoints.push({
       id: robotsId,
+      ownedPaths: ['/robots.txt'],
       match: (request) => request.pathname === '/robots.txt',
       async handle(request) {
         const siteOrigin = request.siteOrigin ?? await options.resolveSiteUrl(request)
