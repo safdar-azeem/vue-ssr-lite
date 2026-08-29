@@ -199,8 +199,6 @@ export type SsrSingleApplicationConfig = SsrConfigShared & {
   responseCache?: SsrResponseCacheStrategy<any>
   publicConfig?: SsrPublicConfigSource
   seo?: SsrSeoConfig
-  /** Single-app routes belong on `src/main.ts`, not `defineServer()`. */
-  routes?: never
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
   extensions?: readonly ExtensionDefinition[]
@@ -222,7 +220,6 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
   responseCache?: never
   publicConfig?: never
   seo?: never
-  routes?: never
   router?: never
   scrollBehavior?: never
   extensions?: never
