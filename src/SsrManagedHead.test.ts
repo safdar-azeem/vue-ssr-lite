@@ -1,9 +1,12 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import {
   collectManagedHeadSnapshot,
   flattenHeadContribution,
   linkHeadKey,
   metaHeadKey,
+  normalizeManagedScriptContent,
+  reconcileManagedHead,
   serializeJsonLd,
   serializeManagedHead,
 } from './SsrManagedHead'
@@ -56,6 +59,59 @@ describe('managed head pipeline', () => {
         ],
       })
     ).toContain('data-vue-ssr-lite-head="json-ld"')
+  })
+
+  it('canonically neutralizes generic managed script breakouts without changing JSON data', () => {
+    const original = {
+      value: '</script><script id="injected">alert(1)</script>',
+      mixedCase: '</ScRiPt><script id="mixed">alert(2)</SCRIPT>',
+    }
+    const { tags } = flattenHeadContribution({
+      scripts: [
+        {
+          key: 'page-data',
+          type: 'application/json',
+          content: JSON.stringify(original),
+        },
+      ],
+    })
+    const pageData = tags[0]!
+    const html = serializeManagedHead({ tags })
+
+    expect(pageData.textContent).not.toMatch(/<\/script/i)
+    expect(JSON.parse(pageData.textContent!)).toEqual(original)
+    expect(html.match(/data-vue-ssr-lite-head="page-data"/g)).toHaveLength(1)
+    expect(html).not.toContain('</script><script id="injected">')
+    expect(html).not.toContain('</ScRiPt><script id="mixed">')
+
+    const parsed = new DOMParser().parseFromString(
+      `<!doctype html><html><head>${html}</head><body></body></html>`,
+      'text/html'
+    )
+    const intended = parsed.head.querySelector(
+      'script[data-vue-ssr-lite-head="page-data"]'
+    )
+    expect(parsed.head.querySelectorAll('script')).toHaveLength(1)
+    expect(parsed.getElementById('injected')).toBeNull()
+    expect(parsed.getElementById('mixed')).toBeNull()
+    expect(JSON.parse(intended!.textContent!)).toEqual(original)
+
+    const reconciled = document.implementation.createHTMLDocument('managed head')
+    reconcileManagedHead(reconciled.head, { tags })
+    expect(
+      reconciled.head.querySelector(
+        'script[data-vue-ssr-lite-head="page-data"]'
+      )?.textContent
+    ).toBe(pageData.textContent)
+  })
+
+  it('normalizes every closing sequence idempotently and preserves empty content', () => {
+    const hostile = 'first </script> second </SCRIPT\t> third </ScRiPt >'
+    const normalized = normalizeManagedScriptContent(hostile)
+
+    expect(normalized).toBe('first <\\/script> second <\\/SCRIPT\t> third <\\/ScRiPt >')
+    expect(normalizeManagedScriptContent(normalized)).toBe(normalized)
+    expect(normalizeManagedScriptContent('')).toBe('')
   })
 
   it('flattens title, meta, and links into stable tags', () => {
