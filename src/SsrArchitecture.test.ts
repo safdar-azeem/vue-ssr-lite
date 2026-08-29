@@ -228,6 +228,44 @@ describe('approved architecture acceptance', () => {
     expect(rendered.head.title).toBe('From extension')
   })
 
+  it('keeps generic extension JSON scripts inside their managed element', async () => {
+    const original = {
+      value: '</script><script id="injected">alert(1)</script>',
+      mixedCase: '</ScRiPt><script id="mixed">alert(2)</script>',
+    }
+    const custom = defineExtension({
+      name: 'page-data',
+      setup(context) {
+        context.contributeHead({
+          scripts: [
+            {
+              key: 'page-data',
+              type: 'application/json',
+              content: JSON.stringify(original),
+            },
+          ],
+        })
+      },
+    })
+    const application = createTestApplication({
+      id: 'managed-script',
+      root: Shell,
+      routes: [{ path: '/', component: page(() => undefined) }],
+      seo: { enabled: false },
+      extensions: [custom],
+    })
+    const rendered = await renderSsrApplication(application, request('/'))
+    const head = serializeManagedHead(rendered.head)
+    const payload = head.match(
+      /<script[^>]*data-vue-ssr-lite-head="page-data"[^>]*>([\s\S]*?)<\/script>/
+    )?.[1]
+
+    expect(payload).toBeTruthy()
+    expect(head).not.toContain('</script><script id="injected">')
+    expect(head).not.toContain('</ScRiPt><script id="mixed">')
+    expect(JSON.parse(payload!)).toEqual(original)
+  })
+
   it('escapes JSON-LD and does not trust a spoofed host for canonicals', async () => {
     const application = createTestApplication({
       id: 'secure',
