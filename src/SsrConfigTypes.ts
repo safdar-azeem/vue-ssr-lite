@@ -144,6 +144,10 @@ export interface SsrConfigServerOptions {
   /** One deadline for the complete application request. Defaults to 15 seconds. */
   requestTimeoutMs?: number
   shutdownTimeoutMs?: number
+  /** Maximum actively executing Vue SSR requests per managed server. Defaults to 8. */
+  maxConcurrentSsrRequests?: number
+  /** Maximum Vue SSR requests waiting for capacity per managed server. Defaults to 32. */
+  maxQueuedSsrRequests?: number
   healthPath?: string
   readinessPath?: string
   maxResolutionPasses?: number
