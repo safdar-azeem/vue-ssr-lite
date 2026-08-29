@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
+  DEFINE_SERVER_ROUTES_ERROR,
   compileSsrConfig,
   extractSsrViteEntries,
   generateSsrClientModule,
   generateSsrRuntimeModule,
+  loadSsrConfigFile,
   normalizeSsrConfig,
 } from './SsrConfigCompileRuntime'
+import { sourceDeclaresServerConfigRoutes } from './SsrUniversalProjection'
 import { defineApplication, defineServer } from './index'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
@@ -575,5 +582,230 @@ describe('defineServer application architecture', () => {
     expect(entries.applications[0]?.routesFromMain).toBe(true)
     const client = generateSsrClientModule('/app', entries.applications[0])
     expect(client).toContain('const routes = __ssrMain.routes')
+  })
+
+  it('binds single-app routes exclusively from main.ts', async () => {
+    const compiled = await compileSsrConfig(
+      withSsrShells(
+        defineServer({ render: 'ssr' }),
+        {
+          app: {
+            root: Root,
+            main: {
+              default: () => undefined,
+              routes: [{ path: '/from-main', component: Root }],
+            },
+          },
+        }
+      ),
+      { root: '/workspace/project' }
+    )
+    expect(compiled.applications[0]?.application?.routes).toEqual([
+      { path: '/from-main', component: Root },
+    ])
+  })
+
+  it('supports callable routes exported from main.ts', async () => {
+    const compiled = await compileSsrConfig(
+      withSsrShells(
+        defineServer({ render: 'ssr' }),
+        {
+          app: {
+            root: Root,
+            main: {
+              default: () => undefined,
+              routes: () => [{ path: '/callable', component: Root }],
+            },
+          },
+        }
+      ),
+      { root: '/workspace/project' }
+    )
+    expect(compiled.applications[0]?.application?.routes).toEqual([
+      { path: '/callable', component: Root },
+    ])
+  })
+
+  it('rejects defineServer({ routes }) for single applications', () => {
+    expect(() =>
+      normalizeSsrConfig({
+        render: 'ssr',
+        routes: [{ path: '/', component: Root }],
+      } as never)
+    ).toThrow(/defineServer\(\{ routes \}\) is not supported for single applications/)
+    expect(() =>
+      normalizeSsrConfig({
+        routes: [{ path: '/', component: Root }],
+      } as never)
+    ).toThrow(/Export routes from src\/main\.ts/)
+    expect(() =>
+      normalizeSsrConfig({
+        routes: [{ path: '/', component: Root }],
+      } as never)
+    ).toThrow(/defineApplication\(\{ routes \}\)/)
+  })
+
+  it('rejects plain-object defineServer({ routes }) at compile time', async () => {
+    await expect(
+      compileSsrConfig(
+        {
+          default: {
+            render: 'ssr',
+            routes: [{ path: '/', component: Root }],
+          },
+        } as never,
+        { development: true, root: '/workspace/project' }
+      )
+    ).rejects.toThrow(/defineServer\(\{ routes \}\) is not supported for single applications/)
+  })
+
+  it('still rejects mixed single/multi fields after removing defineServer routes', () => {
+    expect(() =>
+      normalizeSsrConfig({
+        render: 'ssr',
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+        ],
+      } as never)
+    ).toThrow(/single-application field `render` with applications/)
+    expect(() =>
+      normalizeSsrConfig({
+        routes: [{ path: '/', component: Root }],
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+        ],
+      } as never)
+    ).toThrow(/defineServer\(\{ routes \}\) is not supported for single applications/)
+  })
+
+  it('keeps defineApplication({ routes }) for explicit applications', () => {
+    const routes = [{ path: '/users', component: Root }]
+    const normalized = normalizeSsrConfig(
+      defineServer({
+        applications: [
+          defineApplication({
+            name: 'admin',
+            host: 'admin.example.com',
+            routes,
+          }),
+        ],
+      })
+    )
+    expect(normalized.applications.admin.routes).toBe(routes)
+  })
+
+  it('keeps multi-app route-module discovery on the generated client', () => {
+    const entries = extractSsrViteEntries(
+      defineServer({
+        applications: [
+          defineApplication({
+            name: 'admin',
+            host: 'admin.example.com',
+            routes: [{ path: '/users', component: Root }],
+          }),
+        ],
+      }),
+      {
+        root: '/app',
+        applicationFiles: new Map([['admin', '/app/src/modules/admin/app.ts']]),
+        routesModules: new Map([['admin', './src/modules/admin/routes.ts']]),
+      }
+    )
+    expect(entries.applications[0]).toMatchObject({
+      id: 'admin',
+      routesModule: './src/modules/admin/routes.ts',
+      routesFromMain: false,
+    })
+    const client = generateSsrClientModule('/app', entries.applications[0])
+    expect(client).toContain('modules/admin/routes.ts')
+    expect(client).not.toContain('const routes = __ssrMain.routes')
+  })
+})
+
+describe('defineServer({ routes }) config loading', () => {
+  let root = ''
+
+  afterEach(async () => {
+    if (root) await rm(root, { recursive: true, force: true })
+    root = ''
+  })
+
+  it('recognizes the removed routes property on direct server config exports', async () => {
+    await expect(
+      sourceDeclaresServerConfigRoutes(
+        `import { defineServer } from 'vue-ssr-lite'\nimport { routes } from './src/routes'\nexport default defineServer({\n  render: 'ssr',\n  routes,\n})\n`,
+        '/app/server.ts'
+      )
+    ).resolves.toBe(true)
+    await expect(
+      sourceDeclaresServerConfigRoutes(
+        `import { routes } from './src/routes'\nexport default {\n  render: 'ssr',\n  routes,\n}\n`,
+        '/app/server.ts'
+      )
+    ).resolves.toBe(true)
+    await expect(
+      sourceDeclaresServerConfigRoutes(
+        `import { defineServer } from 'vue-ssr-lite'\nexport default defineServer({ render: 'ssr' })\n`,
+        '/app/server.ts'
+      )
+    ).resolves.toBe(false)
+    await expect(
+      sourceDeclaresServerConfigRoutes(
+        `import { defineServer } from 'vue-ssr-lite'\nimport website from './src/website/app'\nexport default defineServer({ applications: [website] })\n`,
+        '/app/server.ts'
+      )
+    ).resolves.toBe(false)
+  })
+
+  it('rejects a loaded plain server.ts that still supplies routes', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-define-server-routes-'))
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src/main.ts'), 'export default () => {}\n')
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'server.ts'),
+      "export default { render: 'ssr', routes: [{ path: '/' }] }\n"
+    )
+    await expect(loadSsrConfigFile(root)).rejects.toThrow(
+      /defineServer\(\{ routes \}\) is not supported for single applications[\s\S]*Export routes from src\/main\.ts[\s\S]*defineApplication\(\{ routes \}\)/
+    )
+  })
+
+  it('rejects defineServer({ routes }) before aliased route imports enter the config bundle', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-legacy-server-routes-alias-'))
+    const defineServerPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      'SsrConfigRuntime.ts'
+    )
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src/constants.ts'), "export const HOME_PATH = '/'\n")
+    await writeFile(
+      join(root, 'src/Home.vue'),
+      '<template><div>HOME_PAGE</div></template>\n'
+    )
+    await writeFile(
+      join(root, 'src/routes.ts'),
+      `import { HOME_PATH } from '@/constants'\nimport Home from './Home.vue'\nexport const routes = [{ path: HOME_PATH, component: Home }]\n`
+    )
+    await writeFile(
+      join(root, 'src/main.ts'),
+      `import { routes } from './routes'\nexport { routes }\nexport default () => {}\n`
+    )
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'server.ts'),
+      `import { defineServer } from ${JSON.stringify(defineServerPath)}\nimport { routes } from './src/routes'\nexport default defineServer({\n  render: 'ssr',\n  routes,\n})\n`
+    )
+    let rejected: unknown
+    try {
+      await loadSsrConfigFile(root)
+    } catch (error) {
+      rejected = error
+    }
+    expect(rejected).toBeInstanceOf(Error)
+    const message = (rejected as Error).message
+    expect(message).toBe(DEFINE_SERVER_ROUTES_ERROR)
+    expect(message).not.toMatch(/ERR_MODULE_NOT_FOUND/)
+    expect(message).not.toMatch(/Cannot find package '@\/constants'/)
   })
 })
