@@ -107,4 +107,80 @@ describe('SSR request context identity', () => {
       created.hydration.dispose()
     }
   })
+
+  it('records property-membership reads as render observations', async () => {
+    const Root = defineComponent({
+      setup() {
+        const context = useSsrRequestContext<{ feature?: boolean }>()
+        return () => h('main', 'feature' in context.state ? 'on' : 'off')
+      },
+    })
+    const created = await createSsrApplication(
+      {
+        id: 'request-context-membership-observation',
+        createInitialState: () => ({ feature: true }),
+        root: Root,
+      },
+      { server: true, request }
+    )
+    const register =
+      created.resolution.registerReactivityObservation.bind(created.resolution)
+    let observations = 0
+    created.resolution.registerReactivityObservation = () => {
+      observations += 1
+      register()
+    }
+
+    try {
+      expect(await renderToString(created.app)).toContain('on')
+      expect(observations).toBeGreaterThan(0)
+    } finally {
+      created.hydration.dispose()
+    }
+  })
+
+  it('observes Map and Set interior reads and mutations', async () => {
+    type CollectionState = {
+      cache: Map<string, string>
+      flags: Set<string>
+    }
+    const Root = defineComponent({
+      setup() {
+        const context = useSsrRequestContext<CollectionState>()
+        const cache = context.state.cache
+        const flags = context.state.flags
+        cache.set('phase', 'ready')
+        flags.add('enabled')
+        return () =>
+          h(
+            'main',
+            `${cache.get('phase')}:${flags.has('enabled') ? 'on' : 'off'}`
+          )
+      },
+    })
+    const created = await createSsrApplication(
+      {
+        id: 'request-context-collection-observation',
+        createInitialState: () => ({ cache: new Map(), flags: new Set() }),
+        root: Root,
+      },
+      { server: true, request }
+    )
+    const registerObservation =
+      created.resolution.registerReactivityObservation.bind(created.resolution)
+    let observations = 0
+    created.resolution.registerReactivityObservation = () => {
+      observations += 1
+      registerObservation()
+    }
+
+    try {
+      expect(await renderToString(created.app)).toContain('ready:on')
+      expect(observations).toBeGreaterThan(0)
+      expect(created.context.state.cache.get('phase')).toBe('ready')
+      expect(created.context.state.flags.has('enabled')).toBe(true)
+    } finally {
+      created.hydration.dispose()
+    }
+  })
 })
