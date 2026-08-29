@@ -424,6 +424,45 @@ describe('SEO 1.0 robots, sitemap, endpoints, and origin authority', () => {
     expect(resolver).not.toHaveBeenCalled()
   })
 
+  it('skips built-in SEO endpoints when a consumer already owns those paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-owned-seo-'))
+    const endpoints = await createSeoEndpoints({
+      applicationId: 'erp',
+      root,
+      existingEndpoints: [
+        {
+          id: 'erp-seo-boundary',
+          ownedPaths: ['/robots.txt', '/sitemap.xml'],
+          match: ({ entryId, pathname }) =>
+            entryId === 'erp' &&
+            (pathname === '/robots.txt' || pathname.startsWith('/sitemap')),
+          handle: () => ({ statusCode: 404 }),
+        },
+      ],
+      seo: {},
+      resolveSiteUrl: async () => 'https://admin.test',
+    })
+    expect(endpoints.some((entry) => entry.id === 'erp-sitemap')).toBe(false)
+    expect(endpoints.some((entry) => entry.id === 'erp-robots')).toBe(false)
+  })
+
+  it('does not execute consumer endpoint predicates while compiling SEO endpoints', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-owned-seo-pure-'))
+    const match = vi.fn(() => true)
+    const endpoints = await createSeoEndpoints({
+      applicationId: 'website', root, seo: {},
+      existingEndpoints: [{
+        id: 'custom-sitemap',
+        ownedPaths: ['/sitemap.xml'],
+        match,
+        handle: () => ({ statusCode: 200 }),
+      }],
+      resolveSiteUrl: async () => 'https://tenant.test',
+    })
+    expect(match).not.toHaveBeenCalled()
+    expect(endpoints.some((entry) => entry.id === 'website-sitemap')).toBe(false)
+  })
+
   it('applies dynamic robots validators without exposing publicConfig to the resolver', async () => {
     const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-robots-meta-'))
     const resolver = vi.fn((context: any) => {
