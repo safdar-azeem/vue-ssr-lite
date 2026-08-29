@@ -646,7 +646,7 @@ export const createSsrManagedServer = async (
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
     // Stop new SSR admission and detach every queued request. Active leases
-    // remain valid and drain through the existing managed-request lifecycle.
+    // remain valid until their actual Vue render work settles.
     ssrAdmission.dispose()
     shutdownPromise = (async () => {
       const timeoutMs = initialServerOptions.shutdownTimeoutMs
@@ -675,10 +675,13 @@ export const createSsrManagedServer = async (
         nodeServer.closeIdleConnections?.()
       })
       const gracefulClose = (async () => {
-        // Do not close Vite underneath an application request that is still
-        // using its transforms or ModuleRunner. Vite/HMR sockets are not part
-        // of this managed HTTP request count.
-        await waitForRequestsDrained()
+        // A cancelled request can leave its underlying Vue render alive after
+        // the transport handler exits. Do not close Vite or its ModuleRunner
+        // until both managed handlers and authoritative admission leases drain.
+        await Promise.all([
+          waitForRequestsDrained(),
+          ssrAdmission.waitForIdle(),
+        ])
         // On a cold start Vite may have already moved from dependency scanning
         // into an optimizer batch. Cancelling at that boundary can leave
         // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
