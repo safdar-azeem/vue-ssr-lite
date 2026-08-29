@@ -124,8 +124,9 @@ export interface SsrRequestContext<
   hydration: SsrHydrationContext
   /**
    * Generic server-render resolution contract. Installed plugins register
-   * in-flight work so the renderer can await it and re-render when resolution
-   * changes the tree. Present in every mode; a no-op outside the server render.
+   * in-flight work so the renderer can await it, and explicitly request a new
+   * pass when resolution changes the tree. Present in every mode; a no-op
+   * outside the server render.
    */
   resolution: SsrRequestResolution
 }
@@ -326,14 +327,15 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
   readinessPath?: string
   /**
    * Maximum server render passes per request. The first pass always runs; extra
-   * passes only occur when an installed plugin left work pending or asked for
-   * another pass through the resolution contract. A fully resolvable page
-   * completes in one pass. Defaults to 4. Clamped to at least 1.
+   * passes only occur when an installed plugin explicitly asks for another pass
+   * through the resolution contract. Tracked work is awaited but does not by
+   * itself invalidate rendered HTML. A fully resolvable page completes in one
+   * pass. Defaults to 4. Clamped to at least 1.
    */
   maxResolutionPasses?: number
   /**
-   * Upper bound, in milliseconds, for awaiting registered resolution work
-   * BETWEEN passes. Independent of — and additionally capped by — the overall
+   * Upper bound, in milliseconds, for awaiting registered resolution work after
+   * a render pass. Independent of — and additionally capped by — the overall
    * `requestTimeoutMs` and the request abort signal. Defaults to
    * `requestTimeoutMs` when unset.
    */
