@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   bundleSsrConfigModule,
@@ -80,5 +81,46 @@ describe('application source discovery contract', () => {
     expect(() =>
       resolveApplicationRoutesModule('/app/src/website/app.ts', graph, 'website')
     ).toThrow(/multiple Vue-touching modules/)
+  })
+
+  it('keeps single-app Vite aliases out of the server.ts config graph', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-single-app-alias-'))
+    const defineServerPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      'SsrConfigRuntime.ts'
+    )
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src/constants.ts'), "export const HOME_PATH = '/'\n")
+    await writeFile(
+      join(root, 'src/Home.vue'),
+      '<template><div>HOME_PAGE</div></template>\n'
+    )
+    await writeFile(
+      join(root, 'src/routes.ts'),
+      `import { HOME_PATH } from '@/constants'\nimport Home from './Home.vue'\nexport default [{ path: HOME_PATH, component: Home }]\n`
+    )
+    await writeFile(
+      join(root, 'src/main.ts'),
+      `import routes from './routes'\nexport { routes }\nexport default () => {}\n`
+    )
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'server.ts'),
+      `import { defineServer } from ${JSON.stringify(defineServerPath)}\nexport default defineServer({ render: 'ssr' })\n`
+    )
+    const { code, graph } = await bundleSsrConfigModule(root, join(root, 'server.ts'))
+    expect(code).not.toContain('@/constants')
+    expect(code).not.toContain('HOME_PATH')
+    expect(code).not.toContain('HOME_PAGE')
+    expect(
+      graph.resolutions?.some((edge) => edge.specifier === '@/constants')
+    ).toBe(false)
+    const graphFiles = [
+      ...graph.imports.keys(),
+      ...[...graph.imports.values()].flat(),
+    ]
+    expect(graphFiles.some((file) => file.endsWith('src/routes.ts'))).toBe(false)
+    expect(graphFiles.some((file) => file.endsWith('src/constants.ts'))).toBe(false)
+    expect(graphFiles.some((file) => file.endsWith('src/Home.vue'))).toBe(false)
   })
 })
