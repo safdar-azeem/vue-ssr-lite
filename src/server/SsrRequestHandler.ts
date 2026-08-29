@@ -29,6 +29,10 @@ import {
 } from './SsrSiteOriginRuntime'
 import { resolveSiteSeoForRequest, SeoProviderFailure } from '../extensions/seo/SeoEndpoints'
 import { isPrivateSeoMode } from '../extensions/seo/types'
+import {
+  SsrAdmissionUnavailableError,
+  type SsrAdmissionController,
+} from './SsrAdmissionRuntime'
 
 export class SsrRequestTimeoutError extends Error {
   constructor() {
@@ -150,6 +154,8 @@ export interface SsrRequestHandlerRuntime {
   readonly fallbackDefinition: () => SsrCompiledConfig
   readonly shuttingDown: () => boolean
   readonly assertReady: (definition: SsrCompiledConfig) => Promise<void>
+  /** Shared per-managed-server capacity for actual Vue SSR work. */
+  readonly ssrAdmission: SsrAdmissionController
   readonly viteBase: string
   readonly ssrManifest?: SsrViteManifest
   readonly loadTemplate: (
@@ -562,20 +568,62 @@ export const handleSsrRequest = async (
     const template = await scope.run(() =>
       runtime.loadPreparedSsrTemplate(definition, entry, request.url || '/', signal)
     )
-    const remainingRequestMs = scope.remainingMs()
-    const configuredResolutionMs = serverOptions.resolutionDeadlineMs
-    const resolutionDeadlineMs =
-      remainingRequestMs > 0
-        ? Math.min(configuredResolutionMs, remainingRequestMs)
-        : configuredResolutionMs
-    const rendered = await scope.run(() =>
-      renderSsrApplication(application, renderRequest, {
-        maxResolutionPasses: serverOptions.maxResolutionPasses,
-        resolutionDeadlineMs,
-        diagnostics: serverOptions.diagnostics,
-        logger: serverOptions.logger,
+    const admission = await runtime.ssrAdmission
+      .acquire({
+        signal,
+        requestId: renderRequest.requestId,
+        entryId: entry.id,
       })
-    )
+      .then(
+        (lease) => ({ status: 'admitted' as const, lease }),
+        (error: unknown) => ({ status: 'rejected' as const, error })
+      )
+    if (admission.status === 'rejected') {
+      if (admission.error instanceof SsrAdmissionUnavailableError) {
+        return jsonResponse(503, {
+          status: 'error',
+          service: definition.name,
+          message: 'Service temporarily unavailable.',
+        })
+      }
+      throw admission.error
+    }
+    const admissionLease = admission.lease
+
+    // The request may stop awaiting promptly when its canonical signal aborts,
+    // but admission ownership follows the actual Vue SSR promise. Converting
+    // both render outcomes into a fulfilled completion record prevents a late
+    // render rejection from becoming unhandled after the request has exited.
+    const ownedRenderWork = (async () => {
+      try {
+        // Admission waiting consumes the existing request deadline. Calculate
+        // the resolution allowance only after capacity is acquired; no fresh
+        // timeout budget is created here.
+        const remainingRequestMs = scope.remainingMs()
+        const configuredResolutionMs = serverOptions.resolutionDeadlineMs
+        const resolutionDeadlineMs =
+          remainingRequestMs > 0
+            ? Math.min(configuredResolutionMs, remainingRequestMs)
+            : configuredResolutionMs
+        const value = await renderSsrApplication(application, renderRequest, {
+          maxResolutionPasses: serverOptions.maxResolutionPasses,
+          resolutionDeadlineMs,
+          diagnostics: serverOptions.diagnostics,
+          logger: serverOptions.logger,
+        })
+        return { status: 'fulfilled' as const, value }
+      } catch (error) {
+        return { status: 'rejected' as const, error }
+      } finally {
+        // One lease spans application creation, routing, plugins, every bounded
+        // resolution pass, final hydration/head collection, and the actual
+        // settlement of cancelled or failed render work.
+        admissionLease.release()
+      }
+    })()
+    const renderCompletion = await scope.run(() => ownedRenderWork)
+    if (renderCompletion.status === 'rejected') throw renderCompletion.error
+    const rendered = renderCompletion.value
     if (rendered.response.redirect) {
       const redirect = rendered.response.redirect
       const target = new URL(redirect.location, renderRequest.url)
