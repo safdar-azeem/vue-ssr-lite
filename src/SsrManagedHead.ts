@@ -79,8 +79,16 @@ const isProduction = (): boolean =>
   typeof process !== 'undefined' && process.env.NODE_ENV === 'production'
 
 const wrapHeadError = (name: string, cause: unknown): Error => {
+  const exposeServerDevelopmentCause =
+    typeof process !== 'undefined' && process.env.NODE_ENV !== 'production'
+  const detail = exposeServerDevelopmentCause
+    ? cause instanceof Error
+      ? cause.message
+      : String(cause)
+    : ''
   const error = new Error(
-    `[vue-ssr-lite] Extension "${name}" failed during head contribution.`
+    `[vue-ssr-lite] Extension "${name}" failed during head contribution.` +
+      (detail ? ` ${detail}` : '')
   )
   error.cause = cause
   return error
