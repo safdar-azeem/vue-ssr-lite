@@ -694,6 +694,86 @@ describe('defineServer application architecture', () => {
     expect(normalized.applications.admin.routes).toBe(routes)
   })
 
+  it('keeps SPA private SEO mode without a bound server shell', async () => {
+    const compiled = await compileSsrConfig(
+      {
+        default: defineServer({
+          applications: [
+            defineApplication({
+              name: 'erp',
+              render: 'spa',
+              host: 'admin.example.com',
+              seo: { mode: 'private' },
+            }),
+          ],
+        }),
+      },
+      { development: true, root: '/workspace/project' }
+    )
+    const ids = compiled.applications[0]?.endpoints.map((endpoint) => endpoint.id) ?? []
+    expect(ids).toContain('erp-robots')
+    expect(ids).not.toContain('erp-sitemap')
+  })
+
+  it('lets application endpoints own SEO paths instead of conflicting', async () => {
+    const compiled = await compileSsrConfig(
+      withSsrShells(
+        defineServer({
+          applications: [
+            defineApplication({
+              name: 'erp',
+              render: 'spa',
+              host: 'admin.example.com',
+              seo: { mode: 'private' },
+              endpoints: [
+                {
+                  id: 'erp-seo-boundary',
+                  ownedPaths: ['/robots.txt', '/sitemap.xml'],
+                  match: ({ entryId, pathname }) =>
+                    entryId === 'erp' &&
+                    (pathname === '/robots.txt' || pathname.startsWith('/sitemap')),
+                  handle: () => ({ statusCode: 404 }),
+                },
+              ],
+            }),
+            defineApplication({
+              name: 'storefront',
+              render: 'ssr',
+              host: 'shop.example.com',
+              endpoints: [
+                {
+                  id: 'storefront-seo',
+                  ownedPaths: ['/robots.txt', '/sitemap.xml'],
+                  match: ({ entryId, pathname }) =>
+                    entryId === 'storefront' &&
+                    (pathname === '/robots.txt' || pathname === '/sitemap.xml'),
+                  handle: () => ({ statusCode: 200 }),
+                },
+              ],
+            }),
+          ],
+        }),
+        {
+          storefront: { root: Root, main: { default: () => undefined } },
+        }
+      ),
+      { development: true, root: '/workspace/project' }
+    )
+    const erpIds =
+      compiled.applications.find((app) => app.id === 'erp')?.endpoints.map((endpoint) => endpoint.id) ??
+      []
+    const shopIds =
+      compiled.applications
+        .find((app) => app.id === 'storefront')
+        ?.endpoints.map((endpoint) => endpoint.id) ?? []
+    expect(erpIds).toContain('erp-seo-boundary')
+    expect(erpIds).not.toContain('erp-sitemap')
+    expect(erpIds).not.toContain('erp-robots')
+    expect(shopIds).toContain('storefront-seo')
+    expect(shopIds).not.toContain('storefront-sitemap')
+    expect(shopIds).not.toContain('storefront-robots')
+  })
+
   it('keeps multi-app route-module discovery on the generated client', () => {
     const entries = extractSsrViteEntries(
       defineServer({
@@ -719,6 +799,36 @@ describe('defineServer application architecture', () => {
     const client = generateSsrClientModule('/app', entries.applications[0])
     expect(client).toContain('modules/admin/routes.ts')
     expect(client).not.toContain('const routes = __ssrMain.routes')
+  })
+
+  it('imports a named routes export instead of assuming default', () => {
+    const named = generateSsrClientModule('/app', {
+      id: 'erp',
+      kind: 'spa',
+      main: './src/runtime/ErpBootstrap.ts',
+      root: './src/runtime/ErpApp.vue',
+      routesModule: './src/router/routes.ts',
+      routesExport: 'routes',
+      template: './index.html',
+      mountSelector: '#app',
+      routesFromMain: false,
+    })
+    expect(named).toContain('import { routes as applicationRoutes } from "/app/src/router/routes.ts"')
+    expect(named).toContain('const routes = applicationRoutes')
+    expect(named).not.toContain('import applicationRoutes from "/app/src/router/routes.ts"')
+
+    const fallback = generateSsrClientModule('/app', {
+      id: 'erp',
+      kind: 'spa',
+      main: './src/runtime/ErpBootstrap.ts',
+      root: './src/runtime/ErpApp.vue',
+      routesModule: './src/router/routes.ts',
+      template: './index.html',
+      mountSelector: '#app',
+      routesFromMain: false,
+    })
+    expect(fallback).toContain('import * as applicationRoutes from "/app/src/router/routes.ts"')
+    expect(fallback).toContain('const routes = applicationRoutes.default ?? applicationRoutes.routes')
   })
 })
 
