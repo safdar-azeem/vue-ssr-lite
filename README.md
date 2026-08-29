@@ -435,19 +435,28 @@ export default defineServer({
 })
 ```
 
-| Option              | Description                  |
-| ------------------- | ---------------------------- |
-| `host`              | Bind address                 |
-| `port`              | HTTP port                    |
-| `trustProxy`        | Trust reverse-proxy headers  |
-| `requestTimeoutMs`  | One request-wide deadline    |
-| `shutdownTimeoutMs` | Graceful shutdown timeout    |
-| `healthPath`        | Health endpoint              |
-| `readinessPath`     | Readiness endpoint           |
-| `diagnostics`       | Development diagnostics      |
-| `logger`            | Structured logger            |
-| `onMetrics`         | Render metrics callback      |
-| `renderError`       | Custom render-error response |
+| Option                     | Description                                      |
+| -------------------------- | ------------------------------------------------ |
+| `host`                     | Bind address                                     |
+| `port`                     | HTTP port                                        |
+| `trustProxy`               | Trust reverse-proxy headers                      |
+| `requestTimeoutMs`         | One request-wide deadline                        |
+| `shutdownTimeoutMs`        | Graceful shutdown timeout                        |
+| `maxConcurrentSsrRequests` | Active Vue SSR limit per server (default `8`)    |
+| `maxQueuedSsrRequests`     | Waiting Vue SSR limit per server (default `32`)  |
+| `healthPath`               | Health endpoint                                  |
+| `readinessPath`            | Readiness endpoint                               |
+| `diagnostics`              | Development diagnostics                          |
+| `logger`                   | Structured logger                                |
+| `onMetrics`                | Render metrics callback                          |
+| `renderError`              | Custom render-error response                     |
+
+Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML,
+custom endpoints, health/readiness checks, Vite responses, and production
+assets bypass it. When both limits are full, the server returns `503 Service
+Unavailable`; queue time remains part of `requestTimeoutMs`. Set
+`maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are
+occupied.
 
 `PORT` can override the configured port.
 
