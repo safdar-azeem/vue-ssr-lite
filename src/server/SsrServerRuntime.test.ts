@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ViteDevServer } from 'vite'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, onServerPrefetch } from 'vue'
 import { RouterView } from 'vue-router'
 import { defineApplication } from '../index'
 import {
@@ -417,6 +417,145 @@ describe('managed SSR server lifecycle', () => {
     await expect(closing).resolves.toBeUndefined()
   })
 
+  it('waits for cancelled HTTP work whose admitted Vue render is still alive', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    let markRenderStarted!: () => void
+    const renderStarted = new Promise<void>((resolveStarted) => {
+      markRenderStarted = resolveStarted
+    })
+    let releaseRender!: () => void
+    const renderGate = new Promise<void>((resolveRender) => {
+      releaseRender = resolveRender
+    })
+    const Root = defineComponent({
+      setup() {
+        markRenderStarted()
+        onServerPrefetch(() => renderGate)
+        return () => h('main', 'rendered')
+      },
+    })
+    const closeVite = vi.fn(async () => undefined)
+    const vite = {
+      close: closeVite,
+      transformIndexHtml: async (_url: string, html: string) => html,
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      vite,
+      loadRuntime: async () => ({
+        default: defineServer({
+          server: { port: 0, shutdownTimeoutMs: 2_000 },
+          applications: [
+            defineApplication({
+              name: 'site',
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+            }),
+          ],
+        }),
+        __vueSsrLiteShells: {
+          site: { root: Root, main: { default: () => undefined } },
+        },
+      }),
+    })
+    await managed.listen()
+
+    const request = createHttpRequest({
+      hostname: '127.0.0.1',
+      port: managed.address().port,
+      headers: { accept: 'text/html' },
+    })
+    const disconnected = new Promise<void>((resolveDisconnected) => {
+      request.once('error', () => resolveDisconnected())
+      request.once('close', () => resolveDisconnected())
+    })
+    request.end()
+    await renderStarted
+    request.destroy()
+    await disconnected
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+
+    const closing = managed.close()
+    let closed = false
+    void closing.then(
+      () => {
+        closed = true
+      },
+      () => undefined
+    )
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+    expect(closed).toBe(false)
+    expect(closeVite).not.toHaveBeenCalled()
+
+    releaseRender()
+    await expect(closing).resolves.toBeUndefined()
+    expect(closeVite).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds shutdown when cancelled admitted Vue render work never settles', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(
+      join(root, 'site.html'),
+      '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
+    )
+    let markRenderStarted!: () => void
+    const renderStarted = new Promise<void>((resolveStarted) => {
+      markRenderStarted = resolveStarted
+    })
+    const Root = defineComponent({
+      setup() {
+        markRenderStarted()
+        onServerPrefetch(() => new Promise<never>(() => undefined))
+        return () => h('main', 'never rendered')
+      },
+    })
+    managed = await createSsrManagedServer({
+      production: false,
+      root,
+      loadRuntime: async () => ({
+        default: defineServer({
+          server: { port: 0, shutdownTimeoutMs: 50 },
+          applications: [
+            defineApplication({
+              name: 'site',
+              template: 'site.html',
+              domain: { development: 'localhost', customDomains: true },
+            }),
+          ],
+        }),
+        __vueSsrLiteShells: {
+          site: { root: Root, main: { default: () => undefined } },
+        },
+      }),
+    })
+    await managed.listen()
+
+    const request = createHttpRequest({
+      hostname: '127.0.0.1',
+      port: managed.address().port,
+      headers: { accept: 'text/html' },
+    })
+    const disconnected = new Promise<void>((resolveDisconnected) => {
+      request.once('error', () => resolveDisconnected())
+      request.once('close', () => resolveDisconnected())
+    })
+    request.end()
+    await renderStarted
+    request.destroy()
+    await disconnected
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn))
+
+    await expect(managed.close()).rejects.toThrow(
+      'SSR server graceful shutdown timed out.'
+    )
+    expect(managed.nodeServer.listening).toBe(false)
+  })
+
   it('bounds a genuinely stuck Vite close with the configured timeout', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(
@@ -673,6 +812,10 @@ describe('managed SSR server lifecycle', () => {
       join(root, 'site.html'),
       '<!doctype html><html><head></head><body><div id="app"></div></body></html>'
     )
+    let releaseTimedOutRenders!: () => void
+    const timedOutRenderGate = new Promise<void>((resolveRender) => {
+      releaseTimedOutRenders = resolveRender
+    })
     const Root = defineComponent({
       async setup() {
         const context = useSsrRequestContext()
@@ -683,7 +826,7 @@ describe('managed SSR server lifecycle', () => {
           context.url.pathname === '/timeout' ||
           context.url.pathname === '/timeout-hanging-renderer'
         ) {
-          await new Promise<never>(() => undefined)
+          await timedOutRenderGate
         }
         return () => h('main', 'ready')
       },
@@ -744,12 +887,20 @@ describe('managed SSR server lifecycle', () => {
       headers: { accept: 'text/html' },
     })
 
-    expect(redirect.status).toBe(307)
-    expect(redirect.headers.get('location')).toBe(`http://127.0.0.1:${port}/target`)
-    expect(timeout.status).toBe(418)
-    expect(await timeout.text()).toBe('timeout handled')
-    expect(timeoutRenderKind).toBe('timeout')
-    expect(hangingRenderer.status).toBe(504)
+    try {
+      expect(redirect.status).toBe(307)
+      expect(redirect.headers.get('location')).toBe(`http://127.0.0.1:${port}/target`)
+      expect(timeout.status).toBe(418)
+      expect(await timeout.text()).toBe('timeout handled')
+      expect(timeoutRenderKind).toBe('timeout')
+      expect(hangingRenderer.status).toBe(504)
+    } finally {
+      // Timed-out request handlers stop awaiting immediately, while admission
+      // remains owned by the actual Vue renders until these fixture gates open.
+      releaseTimedOutRenders()
+      await managed.close()
+      managed = undefined
+    }
   })
 
   it('uses one deadline across request stages and aborts the completed scope', async () => {
