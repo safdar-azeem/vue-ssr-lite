@@ -96,8 +96,8 @@ describe('multi-domain architecture fixture', () => {
     ]) {
       expect(code).not.toContain(marker)
     }
-    expect(code).toContain('vue-ssr-lite-config-universal')
-    expect(code).toContain('var HomePage_default = {}')
+    expect(code).not.toContain('var HomePage_default')
+    expect(code).not.toContain('HomePage.vue')
     expect(code).toContain('WEBSITE_SERVER_ONLY_PROVIDER')
   })
 
