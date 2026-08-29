@@ -145,6 +145,8 @@ export type SsrResolvedServerOptions = Omit<
   | 'clientOutDir'
   | 'requestTimeoutMs'
   | 'shutdownTimeoutMs'
+  | 'maxConcurrentSsrRequests'
+  | 'maxQueuedSsrRequests'
   | 'healthPath'
   | 'readinessPath'
   | 'maxResolutionPasses'
@@ -158,6 +160,8 @@ export type SsrResolvedServerOptions = Omit<
   clientOutDir: string
   requestTimeoutMs: number
   shutdownTimeoutMs: number
+  maxConcurrentSsrRequests: number
+  maxQueuedSsrRequests: number
   healthPath: string
   readinessPath: string
   maxResolutionPasses: number
@@ -1136,6 +1140,20 @@ const normalizeNonNegativeDuration = (
   return resolved
 }
 
+const normalizeIntegerCapacity = (
+  value: number | undefined,
+  fallback: number,
+  label: string,
+  minimum: number
+): number => {
+  const resolved = value ?? fallback
+  if (!Number.isFinite(resolved) || !Number.isInteger(resolved) || resolved < minimum) {
+    const range = minimum === 0 ? 'non-negative' : 'positive'
+    throw new Error(`${label} must be a finite ${range} integer.`)
+  }
+  return resolved
+}
+
 const normalizeCompiledServerOptions = (
   config: SsrNormalizedConfig,
   options: CompileSsrConfigOptions,
@@ -1162,6 +1180,18 @@ const normalizeCompiledServerOptions = (
       config.server?.shutdownTimeoutMs,
       10_000,
       'server.shutdownTimeoutMs'
+    ),
+    maxConcurrentSsrRequests: normalizeIntegerCapacity(
+      config.server?.maxConcurrentSsrRequests,
+      8,
+      'server.maxConcurrentSsrRequests',
+      1
+    ),
+    maxQueuedSsrRequests: normalizeIntegerCapacity(
+      config.server?.maxQueuedSsrRequests,
+      32,
+      'server.maxQueuedSsrRequests',
+      0
     ),
     healthPath: config.server?.healthPath || '/healthz',
     readinessPath: config.server?.readinessPath || '/readyz',
