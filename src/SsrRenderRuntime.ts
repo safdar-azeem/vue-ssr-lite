@@ -1,10 +1,14 @@
 import { renderToString } from 'vue/server-renderer'
-import { createSsrApplication } from './SsrApplicationRuntime'
+import {
+  createSsrApplication,
+  snapshotSsrReconciliationState,
+} from './SsrApplicationRuntime'
 import { createSsrResolutionController } from './SsrRequestResolution'
 import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
 import { safeSsrLog } from './SsrObservability'
+import type { ManagedHeadSnapshot } from './SsrManagedHead'
 import type {
   SsrResolvedApplicationDefinition,
   SsrCreatedApplication,
@@ -12,10 +16,16 @@ import type {
   SsrLogger,
   SsrRenderRequest,
   SsrRenderResult,
+  SsrResponseState,
 } from './SsrRuntimeTypes'
 
 const now = () => globalThis.performance?.now?.() ?? Date.now()
 const byteLength = (value: string) => new TextEncoder().encode(value).byteLength
+
+const snapshotSerializable = <T>(value: T): T =>
+  value === undefined
+    ? value
+    : (JSON.parse(serializeSsrState(value)) as T)
 
 const throwIfRequestAborted = (signal: AbortSignal): void => {
   if (!signal.aborted) return
@@ -26,11 +36,11 @@ const throwIfRequestAborted = (signal: AbortSignal): void => {
 export interface SsrRenderOptions {
   /**
    * Maximum render passes. The first always runs; further passes only occur
-   * when a plugin left resolution work pending or asked for another pass.
+   * when a plugin explicitly invalidated the rendered tree.
    * Defaults to 4, clamped to at least 1.
    */
   maxResolutionPasses?: number
-  /** Bound, in ms, for awaiting registered work between passes. */
+  /** Bound, in ms, for awaiting registered work after a render pass. */
   resolutionDeadlineMs?: number
   /** Enables development-only render diagnostics. Inert in production. */
   diagnostics?: boolean
@@ -109,6 +119,8 @@ export const renderSsrApplication = async <
   let routeReadyAt = startedAt
   let renderedAt = startedAt
   let carried: Record<string, unknown> | undefined
+  let carriedApplication: TApplicationState | undefined
+  let carriedResponse: SsrResponseState | undefined
   let created:
     | SsrCreatedApplication<TApplicationState, TPublicConfig>
     | undefined
@@ -116,6 +128,14 @@ export const renderSsrApplication = async <
   let teleports: Record<string, string> = {}
   let renderedModules: string[] = []
   let passes = 0
+  let deadlineSnapshot:
+    | {
+        application: TApplicationState
+        plugins: Record<string, unknown> | undefined
+        head: ManagedHeadSnapshot
+        response: SsrResponseState
+      }
+    | undefined
 
   const disposeCurrent = async () => {
     if (!created) return
@@ -155,6 +175,9 @@ export const renderSsrApplication = async <
         server: true,
         request,
         resumeState: pass === 0 ? undefined : carried,
+        resumeApplicationState:
+          pass === 0 ? undefined : carriedApplication,
+        resumeResponseState: pass === 0 ? undefined : carriedResponse,
         resolution,
       })
       throwIfRequestAborted(request.signal)
@@ -177,6 +200,7 @@ export const renderSsrApplication = async <
         modules?: Set<string>
       } = {}
       html = await renderToString(created.app, ssrContext)
+      resolution.completeReactivityObservation()
       throwIfRequestAborted(request.signal)
       teleports = { ...(ssrContext.teleports ?? {}) }
       // Replace rather than union: only the pass that produced `html` may own
@@ -185,33 +209,84 @@ export const renderSsrApplication = async <
       renderedAt = now()
 
       const pending = resolution.pendingWork()
-      const wantsAnotherPass = resolution.additionalPassRequested()
       const isLastPass = pass === maxPasses - 1
+      let resolutionSettled = true
 
-      if ((pending.length === 0 && !wantsAnotherPass) || isLastPass) {
-        finalized = true
-        if (isLastPass && (pending.length > 0 || wantsAnotherPass)) {
+      // Tracked work gates final serialization, but does not by itself
+      // invalidate the HTML. A plugin must explicitly request another pass
+      // when settling that work changes render-visible state. Inspect the
+      // request after draining as work may invalidate the tree asynchronously.
+      if (pending.length > 0) {
+        const fallbackSnapshot =
+          Number.isFinite(deadlineMs) && deadlineMs > 0
+            ? {
+                application: snapshotSerializable(created.context.state),
+                plugins: snapshotSerializable(created.hydration.collect()),
+                head: snapshotSerializable(created.managedHead.collect()),
+                response: snapshotSerializable(created.context.response),
+              }
+            : undefined
+        resolutionSettled = await resolution.drain(deadlineMs, request.signal)
+        throwIfRequestAborted(request.signal)
+        if (!resolutionSettled) {
+          deadlineSnapshot = fallbackSnapshot
           reportDiagnostics(options.logger, request.requestId, definition.id, [
             {
-              code: 'resolution-pass-limit',
-              message: `Resolution did not settle within ${maxPasses} render passes; serializing the last render.`,
+              code: 'resolution-deadline',
+              message: `Resolution work did not settle within the ${deadlineMs}ms deadline; serializing the latest render.`,
             },
           ])
         }
+      }
+
+      // A deadline is terminal for this resolution cycle. Re-rendering before
+      // tracked work settles cannot produce a known-final tree, so serialize
+      // the latest completed render with the diagnostic above. Cancellation
+      // has already propagated through throwIfRequestAborted().
+      if (!resolutionSettled) {
+        finalized = true
         break
       }
 
-      // Another pass is warranted. Carry plugin state forward, await the
-      // registered work (bounded), then recreate the app warm.
-      await resolution.drain(deadlineMs, request.signal)
-      throwIfRequestAborted(request.signal)
-      carried = created.hydration.collect()
+      resolution.completeReactivityPass()
+
+      if (!resolution.additionalPassRequested()) {
+        finalized = true
+        break
+      }
+
+      if (isLastPass) {
+        finalized = true
+        reportDiagnostics(options.logger, request.requestId, definition.id, [
+          {
+            code: 'resolution-pass-limit',
+            message: `Resolution did not settle within ${maxPasses} render passes; serializing the last render.`,
+          },
+        ])
+        break
+      }
+
+      // The rendered tree was invalidated. Carry plugin state forward and
+      // recreate the application warm for the next bounded pass.
+      // Transfer owned snapshots before cleanup. A discarded application's
+      // cleanup cannot mutate the state accepted by the next pass.
+      carried = snapshotSsrReconciliationState(
+        created.hydration.collect()
+      )
+      carriedApplication = snapshotSsrReconciliationState(
+        created.context.state
+      )
+      carriedResponse = snapshotSsrReconciliationState(
+        created.context.response
+      )
       await disposeCurrent()
     }
 
     if (!created) throw new Error('SSR render produced no application instance.')
 
-    const head = created.managedHead.collect()
+    const head =
+      deadlineSnapshot?.head ??
+      snapshotSsrReconciliationState(created.managedHead.collect())
 
     if (diagnosticsEnabled) {
       reportDiagnostics(
@@ -235,10 +310,14 @@ export const renderSsrApplication = async <
       applicationId: definition.id,
       publicConfig: request.publicConfig,
       domain: request.domain,
-      application: created.context.state,
+      application:
+        deadlineSnapshot?.application ??
+        snapshotSsrReconciliationState(created.context.state),
       siteOrigin: created.context.siteOrigin,
       siteSeo: request.siteSeo,
-      plugins: created.hydration.collect(),
+      plugins: deadlineSnapshot
+        ? deadlineSnapshot.plugins
+        : snapshotSsrReconciliationState(created.hydration.collect()),
     }
     const stateBytes = byteLength(serializeSsrState(hydrationState))
     const totalAt = now()
@@ -248,7 +327,9 @@ export const renderSsrApplication = async <
       teleports,
       renderedModules,
       head,
-      response: created.context.response,
+      response:
+        deadlineSnapshot?.response ??
+        snapshotSsrReconciliationState(created.context.response),
       hydrationState,
       metrics: {
         requestId: request.requestId,
