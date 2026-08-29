@@ -15,6 +15,7 @@ import {
   assertNoImportedUniversalConfigMutation,
   isDefineApplicationModuleSource,
   projectUniversalRuntimeSource,
+  sourceDeclaresServerConfigRoutes,
   assertUniversalProjectionCoverage,
   type SsrUniversalRuntimeProjection,
 } from './SsrUniversalProjection'
@@ -31,6 +32,7 @@ import type {
   SsrResolvedAppShell,
   SsrRobotsInput,
   SsrSeoConfig,
+  SsrSingleApplicationConfig,
   SsrSiteSeoInput,
 } from './SsrConfigTypes'
 import { createSeoEndpoints } from './extensions/seo/SeoEndpoints'
@@ -83,6 +85,16 @@ export const SSR_DEFAULT_APPLICATION_ENTRY = SSR_DEFAULT_MAIN
 export const SSR_DEFAULT_TEMPLATE = './index.html'
 export const SSR_DEFAULT_MOUNT = '#app'
 export const SSR_DEFAULT_APPLICATION_ID = 'app'
+
+export const DEFINE_SERVER_ROUTES_ERROR = [
+  'defineServer({ routes }) is not supported for single applications.',
+  '',
+  'Export routes from src/main.ts instead:',
+  '',
+  'export { routes }',
+  '',
+  'Use defineApplication({ routes }) for explicit multi-application configuration.',
+].join('\n')
 
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '::1'] as const
 const LOOPBACK_HOST_SET = new Set<string>(LOOPBACK_HOSTS)
@@ -575,6 +587,10 @@ const asApplicationList = (
   config: SsrConfig,
   root: string
 ): { applications: ApplicationConfig[]; single: boolean } => {
+  const configRecord = config as unknown as Record<string, unknown>
+  if (configRecord.routes !== undefined) {
+    throw new Error(DEFINE_SERVER_ROUTES_ERROR)
+  }
   if (config.applications != null) {
     if (!Array.isArray(config.applications)) {
       throw new Error(
@@ -596,12 +612,10 @@ const asApplicationList = (
       'responseCache',
       'publicConfig',
       'seo',
-      'routes',
       'router',
       'scrollBehavior',
       'extensions',
     ] as const
-    const configRecord = config as unknown as Record<string, unknown>
     const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
     if (mixedKey) {
       throw new Error(
@@ -610,7 +624,7 @@ const asApplicationList = (
     }
     return { applications: [...config.applications], single: false }
   }
-  const single = config as ApplicationConfig & SsrConfig
+  const single = config as SsrSingleApplicationConfig
   return {
     applications: [
       {
@@ -628,7 +642,6 @@ const asApplicationList = (
         publicConfig: single.publicConfig,
         seo: single.seo,
         app: undefined,
-        routes: single.routes,
         router: single.router,
         scrollBehavior: single.scrollBehavior,
         extensions: single.extensions,
@@ -775,6 +788,9 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     return config
   }
   const configSource = await readFile(absoluteConfig, 'utf8')
+  if (await sourceDeclaresServerConfigRoutes(configSource, absoluteConfig)) {
+    throw new Error(DEFINE_SERVER_ROUTES_ERROR)
+  }
   const { code, graph } = await bundleSsrConfigModule(root, absoluteConfig)
   const moduleResolver = (importer: string, specifier: string) =>
     resolveSsrConfigGraphModule(graph, importer, specifier)
