@@ -43,6 +43,10 @@ import {
   SsrRequestCancelledError,
   type SsrNormalizedRequest,
 } from './SsrRequestHandler'
+import {
+  createSsrAdmissionController,
+  type SsrAdmissionEvent,
+} from './SsrAdmissionRuntime'
 
 export interface SsrManagedServerOptions {
   production: boolean
@@ -327,6 +331,24 @@ export const createSsrManagedServer = async (
         })
   const initialRuntime = await resolveRuntime(await options.loadRuntime(), options)
   const initialServerOptions = initialRuntime.server
+  const ssrAdmission = createSsrAdmissionController({
+    maxConcurrent: initialServerOptions.maxConcurrentSsrRequests,
+    maxQueued: initialServerOptions.maxQueuedSsrRequests,
+    onEvent: (event: SsrAdmissionEvent) => {
+      const details: Record<string, unknown> = { ...event }
+      if (event.type === 'rejected') {
+        safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.admission.rejected', details)
+      } else if (event.type === 'queued') {
+        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.queued', details)
+      } else if (event.type === 'admitted') {
+        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.admitted', details)
+      } else if (event.type === 'cancelled') {
+        safeSsrLog(initialServerOptions.logger, 'debug', 'ssr.admission.cancelled', details)
+      } else if (event.type === 'disposed' && event.rejectedQueuedCount > 0) {
+        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.disposed', details)
+      }
+    },
+  })
   const host = initialServerOptions.host
   const port = parsePort(initialServerOptions.port)
   const clientRoot = resolve(initialServerOptions.root, initialServerOptions.clientOutDir)
@@ -561,6 +583,7 @@ export const createSsrManagedServer = async (
         fallbackDefinition: () => lastDefinition,
         shuttingDown: () => shuttingDown,
         assertReady,
+        ssrAdmission,
         viteBase,
         ssrManifest,
         loadTemplate,
@@ -622,6 +645,9 @@ export const createSsrManagedServer = async (
   const close = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
+    // Stop new SSR admission and detach every queued request. Active leases
+    // remain valid and drain through the existing managed-request lifecycle.
+    ssrAdmission.dispose()
     shutdownPromise = (async () => {
       const timeoutMs = initialServerOptions.shutdownTimeoutMs
       let forced: ReturnType<typeof setTimeout> | undefined
