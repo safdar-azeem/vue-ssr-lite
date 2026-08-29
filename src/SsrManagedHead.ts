@@ -96,6 +96,10 @@ export const linkHeadKey = (entry: ManagedHeadLinkEntry): string => {
   return `${entry.rel}:${entry.hreflang || ''}:${entry.media || ''}:${entry.href}`
 }
 
+/** Neutralize HTML raw-text closing tags while preserving script data/source semantics. */
+export const normalizeManagedScriptContent = (content: string): string =>
+  content.replace(/<\/script/gi, (closing) => `<\\/${closing.slice(2)}`)
+
 export const flattenHeadContribution = (
   contribution: ManagedHeadContribution
 ): { tags: ManagedHeadTag[]; htmlAttributes?: ManagedHeadContribution['htmlAttributes'] } => {
@@ -127,7 +131,7 @@ export const flattenHeadContribution = (
       key: entry.key || 'script',
       tag: 'script',
       attrs: entry.type ? { type: entry.type } : {},
-      textContent: entry.content,
+      textContent: normalizeManagedScriptContent(entry.content),
     })
   }
   return { tags, htmlAttributes: contribution.htmlAttributes }
