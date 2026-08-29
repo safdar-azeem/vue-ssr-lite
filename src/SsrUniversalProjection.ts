@@ -2468,6 +2468,40 @@ export const isDefineApplicationModuleSource = async (
   return isApplicationExport(findDefaultExport(program), new Set())
 }
 
+const objectDeclaresRoutes = (object: EstreeNode): boolean => {
+  for (const property of asNodes(object.properties)) {
+    if (property.type !== 'Property') continue
+    if (propertyName(property) === 'routes') return true
+  }
+  return false
+}
+
+/**
+ * True when `server.ts` statically declares `routes` on the exported
+ * `defineServer()` / config object. Used to reject the removed single-app API
+ * before the config bundler follows route-graph imports.
+ */
+export const sourceDeclaresServerConfigRoutes = async (
+  source: string,
+  filePath: string
+): Promise<boolean> => {
+  const transformed = transformSync(source, {
+    loader: loaderForFile(filePath),
+    format: 'esm',
+    target: 'esnext',
+    sourcemap: false,
+    legalComments: 'none',
+  }).code
+  const parseAst = await loadParseAst()
+  const program = parseAst(transformed) as EstreeNode
+  const bindings = collectModuleBindings(program)
+  const helpers = collectConfigHelpers(program, filePath)
+  const defaultExport = findDefaultExport(program)
+  if (!defaultExport) return false
+  const unwrapped = unwrapConfigObject(defaultExport, bindings, helpers)
+  return Boolean(unwrapped && objectDeclaresRoutes(unwrapped.object))
+}
+
 export const projectUniversalRuntimeSource = async (
   source: string,
   filePath: string,
