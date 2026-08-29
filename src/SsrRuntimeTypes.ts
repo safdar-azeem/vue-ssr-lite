@@ -276,6 +276,12 @@ export interface SsrResponseCacheStrategy<TPublicConfig = unknown> {
 
 export interface SsrEndpointDefinition<TPublicConfig = unknown> {
   id: string
+  /**
+   * Exact request paths owned by this endpoint. Core uses this declaration for
+   * deterministic compile-time collision avoidance and never executes `match`
+   * outside the request lifecycle.
+   */
+  ownedPaths?: readonly string[]
   match: (request: SsrHttpRequest<TPublicConfig>) => boolean
   handle: (
     request: SsrHttpRequest<TPublicConfig>,
