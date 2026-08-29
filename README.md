@@ -184,12 +184,45 @@ Register each application in `server.ts`. They are not discovered automatically.
 // server.ts
 import { defineServer } from 'vue-ssr-lite'
 import website from './src/modules/website/app'
+import app from './src/modules/app/app'
 import admin from './src/modules/admin/app'
 import docs from './src/modules/docs/app'
 
 export default defineServer({
   server: { port: 4211 },
-  applications: [website, admin, docs],
+  applications: [website, app, admin, docs],
+})
+```
+
+```ts
+// src/modules/website/app.ts
+import { defineApplication } from 'vue-ssr-lite'
+import routes from './routes'
+
+export default defineApplication({
+  name: 'website',
+  render: 'ssr',
+  domain: {
+    development: 'localhost',
+    production: 'domain.com',
+  },
+  routes,
+})
+```
+
+```ts
+// src/modules/app/app.ts
+import { defineApplication } from 'vue-ssr-lite'
+import routes from './routes'
+
+export default defineApplication({
+  name: 'app',
+  render: 'spa',
+  domain: {
+    development: 'app.localhost',
+    production: 'app.domain.com',
+  },
+  routes,
 })
 ```
 
@@ -203,7 +236,7 @@ export default defineApplication({
   render: 'spa',
   domain: {
     development: 'admin.localhost',
-    production: 'admin.example.com',
+    production: 'admin.domain.com',
   },
   routes,
 })
@@ -212,9 +245,17 @@ export default defineApplication({
 By default every application uses the global `/src/main.ts` and `/src/App.vue`. An application can override that shell; paths inside `app.ts` resolve relative to that module:
 
 ```ts
+// src/modules/docs/app.ts
+import { defineApplication } from 'vue-ssr-lite'
+import routes from './routes'
+
 export default defineApplication({
   name: 'docs',
   render: 'ssr',
+  domain: {
+    development: 'docs.localhost',
+    production: 'docs.domain.com',
+  },
   routes,
   app: {
     main: './main.ts',
