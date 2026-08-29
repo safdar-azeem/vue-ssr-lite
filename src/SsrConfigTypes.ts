@@ -259,6 +259,8 @@ export interface SsrResolvedAppShell {
   root: string
   /** Set when routes are owned by `defineApplication()`, not `main.ts`. */
   routesModule?: string
+  /** Export used by `defineApplication({ routes })`: `default`, `routes`, or another name. */
+  routesExport?: string
   /** Directory of the application module, when registered from a file. */
   applicationDir?: string
   /** Absolute path of the `defineApplication()` module, when registered from a file. */
