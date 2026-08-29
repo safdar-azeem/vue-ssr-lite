@@ -2476,6 +2476,154 @@ const objectDeclaresRoutes = (object: EstreeNode): boolean => {
   return false
 }
 
+const unwrapExpression = (input: EstreeNode | undefined): EstreeNode | undefined => {
+  let node = input
+  while (
+    node &&
+    [
+      'ChainExpression',
+      'ParenthesizedExpression',
+      'TSAsExpression',
+      'TSSatisfiesExpression',
+      'TSNonNullExpression',
+    ].includes(node.type)
+  ) {
+    node = asNode(node.expression)
+  }
+  return node
+}
+
+export interface SsrApplicationRoutesImportBinding {
+  specifier: string
+  imported: string
+}
+
+const memberPropertyName = (node: EstreeNode | undefined): string | undefined => {
+  if (!node || node.computed) return undefined
+  const property = asNode(node.property)
+  return property?.type === 'Identifier' ? (property.name as string) : undefined
+}
+
+const resolveIdentifierToImportBinding = (
+  name: string,
+  bindings: Map<string, Binding>,
+  seen: Set<string>
+): SsrApplicationRoutesImportBinding | undefined => {
+  if (seen.has(name)) return undefined
+  seen.add(name)
+  const binding = bindings.get(name)
+  if (!binding) return undefined
+  if (binding.kind === 'import') return importBindingTarget(binding)
+  if (
+    binding.node.type !== 'VariableDeclarator' ||
+    binding.declarationKind !== 'const'
+  ) {
+    return undefined
+  }
+  const init = unwrapExpression(asNode(binding.node.init))
+  if (init?.type === 'Identifier') {
+    return resolveIdentifierToImportBinding(init.name as string, bindings, seen)
+  }
+  if (init?.type === 'MemberExpression') {
+    const object = unwrapExpression(asNode(init.object))
+    const imported = memberPropertyName(init)
+    if (object?.type === 'Identifier' && imported) {
+      const namespace = resolveIdentifierToImportBinding(object.name as string, bindings, seen)
+      if (namespace?.imported === '*') {
+        return { specifier: namespace.specifier, imported }
+      }
+    }
+  }
+  return undefined
+}
+
+const bindingFromRoutesValue = (
+  value: EstreeNode | undefined,
+  bindings: Map<string, Binding>
+): SsrApplicationRoutesImportBinding | undefined => {
+  const node = unwrapExpression(value)
+  if (!node) return undefined
+  if (
+    (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') &&
+    asNodes(node.params).length === 0
+  ) {
+    const body = unwrapExpression(asNode(node.body))
+    if (body?.type !== 'BlockStatement') {
+      return bindingFromRoutesValue(body, bindings)
+    }
+    const statements = asNodes(body.body)
+    if (statements.length === 1 && statements[0].type === 'ReturnStatement') {
+      return bindingFromRoutesValue(asNode(statements[0].argument), bindings)
+    }
+    return undefined
+  }
+  if (node.type === 'Identifier') {
+    return resolveIdentifierToImportBinding(node.name as string, bindings, new Set())
+  }
+  if (node.type === 'MemberExpression') {
+    const object = unwrapExpression(asNode(node.object))
+    const imported = memberPropertyName(node)
+    if (object?.type === 'Identifier' && imported) {
+      const namespace = resolveIdentifierToImportBinding(object.name as string, bindings, new Set())
+      if (!namespace) return undefined
+      if (namespace.imported === '*') {
+        return { specifier: namespace.specifier, imported }
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Import specifiers that feed `defineApplication({ routes })` (or an equivalent
+ * application-factory object). The config compiler stubs these modules so Node
+ * never evaluates the Vite-owned route/Vue/CSS graph.
+ */
+export const resolveApplicationRoutesImportBindings = async (
+  source: string,
+  filePath: string
+): Promise<SsrApplicationRoutesImportBinding[]> => {
+  const transformed = transformSync(source, {
+    loader: loaderForFile(filePath),
+    format: 'esm',
+    target: 'esnext',
+    sourcemap: false,
+    legalComments: 'none',
+  }).code
+  const parseAst = await loadParseAst()
+  const program = parseAst(transformed) as EstreeNode
+  const bindings = collectModuleBindings(program)
+  const helpers = collectConfigHelpers(program, filePath)
+  const application = unwrapConfigObject(findDefaultExport(program), bindings, helpers)
+  if (!application) return []
+  const values = asNodes(application.object.properties)
+    .filter((property) => property.type === 'Property' && propertyName(property) === 'routes')
+    .map((property) => asNode(property.value))
+    .filter((value): value is EstreeNode => Boolean(value))
+  const found: SsrApplicationRoutesImportBinding[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const binding = bindingFromRoutesValue(value, bindings)
+    if (!binding) continue
+    const key = `${binding.specifier}\0${binding.imported}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    found.push(binding)
+  }
+  return found
+}
+
+export const resolveApplicationRoutesImportSpecifiers = async (
+  source: string,
+  filePath: string
+): Promise<string[]> => [
+  ...new Set(
+    (await resolveApplicationRoutesImportBindings(source, filePath)).map(
+      (binding) => binding.specifier
+    )
+  ),
+]
+
 /**
  * True when `server.ts` statically declares `routes` on the exported
  * `defineServer()` / config object. Used to reject the removed single-app API
