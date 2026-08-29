@@ -41,6 +41,13 @@ describe('managed head pipeline', () => {
     expect(snapshot.tags).toHaveLength(1)
   })
 
+  it('preserves the underlying head validation message during development', () => {
+    expect(() => collectManagedHeadSnapshot([{
+      name: 'seo',
+      read: () => { throw new Error('seo.canonical must be same-origin') },
+    }])).toThrow(/seo\.canonical must be same-origin/)
+  })
+
   it('escapes JSON-LD script breakout', () => {
     const encoded = serializeJsonLd({
       name: '</script><script>alert(1)</script>',
