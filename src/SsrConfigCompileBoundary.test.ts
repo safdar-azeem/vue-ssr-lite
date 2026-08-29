@@ -66,6 +66,7 @@ describe('application source discovery contract', () => {
     expect(walked.truncated).toBe(false)
     expect(walked.files.some((file) => file.endsWith('src/website/app.ts'))).toBe(true)
     expect(walked.files.some((file) => file.endsWith('src/factory.ts'))).toBe(true)
+    expect(walked.files.some((file) => file.endsWith('src/website/routes.ts'))).toBe(false)
   })
 
   it('fails when an application imports more than one Vue-touching module', () => {
