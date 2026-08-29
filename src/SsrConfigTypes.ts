@@ -95,6 +95,7 @@ export type SsrAppInitializer = (context: AppContext) => void | Promise<void>
 
 export interface SsrMainModule {
   default: SsrAppInitializer
+  /** Single-application route graph. Export from `src/main.ts`. */
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
 }
 
@@ -126,6 +127,7 @@ export interface ApplicationConfig {
   seo?: SsrSeoConfig
   /** Application-specific shell. Paths resolve relative to the `app.ts` module. */
   app?: SsrAppShellConfig
+  /** Explicit application route graph. Single-app routes are exported from `src/main.ts`. */
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
@@ -179,7 +181,10 @@ export interface SsrConfigShared {
   app?: SsrAppShellConfig
 }
 
-/** Flat convention overrides for one application. */
+/**
+ * Flat convention overrides for one application.
+ * Routes belong on `src/main.ts` (`export { routes }`), not `defineServer()`.
+ */
 export type SsrSingleApplicationConfig = SsrConfigShared & {
   applications?: never
   render?: SsrRenderMode
@@ -194,7 +199,8 @@ export type SsrSingleApplicationConfig = SsrConfigShared & {
   responseCache?: SsrResponseCacheStrategy<any>
   publicConfig?: SsrPublicConfigSource
   seo?: SsrSeoConfig
-  routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
+  /** Single-app routes belong on `src/main.ts`, not `defineServer()`. */
+  routes?: never
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
   extensions?: readonly ExtensionDefinition[]
