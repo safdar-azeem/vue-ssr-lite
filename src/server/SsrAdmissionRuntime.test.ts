@@ -46,6 +46,29 @@ describe('SSR admission controller', () => {
     expect(controller.snapshot()).toEqual({ activeCount: 0, queuedCount: 0 })
   })
 
+  it('waits for active leases to drain and resolves immediately when idle', async () => {
+    const controller = createSsrAdmissionController({ maxConcurrent: 1, maxQueued: 0 })
+    await expect(controller.waitForIdle()).resolves.toBeUndefined()
+
+    const lease = await controller.acquire(
+      acquisition(new AbortController().signal, 'active')
+    )
+    let idle = false
+    const waiting = controller.waitForIdle().then(() => {
+      idle = true
+    })
+    const secondWaiting = controller.waitForIdle()
+
+    await Promise.resolve()
+    expect(idle).toBe(false)
+    lease.release()
+    await expect(Promise.all([waiting, secondWaiting])).resolves.toEqual([
+      undefined,
+      undefined,
+    ])
+    expect(idle).toBe(true)
+  })
+
   it('never consumes capacity for a signal that was already aborted', async () => {
     const controller = createSsrAdmissionController({ maxConcurrent: 1, maxQueued: 1 })
     const aborted = new AbortController()
@@ -213,12 +236,19 @@ describe('SSR admission controller', () => {
 
     controller.dispose()
     await queuedRejection
+    let idle = false
+    const waitingForIdle = controller.waitForIdle().then(() => {
+      idle = true
+    })
     await expect(
       controller.acquire(acquisition(new AbortController().signal, 'future'))
     ).rejects.toBeInstanceOf(SsrAdmissionDisposedError)
     expect(controller.snapshot()).toEqual({ activeCount: 1, queuedCount: 0 })
+    await Promise.resolve()
+    expect(idle).toBe(false)
 
     active.release()
+    await expect(waitingForIdle).resolves.toBeUndefined()
     expect(controller.snapshot()).toEqual({ activeCount: 0, queuedCount: 0 })
   })
 
