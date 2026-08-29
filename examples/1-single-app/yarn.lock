@@ -638,10 +638,9 @@ vue-router@^4.6.0:
   dependencies:
     "@vue/devtools-api" "^6.6.4"
 
-vue-ssr-lite@^0.2.19:
-  version "0.2.19"
-  resolved "https://registry.npmjs.org/vue-ssr-lite/-/vue-ssr-lite-0.2.19.tgz#61afd0feccb723aef7b21d15f9046af9bd34901e"
-  integrity sha512-YjNHK9ywSZ5eBIRCPA3E13u/0xISMssRVPoyRIi1aRmpdRes0nHsQ033WVxGT4/02NTkqLOum/AsscdL3UwwGg==
+vue-ssr-lite@1.0.0-rc.1:
+  version "1.0.0-rc.1"
+  resolved "https://registry.npmjs.org/vue-ssr-lite/-/vue-ssr-lite-1.0.0-rc.1.tgz"
   dependencies:
     es-module-lexer "^2.3.1"
     esbuild "^0.27.0 || ^0.28.0"
