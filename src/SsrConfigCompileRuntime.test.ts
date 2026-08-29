@@ -15,6 +15,55 @@ import { defineComponent, h } from 'vue'
 const Root = defineComponent({ setup: () => () => h('div') })
 
 describe('defineServer application architecture', () => {
+  it('uses fixed bounded SSR admission defaults', async () => {
+    const compiled = await compileSsrConfig(
+      { default: defineServer({ render: 'spa' }) },
+      { development: true, root: '/workspace/my-app' }
+    )
+
+    expect(compiled.server.maxConcurrentSsrRequests).toBe(8)
+    expect(compiled.server.maxQueuedSsrRequests).toBe(32)
+  })
+
+  it.each([
+    ['maxConcurrentSsrRequests', 0],
+    ['maxConcurrentSsrRequests', -1],
+    ['maxConcurrentSsrRequests', 1.5],
+    ['maxConcurrentSsrRequests', Number.NaN],
+    ['maxConcurrentSsrRequests', Number.POSITIVE_INFINITY],
+    ['maxQueuedSsrRequests', -1],
+    ['maxQueuedSsrRequests', 1.5],
+    ['maxQueuedSsrRequests', Number.NaN],
+    ['maxQueuedSsrRequests', Number.POSITIVE_INFINITY],
+  ] as const)('rejects invalid server.%s capacity %s', async (field, value) => {
+    await expect(
+      compileSsrConfig(
+        {
+          default: defineServer({
+            render: 'spa',
+            server: { [field]: value },
+          }),
+        },
+        { development: true, root: '/workspace/my-app' }
+      )
+    ).rejects.toThrow(`server.${field}`)
+  })
+
+  it('supports an explicit zero-length SSR admission queue', async () => {
+    const compiled = await compileSsrConfig(
+      {
+        default: defineServer({
+          render: 'spa',
+          server: { maxConcurrentSsrRequests: 3, maxQueuedSsrRequests: 0 },
+        }),
+      },
+      { development: true, root: '/workspace/my-app' }
+    )
+
+    expect(compiled.server.maxConcurrentSsrRequests).toBe(3)
+    expect(compiled.server.maxQueuedSsrRequests).toBe(0)
+  })
+
   it('normalizes conventions without a config file', () => {
     const normalized = normalizeSsrConfig({}, { root: '/workspace/my-app' })
     expect(normalized.name).toBe('my-app')
