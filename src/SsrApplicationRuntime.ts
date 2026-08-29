@@ -1,4 +1,4 @@
-import { createApp, createSSRApp } from 'vue'
+import { createApp, createSSRApp, reactive, toRaw } from 'vue'
 import {
   createMemoryHistory,
   createRouter,
@@ -24,8 +24,14 @@ import {
   SSR_DOMAIN_CONTEXT,
 } from './SsrDomainRuntime'
 import { createManagedHeadController } from './SsrManagedHead'
-import { SSR_REQUEST_CONTEXT } from './SsrRequestContext'
+import {
+  installSsrRequestContextObservation,
+  SSR_REQUEST_CONTEXT,
+  unwrapSsrRequestObservation,
+} from './SsrRequestContext'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
+import { serializeSsrState } from './SsrSerialization'
+import { fingerprintSsrReconciliationState } from './SsrReconciliationFingerprint'
 import {
   createSsrHydrationController,
   SSR_HYDRATION_CONTEXT,
@@ -82,6 +88,15 @@ export interface SsrCreateApplicationOptions<
    * restored so plugins (an API client cache, an i18n loader) resume warm.
    */
   resumeState?: Record<string, unknown> | null
+  /**
+   * Server reconciliation only: application state accepted from the prior pass.
+   */
+  resumeApplicationState?: TApplicationState | null
+  /** Server reconciliation only: response state accepted from the prior pass. */
+  resumeResponseState?: SsrRequestContext<
+    TApplicationState,
+    TPublicConfig
+  >['response'] | null
   /**
    * Reuse a resolution controller across render passes of the same request.
    * A fresh one is created when omitted.
@@ -142,11 +157,16 @@ export const createSsrApplication = async <
         })
   }
 
-  const state =
+  const initialState =
     options.hydrationState?.application ??
+    options.resumeApplicationState ??
     definition.createInitialState?.() ??
     ({} as TApplicationState)
-  const response = {
+  // `createInitialState` is once per request. Reconciliation apps receive an
+  // owned snapshot from the prior accepted pass and wrap that snapshot in a
+  // fresh Vue proxy; install hooks still execute for every recreated app.
+  const state = reactive(initialState) as unknown as TApplicationState
+  const response = options.resumeResponseState ?? {
     statusCode: 200,
     headers: {},
     redirect: null,
@@ -199,6 +219,18 @@ export const createSsrApplication = async <
     hydration,
     resolution,
   }
+  if (options.server) installSsrRequestContextObservation(context)
+  resolution.setReactivityCheckpointReader(() =>
+    fingerprintSsrReconciliationState(
+      {
+        application: context.state,
+        plugins: hydration.collect(),
+        head: managedHead.collect(),
+        response: context.response,
+      },
+      unwrapSsrRequestObservation
+    )
+  )
   const extensionRuntime = createExtensionRuntime(
     resolveBuiltInExtensions(
       definition,
@@ -274,3 +306,62 @@ export const createSsrApplication = async <
     throw error
   }
 }
+
+const cloneReconciliationValue = (
+  value: unknown,
+  seen: WeakMap<object, unknown>
+): unknown => {
+  if (
+    value === null ||
+    (typeof value !== 'object' && typeof value !== 'function')
+  ) {
+    return value
+  }
+  if (typeof value === 'function') return value
+  const raw = toRaw(unwrapSsrRequestObservation(value))
+  const existing = seen.get(raw)
+  if (existing !== undefined) return existing
+  if (raw instanceof Date) return new Date(raw.getTime())
+  if (raw instanceof RegExp) return new RegExp(raw.source, raw.flags)
+  if (raw instanceof Map) {
+    const cloned = new Map()
+    seen.set(raw, cloned)
+    for (const [key, entry] of raw) {
+      cloned.set(
+        cloneReconciliationValue(key, seen),
+        cloneReconciliationValue(entry, seen)
+      )
+    }
+    return cloned
+  }
+  if (raw instanceof Set) {
+    const cloned = new Set()
+    seen.set(raw, cloned)
+    for (const entry of raw) {
+      cloned.add(cloneReconciliationValue(entry, seen))
+    }
+    return cloned
+  }
+  const cloned: Record<PropertyKey, unknown> | unknown[] = Array.isArray(raw)
+    ? []
+    : Object.create(Object.getPrototypeOf(raw))
+  seen.set(raw, cloned)
+  for (const key of Reflect.ownKeys(raw)) {
+    if (Array.isArray(raw) && key === 'length') continue
+    const descriptor = Object.getOwnPropertyDescriptor(raw, key)
+    if (!descriptor) continue
+    if ('value' in descriptor) {
+      descriptor.value = cloneReconciliationValue(descriptor.value, seen)
+    }
+    Object.defineProperty(cloned, key, descriptor)
+  }
+  return cloned
+}
+
+/**
+ * Transfer application state between recreated SSR apps without retaining the
+ * discarded app's live reactive proxy. The snapshot preserves supported
+ * request-local object graphs, Maps, Sets, descriptors, and circular ownership.
+ */
+export const snapshotSsrReconciliationState = <T>(value: T): T =>
+  cloneReconciliationValue(value, new WeakMap()) as T
