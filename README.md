@@ -73,9 +73,7 @@ export default defineServer({
 })
 ```
 
-The CLI resolves `<project-root>/server.ts` automatically. Use `--config` only for a custom filename.
-
-## 4. Write a normal Vue application
+## 4. Use your existing Vue application
 
 ```text
 project/
@@ -86,6 +84,8 @@ project/
     ├── routes.ts
     └── pages/
 ```
+
+Update your standard Vue `main.ts`:
 
 ```ts
 // src/main.ts
@@ -108,13 +108,9 @@ export default ({ app }: AppContext) => {
 </template>
 ```
 
-Core owns `createApp` / `createSSRApp`, router history, SSR rendering, hydration, and mounting. `main.ts` only installs plugins, providers, and global CSS.
-
-No `defineApplication()` is required for a single application. Core uses `/src/main.ts` and `/src/App.vue` automatically.
-
 ## 5. HTML entry
 
-Keep a standard Vite `index.html` at the project root when you want one. If it is absent, Core supplies a default document.
+Keep a standard Vite `index.html` at the project root.
 
 ## 6. Start development
 
@@ -122,9 +118,13 @@ Keep a standard Vite `index.html` at the project root when you want one. If it i
 npm run dev
 ```
 
+Your Vue application is now SSR. You are ready to go.
+
+If you need extra configuration or other features, continue below.
+
 # Application Shell
 
-Optional global overrides:
+These are **optional overrides only**. Default locations (`/src/main.ts` and `/src/App.vue`) are already used automatically. Configure these only when your files have different names or paths.
 
 ```ts
 defineServer({
@@ -135,19 +135,50 @@ defineServer({
 })
 ```
 
-Resolution order:
+# Hybrid Route Rendering
 
-```text
-application-specific override
-          ↓
-global server app override
-          ↓
-/src/main.ts + /src/App.vue
+One application can mix SSR and SPA on the same domain:
+
+```ts
+export default defineServer({
+  render: 'ssr',
+})
 ```
+
+Set `meta.render` on a route in `src/routes.ts`:
+
+```ts
+// src/routes.ts
+{
+  path: '/app',
+  component: WorkspaceLayout,
+  meta: {
+    render: 'spa' // 'ssr'
+  },
+  children: [
+    { path: '' },
+    { path: 'projects' },
+    { path: 'settings' },
+  ],
+}
+```
+
+All nested children of that route stay SPA.
 
 # Multiple Applications
 
-Applications are always registered explicitly. There is no module scanning.
+Use this when one Vue application is not enough — for example a landing website, an app, an admin panel, and docs, each on its own host:
+
+```text
+SSR  domain.com         landing website
+SPA  app.domain.com     app
+SPA  admin.domain.com   admin panel
+SSR  docs.domain.com    docs
+```
+
+Hybrid routing stays on one domain in one application. Multiple applications are separate apps. Each can have its own routes, render mode, SEO, and host. They still run in one Node process on one port.
+
+Register each application in `server.ts`. They are not discovered automatically.
 
 ```ts
 // server.ts
@@ -193,31 +224,6 @@ export default defineApplication({
 ```
 
 Application identity is `name`, never array index. Duplicate names are rejected. Applications never declare a port; one Node process serves every application on the managed server port. `PORT` may still override that single port.
-
-# Hybrid Route Rendering
-
-One application can mix SSR and SPA on the same domain:
-
-```ts
-export default defineServer({
-  render: 'ssr',
-})
-```
-
-```ts
-{
-  path: '/app',
-  component: WorkspaceLayout,
-  meta: { render: 'spa' },
-  children: [
-    { path: '' },
-    { path: 'projects' },
-    { path: 'settings' },
-  ],
-}
-```
-
-Children inherit the nearest `meta.render`. Nested SPA → SSR overrides are rejected. Direct SPA requests return a bootstrap document without a wasted Vue SSR render. Crossing render modes uses a full-document navigation; navigation inside the same mode stays on Vue Router.
 
 # Vue Plugins
 
@@ -272,7 +278,9 @@ export default defineServer({
   seo: {
     site: {
       resolve: async ({ applicationId, siteOrigin, domain, signal }): Promise<SiteSeoResolution> => {
-        const site = await database.sites.byDomain(domain.hostname, { signal })
+        const response = await fetch(`https://api.example.com/sites/${domain.hostname}`, { signal })
+
+        const site = await response.json()
         if (!site) return { status: 'not-found', responseStatus: 404 }
         return {
           status: 'resolved',
@@ -313,10 +321,12 @@ The resolver never runs in the browser. Missing authoritative origin still fails
 import { computed } from 'vue'
 import { useSeo } from 'vue-ssr-lite'
 
-useSeo(computed(() => ({
-  title: article.value.title,
-  description: article.value.description,
-})))
+useSeo(
+  computed(() => ({
+    title: article.value.title,
+    description: article.value.description,
+  }))
+)
 </script>
 ```
 
@@ -340,10 +350,7 @@ Configure sitemap providers explicitly. There is no `sitemap.config.ts` conventi
 ```ts
 export default defineServer({
   seo: {
-    sitemap: async () => [
-      { loc: '/' },
-      { loc: '/about' },
-    ],
+    sitemap: async () => [{ loc: '/' }, { loc: '/about' }],
   },
 })
 ```
@@ -435,21 +442,21 @@ export default defineServer({
 })
 ```
 
-| Option                     | Description                                      |
-| -------------------------- | ------------------------------------------------ |
-| `host`                     | Bind address                                     |
-| `port`                     | HTTP port                                        |
-| `trustProxy`               | Trust reverse-proxy headers                      |
-| `requestTimeoutMs`         | One request-wide deadline                        |
-| `shutdownTimeoutMs`        | Graceful shutdown timeout                        |
-| `maxConcurrentSsrRequests` | Active Vue SSR limit per server (default `8`)    |
-| `maxQueuedSsrRequests`     | Waiting Vue SSR limit per server (default `32`)  |
-| `healthPath`               | Health endpoint                                  |
-| `readinessPath`            | Readiness endpoint                               |
-| `diagnostics`              | Development diagnostics                          |
-| `logger`                   | Structured logger                                |
-| `onMetrics`                | Render metrics callback                          |
-| `renderError`              | Custom render-error response                     |
+| Option                     | Description                                     |
+| -------------------------- | ----------------------------------------------- |
+| `host`                     | Bind address                                    |
+| `port`                     | HTTP port                                       |
+| `trustProxy`               | Trust reverse-proxy headers                     |
+| `requestTimeoutMs`         | One request-wide deadline                       |
+| `shutdownTimeoutMs`        | Graceful shutdown timeout                       |
+| `maxConcurrentSsrRequests` | Active Vue SSR limit per server (default `8`)   |
+| `maxQueuedSsrRequests`     | Waiting Vue SSR limit per server (default `32`) |
+| `healthPath`               | Health endpoint                                 |
+| `readinessPath`            | Readiness endpoint                              |
+| `diagnostics`              | Development diagnostics                         |
+| `logger`                   | Structured logger                               |
+| `onMetrics`                | Render metrics callback                         |
+| `renderError`              | Custom render-error response                    |
 
 Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML,
 custom endpoints, health/readiness checks, Vite responses, and production
@@ -539,12 +546,7 @@ import { vueSsrLite } from 'vue-ssr-lite/vite'
 Advanced genuinely server-only APIs:
 
 ```ts
-import {
-  defineSitemap,
-  createSsrManagedServer,
-  createSsrMemoryResponseCache,
-  useSsrDomain,
-} from 'vue-ssr-lite/server'
+import { defineSitemap, createSsrManagedServer, createSsrMemoryResponseCache, useSsrDomain } from 'vue-ssr-lite/server'
 ```
 
 Beginner-facing configuration belongs in `vue-ssr-lite`, not this subpath.
