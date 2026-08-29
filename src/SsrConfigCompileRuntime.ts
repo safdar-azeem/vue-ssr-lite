@@ -6,6 +6,7 @@ import type { RouteRecordRaw } from 'vue-router'
 import {
   bundleSsrConfigModule,
   collectApplicationDeclarationFiles,
+  collectSkippedApplicationRoutesFiles,
   isEvaluatedApplicationConfig,
   resolveSsrConfigGraphModule,
   resolveApplicationRoutesModule,
@@ -15,6 +16,7 @@ import {
   assertNoImportedUniversalConfigMutation,
   isDefineApplicationModuleSource,
   projectUniversalRuntimeSource,
+  resolveApplicationRoutesImportBindings,
   sourceDeclaresServerConfigRoutes,
   assertUniversalProjectionCoverage,
   type SsrUniversalRuntimeProjection,
@@ -187,6 +189,8 @@ export interface SsrViteApplicationEntry {
   main: string
   root: string
   routesModule?: string
+  /** Export used by `defineApplication({ routes })`: `default`, `routes`, or another name. */
+  routesExport?: string
   /** When true, the client reads `routes` from `main.ts` (single-app convention). */
   routesFromMain?: boolean
   template: string
@@ -238,6 +242,7 @@ export interface NormalizeSsrConfigOptions {
   development?: boolean
   applicationFiles?: ReadonlyMap<string, string>
   routesModules?: ReadonlyMap<string, string>
+  routesExports?: ReadonlyMap<string, string>
 }
 
 export interface CompileSsrConfigOptions extends NormalizeSsrConfigOptions {
@@ -275,6 +280,7 @@ const toProjectRelative = (root: string, absolute: string): string => {
 export interface SsrDiscoveredApplicationSources {
   files: Map<string, string>
   routesModules: Map<string, string>
+  routesExports: Map<string, string>
   projections: Map<string, SsrUniversalRuntimeProjection>
   truncated: boolean
 }
@@ -311,14 +317,28 @@ export const discoverApplicationSourceFiles = async (
       ].filter((file) => file !== configPath && isProjectFile(file))
     : []
   const candidateFiles = [...new Set([...walked.files, ...authoritativeFiles])]
+  const skippedRoutesFiles = new Set([
+    ...(await collectSkippedApplicationRoutesFiles(candidateFiles)),
+    ...[...(authoritativeGraph?.applicationRoutesModules ?? [])].map((file) =>
+      file.replaceAll('\\', '/')
+    ),
+  ])
   const moduleResolver = authoritativeGraph
     ? (importer: string, specifier: string) =>
         resolveSsrConfigGraphModule(authoritativeGraph, importer, specifier)
     : undefined
   const files = new Map<string, string>()
   const routesModules = new Map<string, string>()
+  const routesExports = new Map<string, string>()
   const projections = new Map<string, SsrUniversalRuntimeProjection>()
   for (const file of candidateFiles) {
+    if (
+      skippedRoutesFiles.has(
+        file.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
+      )
+    ) {
+      continue
+    }
     const { code, graph } = await bundleSsrConfigModule(root, file)
     const namespace = await evaluateBundledConfigModule(root, code)
     if (!isEvaluatedApplicationConfig(namespace.default)) continue
@@ -330,20 +350,22 @@ export const discoverApplicationSourceFiles = async (
       )
     }
     files.set(application.name, file)
+    const source = await readFile(file, 'utf8')
     const routesAbsolute = resolveApplicationRoutesModule(file, graph, application.name)
     if (routesAbsolute) {
       routesModules.set(application.name, toProjectRelative(root, routesAbsolute))
+      const [routesBinding] = await resolveApplicationRoutesImportBindings(source, file)
+      if (routesBinding) routesExports.set(application.name, routesBinding.imported)
     } else if (application.routes) {
       throw new Error(
         `Application "${application.name}" must import a dedicated routes module so the client graph does not import ${file}.`
       )
     }
-    const source = await readFile(file, 'utf8')
     const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
     assertUniversalProjectionCoverage(application, projection, file)
     if (projection) projections.set(application.name, projection)
   }
-  return { files, routesModules, projections, truncated: walked.truncated }
+  return { files, routesModules, routesExports, projections, truncated: walked.truncated }
 }
 
 const normalizeHostname = (value: string, label: string): string => {
@@ -494,6 +516,18 @@ export const normalizeSiteSeoConfig = (site?: SsrSiteSeoInput): SiteSeoConfig | 
 export const siteSeoToApplicationConfig = (
   site?: SsrSiteSeoInput
 ): SeoApplicationConfig | undefined => (isStaticSiteSeo(site) ? { ...site } : undefined)
+
+/** Application SEO flags (`mode`, `enabled`, …) live on `app.seo`, not `app.seo.site`. */
+export const resolveApplicationSeoConfig = (
+  seo?: SsrSeoConfig
+): SeoApplicationConfig => ({
+  ...siteSeoToApplicationConfig(seo?.site),
+  mode: seo?.mode,
+  enabled: seo?.enabled,
+  siteUrl: seo?.siteUrl,
+  allowHttpOrigin: seo?.allowHttpOrigin,
+  trailingSlash: seo?.trailingSlash,
+})
 
 const isSiteRobotsConfig = (value: SsrRobotsInput): value is SiteRobotsConfig =>
   'resolve' in value && typeof value.resolve === 'function'
@@ -685,6 +719,8 @@ export const normalizeSsrConfig = (
     })
     const routesModule = options.routesModules?.get(id)
     if (routesModule) normalizedApp.shell.routesModule = routesModule
+    const routesExport = options.routesExports?.get(id)
+    if (routesExport) normalizedApp.shell.routesExport = routesExport
     applications[id] = normalizedApp
   }
   return {
@@ -770,12 +806,15 @@ const assertConventionFiles = async (
 
 const attachClientGraph = (
   applications: Record<string, SsrNormalizedApplicationConfig>,
-  routesModules?: ReadonlyMap<string, string>
+  routesModules?: ReadonlyMap<string, string>,
+  routesExports?: ReadonlyMap<string, string>
 ) => {
-  if (!routesModules) return
+  if (!routesModules && !routesExports) return
   for (const application of Object.values(applications)) {
-    const routesModule = routesModules.get(application.id)
+    const routesModule = routesModules?.get(application.id)
     if (routesModule) application.shell.routesModule = routesModule
+    const routesExport = routesExports?.get(application.id)
+    if (routesExport) application.shell.routesExport = routesExport
   }
 }
 
@@ -883,14 +922,23 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     root,
     applicationFiles: discovered.files,
     routesModules: discovered.routesModules,
+    routesExports: discovered.routesExports,
   })
-  attachClientGraph(normalized.applications, discovered.routesModules)
+  attachClientGraph(
+    normalized.applications,
+    discovered.routesModules,
+    discovered.routesExports
+  )
   Object.defineProperty(config, '__vueSsrLiteApplicationFiles', {
     value: discovered.files,
     enumerable: false,
   })
   Object.defineProperty(config, '__vueSsrLiteRoutesModules', {
     value: discovered.routesModules,
+    enumerable: false,
+  })
+  Object.defineProperty(config, '__vueSsrLiteRoutesExports', {
+    value: discovered.routesExports,
     enumerable: false,
   })
   Object.defineProperty(config, '__vueSsrLiteUniversalProjections', {
@@ -913,7 +961,9 @@ export const extractSsrViteEntries = (
     config as { __vueSsrLiteUniversalProjections?: Map<string, SsrUniversalRuntimeProjection> }
   ).__vueSsrLiteUniversalProjections
   const normalized = attached ?? normalizeSsrConfig(config, options)
-  if (!attached) attachClientGraph(normalized.applications, options.routesModules)
+  if (!attached) {
+    attachClientGraph(normalized.applications, options.routesModules, options.routesExports)
+  }
   return {
     applications: Object.values(normalized.applications).map((app) => ({
       id: app.id,
@@ -921,6 +971,7 @@ export const extractSsrViteEntries = (
       main: app.shell.main,
       root: app.shell.root,
       routesModule: app.shell.routesModule,
+      routesExport: app.shell.routesExport,
       routesFromMain: !app.shell.applicationDir,
       template: app.template,
       mountSelector: app.mountSelector,
@@ -1003,6 +1054,28 @@ export const generateSsrRuntimeModule = (
   ].join('\n')
 }
 
+const isIdentifierName = (value: string): boolean => /^[A-Za-z_$][\w$]*$/.test(value)
+
+const applicationRoutesImportLine = (routesPath: string, exported?: string): string => {
+  if (exported === 'default') {
+    return `import applicationRoutes from ${JSON.stringify(routesPath)}`
+  }
+  if (exported && exported !== '*' && isIdentifierName(exported)) {
+    return `import { ${exported} as applicationRoutes } from ${JSON.stringify(routesPath)}`
+  }
+  return `import * as applicationRoutes from ${JSON.stringify(routesPath)}`
+}
+
+const applicationRoutesBindingLine = (exported?: string): string => {
+  if (exported === 'default' || (exported && exported !== '*' && isIdentifierName(exported))) {
+    return 'const routes = applicationRoutes'
+  }
+  if (exported && exported !== '*') {
+    return `const routes = applicationRoutes[${JSON.stringify(exported)}]`
+  }
+  return 'const routes = applicationRoutes.default ?? applicationRoutes.routes'
+}
+
 export const generateSsrClientModule = (root: string, entry: SsrViteApplicationEntry): string => {
   const rootPath = absoluteImportPath(root, entry.root)
   const mainPath = absoluteImportPath(root, entry.main)
@@ -1017,7 +1090,7 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
     `import * as __ssrMain from ${JSON.stringify(mainPath)}`,
   ]
   if (routesPath) {
-    lines.push(`import applicationRoutes from ${JSON.stringify(routesPath)}`)
+    lines.push(applicationRoutesImportLine(routesPath, entry.routesExport))
   }
   if (projection?.imports.length) {
     lines.push(...projection.imports)
@@ -1034,7 +1107,7 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
   lines.push(
     'const initialize = __ssrMain.default',
     routesPath
-      ? 'const routes = applicationRoutes'
+      ? applicationRoutesBindingLine(entry.routesExport)
       : entry.routesFromMain === false
         ? 'const routes = undefined'
         : 'const routes = __ssrMain.routes',
@@ -1123,14 +1196,7 @@ const bindInternalApplication = (
     router: app.router,
     scrollBehavior: app.scrollBehavior,
     extensions: app.extensions,
-    seo: {
-      ...siteSeoToApplicationConfig(app.seo?.site),
-      mode: app.seo?.mode,
-      enabled: app.seo?.enabled,
-      siteUrl: app.seo?.siteUrl,
-      allowHttpOrigin: app.seo?.allowHttpOrigin,
-      trailingSlash: app.seo?.trailingSlash,
-    },
+    seo: resolveApplicationSeoConfig(app.seo),
     defaultRender: app.render,
     cleanup: app.cleanup,
     createInitialState: app.createInitialState,
@@ -1252,6 +1318,7 @@ export const compileSsrConfig = async (
     __vueSsrLiteShells?: Record<string, SsrBoundAppShell>
     __vueSsrLiteApplicationFiles?: Map<string, string>
     __vueSsrLiteRoutesModules?: Map<string, string>
+    __vueSsrLiteRoutesExports?: Map<string, string>
   }
   const applicationFiles =
     options.applicationFiles ??
@@ -1263,13 +1330,19 @@ export const compileSsrConfig = async (
     loadedRecord.__vueSsrLiteRoutesModules ??
     (moduleValue as { __vueSsrLiteRoutesModules?: Map<string, string> })
       .__vueSsrLiteRoutesModules
+  const routesExports =
+    options.routesExports ??
+    loadedRecord.__vueSsrLiteRoutesExports ??
+    (moduleValue as { __vueSsrLiteRoutesExports?: Map<string, string> })
+      .__vueSsrLiteRoutesExports
   const config = normalizeSsrConfig(loadedRecord, {
     root: options.root,
     development,
     applicationFiles,
     routesModules,
+    routesExports,
   })
-  attachClientGraph(config.applications, routesModules)
+  attachClientGraph(config.applications, routesModules, routesExports)
   const viteBase =
     typeof loadedRecord.__vueSsrLiteViteBase === 'string'
       ? loadedRecord.__vueSsrLiteViteBase
@@ -1336,12 +1409,13 @@ export const compileSsrConfig = async (
       },
     }
     const seoRoutes = routes
+    const applicationSeo = application?.seo ?? resolveApplicationSeoConfig(app.seo)
     if (app.seo || application) {
       compiled.endpoints.push(
         ...(await createSeoEndpoints({
           applicationId: app.id,
           routes: seoRoutes,
-          seo: application?.seo ?? siteSeoToApplicationConfig(app.seo?.site),
+          seo: applicationSeo,
           root: options.root || process.cwd(),
           sitemapProvider,
           existingEndpoints: compiled.endpoints,
@@ -1350,16 +1424,16 @@ export const compileSsrConfig = async (
           defaultRender: app.render,
           resolveSiteUrl: (request) =>
             resolveServerSiteOrigin({
-              siteUrl: application?.seo?.siteUrl,
+              siteUrl: applicationSeo.siteUrl,
               publicUrl: readPublicUrl(),
               resolveSiteUrl,
               request,
               production: !development,
               requireProductionOrigin: requiresProductionSeoOrigin(
                 app.render === 'spa' && !hasRouteRenderOverrides ? 'spa' : 'ssr',
-                application?.seo
+                applicationSeo
               ),
-              allowHttpOrigin: application?.seo?.allowHttpOrigin,
+              allowHttpOrigin: applicationSeo.allowHttpOrigin,
             }),
         }))
       )
