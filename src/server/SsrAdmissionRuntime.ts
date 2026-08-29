@@ -40,6 +40,8 @@ export type SsrAdmissionEvent =
 export interface SsrAdmissionController {
   acquire(options: SsrAdmissionAcquireOptions): Promise<SsrAdmissionLease>
   snapshot(): SsrAdmissionSnapshot
+  /** Wait until every currently active admission lease has been released. */
+  waitForIdle(): Promise<void>
   dispose(): void
 }
 
@@ -113,6 +115,7 @@ export const createSsrAdmissionController = (
   let activeCount = 0
   let disposed = false
   const queue: SsrAdmissionWaiter[] = []
+  const idleWaiters = new Set<() => void>()
 
   const snapshot = (): SsrAdmissionSnapshot => ({
     activeCount,
@@ -127,6 +130,12 @@ export const createSsrAdmissionController = (
   }
   const cleanWaiter = (waiter: SsrAdmissionWaiter): void => {
     waiter.signal.removeEventListener('abort', waiter.onAbort)
+  }
+  const resolveIdleWaiters = (): void => {
+    if (activeCount !== 0) return
+    const waiters = [...idleWaiters]
+    idleWaiters.clear()
+    for (const resolveIdle of waiters) resolveIdle()
   }
   const createLease = (): SsrAdmissionLease => {
     let released = false
@@ -174,6 +183,7 @@ export const createSsrAdmissionController = (
       return
     }
     activeCount -= 1
+    resolveIdleWaiters()
   }
 
   return {
@@ -214,6 +224,12 @@ export const createSsrAdmissionController = (
       })
     },
     snapshot,
+    waitForIdle: () =>
+      activeCount === 0
+        ? Promise.resolve()
+        : new Promise<void>((resolveIdle) => {
+            idleWaiters.add(resolveIdle)
+          }),
     dispose: () => {
       if (disposed) return
       disposed = true
