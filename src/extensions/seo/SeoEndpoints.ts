@@ -303,7 +303,10 @@ export const createSeoEndpoints = async (
           const headers = endpointMetaHeaders(resolved, 'text/plain; charset=utf-8', request.pathname)
           const conditional = conditionalResponse(request, headers)
           if (conditional) return conditional
-          return { statusCode: 200, body: serializeRobotsConfig(resolved.config, siteOrigin), headers }
+          const sitemapUrl = endpoints.some((endpoint) => endpoint.id === sitemapId) || hasPhysicalSitemap
+            ? composeCanonicalUrl(siteOrigin, '/sitemap.xml')
+            : null
+          return { statusCode: 200, body: serializeRobotsTxt(sitemapUrl, resolved.config, siteOrigin), headers }
         }
         const sitemapUrl = endpoints.some((endpoint) => endpoint.id === sitemapId) || hasPhysicalSitemap
           ? composeCanonicalUrl(siteOrigin, '/sitemap.xml')
