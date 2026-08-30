@@ -7,7 +7,7 @@ import type { ViteDevServer } from 'vite'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import { safeSsrLog } from '../SsrObservability'
 import {
-  assertProductionSeoOriginConfigured,
+  assertConfiguredProductionSeoOrigin,
   requiresProductionSeoOrigin,
 } from './SsrSiteOriginRuntime'
 import type { SsrHeaders, SsrHttpResponse } from '../SsrRuntimeTypes'
@@ -77,10 +77,10 @@ const resolveLocalDisplayHost = (host: string): string => {
   return host
 }
 
-const logServerReady = (host: string, port: number, role: string) => {
+const logServerReady = (host: string, port: number) => {
   const localUrl = `http://${resolveLocalDisplayHost(host)}:${port}/`
   console.log(
-    ['', '✓  Server Ready', '', `  ➜ Local:  ${localUrl}`, `  ➜ Role:   ${role}`, ''].join('\n')
+    ['', '✓  Server Ready', '', `  ➜ Local:  ${localUrl}`, ''].join('\n')
   )
 }
 
@@ -96,13 +96,8 @@ const resolveRuntime = async (
       : undefined,
   })
   for (const application of definition.applications) {
-    const enabledForRole =
-      !application.roles?.length ||
-      !definition.server.role ||
-      application.roles.includes(definition.server.role)
     if (
       (application.kind === 'ssr' || application.hasRouteRenderOverrides) &&
-      enabledForRole &&
       !application.application
     ) {
       throw new Error(
@@ -111,14 +106,13 @@ const resolveRuntime = async (
     }
     if (
       options.production &&
-      enabledForRole &&
       application.application &&
       requiresProductionSeoOrigin(
         application.kind === 'spa' && !application.hasRouteRenderOverrides ? 'spa' : 'ssr',
-        application.application.seo
+        application.application.seo,
       )
     ) {
-      assertProductionSeoOriginConfigured({
+      assertConfiguredProductionSeoOrigin({
         siteUrl: application.application.seo?.siteUrl,
         resolveSiteUrl: definition.resolveSiteUrl,
         allowHttpOrigin: application.application.seo?.allowHttpOrigin,
@@ -355,11 +349,7 @@ export const createSsrManagedServer = async (
   const hasEnabledSsrApplications =
     options.production &&
     initialRuntime.applications.some(
-      (application) =>
-        application.kind === 'ssr' &&
-        (!application.roles?.length ||
-          !initialServerOptions.role ||
-          application.roles.includes(initialServerOptions.role))
+      (application) => application.kind === 'ssr'
     )
   let ssrManifest: SsrViteManifest | undefined
   const viteBase = hasEnabledSsrApplications
@@ -501,14 +491,8 @@ export const createSsrManagedServer = async (
   }
 
   const assertReady = async (definition: SsrCompiledConfig) => {
-    const enabledApplications = definition.applications.filter(
-      (application) =>
-        !application.roles?.length ||
-        !definition.server.role ||
-        application.roles.includes(definition.server.role)
-    )
     await Promise.all(
-      enabledApplications.map(async (application) => {
+      definition.applications.map(async (application) => {
         if (application.templateMissing && !options.production) return
         const information = await stat(resolveTemplatePath(definition, application))
         if (!information.isFile()) {
@@ -521,15 +505,9 @@ export const createSsrManagedServer = async (
 
   // Startup preflight validates applications and module shape without running
   // network readiness probes. `/readyz` owns external dependency checks.
-  const initialEnabledApplications = initialRuntime.applications.filter(
-    (application) =>
-      !application.roles?.length ||
-      !initialRuntime.server.role ||
-      application.roles.includes(initialRuntime.server.role)
-  )
   const initialTemplatePaths = [
     ...new Set(
-      initialEnabledApplications
+      initialRuntime.applications
         .filter((application) => options.production || !application.templateMissing)
         .map((application) => resolveTemplatePath(initialRuntime, application))
     ),
@@ -748,7 +726,7 @@ export const createSsrManagedServer = async (
         nodeServer.once('error', onError)
         nodeServer.listen(port, host, () => {
           nodeServer.off('error', onError)
-          logServerReady(host, port, initialServerOptions.role || 'default')
+          logServerReady(host, port)
           resolveListen()
         })
       }),
