@@ -397,6 +397,35 @@ describe('SEO 1.0 robots, sitemap, endpoints, and origin authority', () => {
     expect(getShard).toHaveBeenCalledTimes(1)
   })
 
+  it('serves lazy sharded sitemaps without inventing cache validators', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-shards-'))
+    const getShard = vi.fn((_context, shard: number) => [{ loc: `/page-${shard}` }])
+    const endpoints = await createSeoEndpoints({
+      applicationId: 'website', root, existingEndpoints: [], seo: {},
+      sitemapProvider: async () => ({
+        kind: 'sharded',
+        shardCount: 2,
+        cacheControl: 'no-store',
+        getShard,
+      }),
+      resolveSiteUrl: async () => 'https://tenant.test',
+    })
+    const endpoint = endpoints.find((entry) => entry.match(request('/sitemap-1.xml')))!
+    const staleValidatorRequest = {
+      ...request('/sitemap-1.xml'),
+      headers: { 'if-none-match': '"stale"' },
+    }
+    const response = await endpoint.handle(staleValidatorRequest, {
+      signal: staleValidatorRequest.signal,
+    })
+
+    expect(response?.statusCode).toBe(200)
+    expect(response?.headers.etag).toBeUndefined()
+    expect(response?.headers['cache-control']).toBe('no-store')
+    expect(response?.body).toContain('https://tenant.test/page-1')
+    expect(getShard).toHaveBeenCalledTimes(1)
+  })
+
   it('preserves legacy array sitemap providers as entry sources', async () => {
     const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-arrays-'))
     const endpoints = await createSeoEndpoints({
@@ -513,9 +542,35 @@ describe('SEO 1.0 robots, sitemap, endpoints, and origin authority', () => {
       request: req,
       siteUrl: 'https://static.test',
       publicUrl: 'https://public.test',
+      production: true,
+      requireProductionOrigin: true,
+    })).resolves.toBe('https://static.test')
+    await expect(resolveServerSiteOrigin({
+      request: req,
+      publicUrl: 'https://public.test',
+      production: true,
+      requireProductionOrigin: true,
+    })).resolves.toBe('https://public.test')
+    await expect(resolveServerSiteOrigin({
+      request: req,
+      siteUrl: 'https://static.test',
+      publicUrl: 'https://public.test',
       resolveSiteUrl: async () => undefined,
       production: true,
       requireProductionOrigin: true,
-    })).rejects.toThrow(/Missing PUBLIC_URL/)
+    })).resolves.toBe('https://static.test')
+    await expect(resolveServerSiteOrigin({
+      request: req,
+      publicUrl: 'https://public.test',
+      resolveSiteUrl: async () => '   ',
+      production: true,
+      requireProductionOrigin: true,
+    })).resolves.toBe('https://public.test')
+    await expect(resolveServerSiteOrigin({
+      request: req,
+      resolveSiteUrl: async () => undefined,
+      production: true,
+      requireProductionOrigin: true,
+    })).resolves.toBe('https://tenant.test')
   })
 })
