@@ -1,5 +1,4 @@
 import {
-  PRODUCTION_ORIGIN_ERROR,
   assertPublicProductionOrigin,
   normalizeSiteOrigin,
   resolveCanonicalOrigin,
@@ -11,7 +10,7 @@ import {
   type SeoApplicationConfig,
 } from '../extensions/seo/types'
 
-/** Shared startup/request rule for authoritative public SEO origins. */
+/** Whether the request origin must satisfy public production SEO rules. */
 export const requiresProductionSeoOrigin = (
   kind: SsrEntryKind,
   seo: SeoApplicationConfig | undefined
@@ -33,9 +32,13 @@ export interface ResolveServerSiteOriginOptions {
 export const resolveServerSiteOrigin = async (
   options: ResolveServerSiteOriginOptions
 ): Promise<string> => {
-  const fallbackOrigin = `${options.request.protocol}://${options.request.host}`
+  const fallbackOrigin = `${options.request.domain.protocol}://${options.request.domain.authority}`
   if (options.resolveSiteUrl) {
-    const resolved = await options.resolveSiteUrl(options.request)
+    const resolverOrigin = (await options.resolveSiteUrl(options.request))?.trim()
+    const resolved =
+      resolverOrigin ||
+      options.siteUrl ||
+      options.publicUrl
     return resolveCanonicalOrigin({
       requestOrigin: resolved,
       fallbackOrigin,
@@ -59,23 +62,20 @@ export const readPublicUrl = (): string | undefined => {
   return value || undefined
 }
 
-export const assertProductionSeoOriginConfigured = (options: {
+/** Validate an explicit production override when one is configured. */
+export const assertConfiguredProductionSeoOrigin = (options: {
   siteUrl?: string
   resolveSiteUrl?: unknown
   allowHttpOrigin?: boolean
 }): void => {
-  const originOptions = { allowHttpOrigin: options.allowHttpOrigin }
   if (options.resolveSiteUrl) return
-  if (options.siteUrl) {
-    assertPublicProductionOrigin(options.siteUrl, 'seo.siteUrl', originOptions)
-    return
-  }
-  const publicUrl = readPublicUrl()
-  if (publicUrl) {
-    assertPublicProductionOrigin(publicUrl, 'PUBLIC_URL', originOptions)
-    return
-  }
-  throw new Error(PRODUCTION_ORIGIN_ERROR)
+  const configured = options.siteUrl || readPublicUrl()
+  if (!configured) return
+  assertPublicProductionOrigin(
+    configured,
+    options.siteUrl ? 'seo.siteUrl' : 'PUBLIC_URL',
+    { allowHttpOrigin: options.allowHttpOrigin },
+  )
 }
 
 export const normalizeConfiguredOrigin = normalizeSiteOrigin
