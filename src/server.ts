@@ -54,7 +54,7 @@ export {
 } from './server/SsrRuntimeConfigRuntime'
 
 /** Universal advanced helpers are mirrored here for server-only modules. */
-export { createDomainUrl, useSsrDomain } from './SsrDomainRuntime'
+export { createDomainUrl, useDomain } from './SsrDomainRuntime'
 export type { SsrCreateDomainUrlOptions, SsrDomainApi } from './SsrDomainRuntime'
 export { useSsrRequestContext } from './SsrRequestContext'
 
