@@ -266,6 +266,48 @@ export default defineApplication({
 
 Application identity is `name`, never array index. Duplicate names are rejected. Applications never declare a port; one Node process serves every application on the managed server port. `PORT` may still override that single port.
 
+## Host and domain routing
+
+Use `host` when an application only needs fixed host matching:
+
+```ts
+defineApplication({
+  name: 'admin',
+  host: ['admin.example.com', 'admin.internal.example.com'],
+  routes,
+})
+```
+
+Use `domain` when routing varies by environment or needs subdomains, local
+aliases, custom domains, additional hosts, or domain params:
+
+```ts
+defineApplication({
+  name: 'storefront',
+  domain: {
+    development: 'shop.localhost',
+    production: 'shop.example.com',
+    mode: 'root-and-subdomains',
+    customDomains: true,
+    params: {
+      storeDomain: { source: 'subdomain-or-hostname' },
+    },
+  },
+  routes,
+})
+```
+
+`host` and `domain` are alternatives and cannot be used together on the same
+application. Exact hosts outrank wildcard/subdomain matches, which outrank the
+explicit `customDomains: true` catch-all. With no matching owner and no custom
+domain catch-all, Core returns `421 Misdirected Request` with `No application
+serves this host.`
+
+`customDomains: true` means that the application may receive unmatched/custom
+hosts. The application can then resolve the hostname against its own API or
+database; Core does not impose a business-specific custom-domain verification
+callback.
+
 # Vue Plugins
 
 Install stateful plugins inside `main.ts` so each Vue application/request gets a fresh instance:
@@ -563,6 +605,7 @@ import {
   useSeo,
   usePublicConfig,
   useSiteOrigin,
+  useSsrDomain,
   setResponseRedirect,
   setResponseStatus,
   defineExtension,
@@ -577,6 +620,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | `useSeo`              | Set reactive SEO/head data           |
 | `usePublicConfig`     | Read browser-safe server config      |
 | `useSiteOrigin`       | Read resolved public origin          |
+| `useSsrDomain`        | Read the selected request domain     |
 | `setResponseStatus`   | Set SSR status and component-scoped browser status |
 | `setResponseRedirect` | Set a validated server redirect      |
 | `defineExtension`     | Create an advanced runtime extension |
@@ -593,7 +637,7 @@ import { vueSsrLite } from 'vue-ssr-lite/vite'
 Advanced genuinely server-only APIs:
 
 ```ts
-import { defineSitemap, createSsrManagedServer, createSsrMemoryResponseCache, useSsrDomain } from 'vue-ssr-lite/server'
+import { defineSitemap, createSsrManagedServer, createSsrMemoryResponseCache } from 'vue-ssr-lite/server'
 ```
 
 Beginner-facing configuration belongs in `vue-ssr-lite`, not this subpath.
@@ -640,7 +684,7 @@ Keep universal values in dedicated static bindings and keep server-only work out
 their dependency graph. Unsupported indirection is a configuration error rather than
 a potentially different value after hydration.
 
-# Advanced: Domains
+# Domains
 
 ```ts
 domain: {
@@ -655,10 +699,15 @@ domain: {
 ```
 
 ```ts
-import { useSsrDomain } from 'vue-ssr-lite/server'
+import { useSsrDomain } from 'vue-ssr-lite'
 
 const domain = useSsrDomain()
 ```
+
+`useSsrDomain()` is universal: the same import works in Vue code during SSR and
+in the browser after hydration. It exposes the selected application, normalized
+authority/hostname, base domain, subdomain, custom-domain flag, and declared
+domain params.
 
 # Advanced: Custom Extensions
 
