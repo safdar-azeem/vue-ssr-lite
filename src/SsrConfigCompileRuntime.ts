@@ -112,7 +112,6 @@ export interface SsrCompiledApplication {
   template: string
   templateMissing: boolean
   hosts: string[]
-  roles?: string[]
   application?: SsrResolvedApplicationDefinition<any, any>
   mountSelector: string
   cacheControl?: string
@@ -154,7 +153,6 @@ export type SsrResolvedServerOptions = Omit<
   SsrServerOptions<Record<string, unknown>>,
   | 'root'
   | 'host'
-  | 'role'
   | 'trustProxy'
   | 'clientOutDir'
   | 'requestTimeoutMs'
@@ -169,7 +167,6 @@ export type SsrResolvedServerOptions = Omit<
 > & {
   root: string
   host: string
-  role: string
   trustProxy: boolean
   clientOutDir: string
   requestTimeoutMs: number
@@ -210,7 +207,6 @@ export interface SsrNormalizedApplicationConfig {
   templateMissing: boolean
   mountSelector: string
   hosts: string[]
-  roles?: readonly string[]
   domain: SsrApplicationDomainConfig
   cookies?: ApplicationConfig['cookies']
   endpoints?: ApplicationConfig['endpoints']
@@ -229,7 +225,6 @@ export interface SsrNormalizedApplicationConfig {
 
 export interface SsrNormalizedConfig {
   name: string
-  runtime?: string
   applications: Record<string, SsrNormalizedApplicationConfig>
   defaultApplicationId?: string
   server?: SsrConfig['server']
@@ -306,6 +301,10 @@ export const discoverApplicationSourceFiles = async (
   authoritativeGraph?: SsrConfigModuleGraph
 ): Promise<SsrDiscoveredApplicationSources> => {
   const walked = await collectApplicationDeclarationFiles(configPath, 0, new Set(), root)
+  const moduleResolver = authoritativeGraph
+    ? (importer: string, specifier: string) =>
+        resolveSsrConfigGraphModule(authoritativeGraph, importer, specifier)
+    : undefined
   const isProjectFile = (file: string) => {
     const relativePath = relative(root, file)
     return !relativePath.startsWith('..') && !isAbsolute(relativePath)
@@ -316,17 +315,31 @@ export const discoverApplicationSourceFiles = async (
         ...[...authoritativeGraph.imports.values()].flat(),
       ].filter((file) => file !== configPath && isProjectFile(file))
     : []
-  const candidateFiles = [...new Set([...walked.files, ...authoritativeFiles])]
+  const authoritativeApplicationFiles: string[] = []
+  for (const file of [...new Set(authoritativeFiles)]) {
+    try {
+      if (
+        await isDefineApplicationModuleSource(
+          await readFile(file, 'utf8'),
+          file,
+          moduleResolver
+        )
+      ) {
+        authoritativeApplicationFiles.push(file)
+      }
+    } catch {
+      // Non-script and unavailable graph nodes cannot be declaration modules.
+    }
+  }
+  const candidateFiles = [
+    ...new Set([...walked.files, ...authoritativeApplicationFiles]),
+  ]
   const skippedRoutesFiles = new Set([
     ...(await collectSkippedApplicationRoutesFiles(candidateFiles)),
     ...[...(authoritativeGraph?.applicationRoutesModules ?? [])].map((file) =>
       file.replaceAll('\\', '/')
     ),
   ])
-  const moduleResolver = authoritativeGraph
-    ? (importer: string, specifier: string) =>
-        resolveSsrConfigGraphModule(authoritativeGraph, importer, specifier)
-    : undefined
   const files = new Map<string, string>()
   const routesModules = new Map<string, string>()
   const routesExports = new Map<string, string>()
@@ -594,7 +607,6 @@ const normalizeApplication = (
     templateMissing: options.templateMissing && !input.template,
     mountSelector: input.mount ?? SSR_DEFAULT_MOUNT,
     hosts,
-    roles: input.roles,
     domain: {
       ...domain,
       development: domain.development ?? derivedBase,
@@ -665,7 +677,6 @@ const asApplicationList = (
         name: SSR_DEFAULT_APPLICATION_ID,
         render: single.render,
         template: single.template,
-        roles: single.roles,
         host: single.host,
         domain: single.domain,
         cookies: single.cookies,
@@ -725,7 +736,6 @@ export const normalizeSsrConfig = (
   }
   return {
     name: String(config.name || basename(root) || 'app'),
-    runtime: config.runtime,
     applications,
     defaultApplicationId: config.defaultApplicationId,
     server: config.server,
@@ -847,12 +857,15 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
   const preEvaluationApplicationFiles = new Set<string>()
   for (const file of [absoluteConfig, ...reachableConfigModules]) {
     const source = file === absoluteConfig ? configSource : await readFile(file, 'utf8')
+    if (
+      file !== absoluteConfig &&
+      (await isDefineApplicationModuleSource(source, file, moduleResolver))
+    ) {
+      preEvaluationApplicationFiles.add(file)
+    }
     const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
     if (projection) {
       preEvaluationProjections.set(file, projection)
-      if (file !== absoluteConfig && (await isDefineApplicationModuleSource(source, file))) {
-        preEvaluationApplicationFiles.add(file)
-      }
     }
   }
   const protectedUniversalDependencies = [
@@ -1254,7 +1267,6 @@ const normalizeCompiledServerOptions = (
     root: config.server?.root || options.root || process.cwd(),
     host: config.server?.host || '0.0.0.0',
     port: config.server?.port,
-    role: config.runtime || 'unified',
     trustProxy: config.server?.trustProxy ?? false,
     clientOutDir: config.server?.clientOutDir || 'dist/client',
     requestTimeoutMs,
@@ -1374,7 +1386,6 @@ export const compileSsrConfig = async (
       template: app.template,
       templateMissing: templateMissing && app.template === SSR_DEFAULT_TEMPLATE,
       hosts: [...app.hosts],
-      roles: app.roles ? [...app.roles] : undefined,
       application,
       mountSelector: app.mountSelector,
       cacheControl: app.cacheControl,
