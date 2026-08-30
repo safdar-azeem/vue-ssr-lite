@@ -274,7 +274,7 @@ const readBrowserDomainContext = (): SsrDomainContext | null => {
   }
 }
 
-export const useSsrDomain = (): SsrDomainApi => {
+export const useDomain = (): SsrDomainApi => {
   const injected = inject(SSR_DOMAIN_CONTEXT, null)
   if (injected) return toDomainApi(injected)
 
