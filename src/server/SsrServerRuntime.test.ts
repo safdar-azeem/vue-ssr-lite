@@ -36,7 +36,6 @@ afterEach(async () => {
 const spaConfig = () =>
   defineServer({
     name: 'test-runtime',
-    runtime: 'unified',
     // Lifecycle tests must not claim the public development port. Binding to
     // zero keeps them isolated from local managed-server processes and other
     // test workers.
@@ -838,7 +837,6 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineServer({
           name: 'test-runtime',
-          runtime: 'unified',
           // The configured deadline includes development runtime reload work;
           // keep enough headroom for the Vite-free config compiler while still
           // exercising the hanging render timeout below.
@@ -1121,7 +1119,6 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineServer({
           server: { port: 0, trustProxy: true },
-          resolveSiteUrl: () => 'https://example.com',
           applications: [
             defineApplication({
               name: 'site',
@@ -1174,10 +1171,12 @@ describe('managed SSR server lifecycle', () => {
     expect(first).toContain('content="A:a.test"')
     expect(first).toContain('"marker":"A"')
     expect(first).toContain('"hostname":"a.test"')
+    expect(first).toContain('"siteOrigin":"https://a.test"')
     expect(first).not.toContain('B:b.test')
     expect(second).toContain('content="B:b.test"')
     expect(second).toContain('"marker":"B"')
     expect(second).toContain('"hostname":"b.test"')
+    expect(second).toContain('"siteOrigin":"https://b.test"')
     expect(second).not.toContain('A:a.test')
     expect(second).toContain('content="original"')
     expect(second).not.toContain('content="changed"')
@@ -1963,7 +1962,7 @@ describe('managed SSR server lifecycle', () => {
     await expect(managed.listen()).resolves.toBeUndefined()
   })
 
-  it('allows a relative base when the current role enables only SPA applications', async () => {
+  it('rejects a relative base when any registered application uses SSR', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await mkdir(join(root, 'dist', 'client'), { recursive: true })
     await writeFile(
@@ -1971,19 +1970,17 @@ describe('managed SSR server lifecycle', () => {
       '<!doctype html><html><body><div id="app"></div></body></html>'
     )
     const Root = defineComponent({ setup: () => () => h('main', 'SSR') })
-    managed = await createSsrManagedServer({
+    await expect(createSsrManagedServer({
       production: true,
       root,
       loadRuntime: async () => ({
         default: {
           ...defineServer({
-            runtime: 'admin',
             server: { port: 0 },
             applications: [
               defineApplication({
                 name: 'website',
                 render: 'ssr',
-                roles: ['website'],
                 template: 'website.html',
                 host: 'website.test',
                 domain: { production: 'website.test' },
@@ -1991,23 +1988,20 @@ describe('managed SSR server lifecycle', () => {
               defineApplication({
                 name: 'admin',
                 render: 'spa',
-                roles: ['admin'],
                 app: { main: './Admin.ts' },
                 template: 'admin.html',
                 host: 'admin.test',
                 domain: { production: 'admin.test' },
               }),
             ],
-          } as any),
+          }),
           __vueSsrLiteViteBase: './',
           __vueSsrLiteShells: {
             website: { root: Root, main: { default: () => undefined } },
           },
         },
       }),
-    })
-
-    await expect(managed.listen()).resolves.toBeUndefined()
+    })).rejects.toThrow('does not support Vite relative base')
   })
 
   it.each(['./', ''])('rejects Vite base %j when production SSR is enabled', async (viteBase) => {
@@ -2128,7 +2122,7 @@ describe('managed SSR server lifecycle', () => {
     expect(renders).toBe(4)
   })
 
-  it('selects applications by host specificity and enforces runtime roles with 421', async () => {
+  it('serves every registered application selected by host specificity', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(
       join(root, 'index.html'),
@@ -2147,14 +2141,12 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineServer({
           name: 'host-runtime',
-          runtime: 'erp',
           server: { port: 0, trustProxy: true },
           applications: [
             defineApplication({
               name: 'storefront',
               render: 'ssr',
               template: 'site.html',
-              roles: ['unified', 'storefront'],
               domain: {
                 development: 'shop.localhost',
                 production: 'shop.localhost',
@@ -2173,7 +2165,6 @@ describe('managed SSR server lifecycle', () => {
               render: 'spa',
               app: { main: './Erp.ts' },
               template: 'index.html',
-              roles: ['unified', 'erp'],
               domain: {
                 development: 'localhost',
                 production: 'localhost',
@@ -2209,11 +2200,19 @@ describe('managed SSR server lifecycle', () => {
         'x-forwarded-host': 'classic-modern-7963.shop.localhost',
       },
     })
+    const customDomain = await fetch(`http://127.0.0.1:${port}/`, {
+      headers: {
+        accept: 'text/html',
+        'x-forwarded-host': 'customer-store.test',
+      },
+    })
 
     expect(workspace.status).toBe(200)
     expect(await workspace.text()).toContain('<div id="app">spa</div>')
-    expect(shop.status).toBe(421)
-    expect(await shop.text()).toContain('Misdirected request')
+    expect(shop.status).toBe(200)
+    expect(await shop.text()).toContain('storefront')
+    expect(customDomain.status).toBe(200)
+    expect(await customDomain.text()).toContain('storefront')
   })
 
   it('coalesces concurrent runtime reloads and keeps the last good config on failure', async () => {
