@@ -25,7 +25,7 @@ const firstHeaderValue = (value: SsrHeaderValue): string =>
 /** Exact matches always outrank wildcards (hostname max length is 253). */
 const EXACT_SPECIFICITY_BASE = 1_000_000
 
-export type SsrHostMatchCategory = 'exact' | 'wildcard' | 'catch-all' | 'default'
+export type SsrHostMatchCategory = 'exact' | 'wildcard' | 'catch-all'
 
 export interface SsrHostMatchScore {
   category: SsrHostMatchCategory
@@ -183,13 +183,11 @@ export const validateSsrHostEntries = (
  * exact hostname >
  * longest matching wildcard suffix >
  * shorter matching wildcard suffix >
- * catch-all `*` >
- * `defaultEntryId`
+ * catch-all `*`
  */
 export const resolveSsrHostEntry = <T extends SsrHostApplication>(
   applications: readonly T[],
-  host: string,
-  defaultApplicationId?: string
+  host: string
 ): SsrHostResolution<T> | null => {
   const normalizedHostname = stripSsrHostPort(host)
   if (!normalizedHostname) return null
@@ -221,20 +219,7 @@ export const resolveSsrHostEntry = <T extends SsrHostApplication>(
     }
   }
 
-  if (best) return best
-
-  if (!defaultApplicationId) return null
-  const fallback = applications.find(
-    (entry) => entry.id === defaultApplicationId
-  )
-  if (!fallback) return null
-  return {
-    entry: fallback,
-    matchedPattern: null,
-    normalizedHostname,
-    category: 'default',
-    specificity: -1,
-  }
+  return best
 }
 
 export const resolveSsrForwardedHost = (
