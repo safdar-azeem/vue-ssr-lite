@@ -574,6 +574,15 @@ const main = async () => {
       join(consumerRoot, 'node_modules/vue-ssr-lite/dist/SsrRuntimeTypes.d.ts'),
       'utf8'
     )
+    const [installedRootTypes, installedServerTypes, installedViteTypes] =
+      await Promise.all(
+        ['index.d.ts', 'server.d.ts', 'vite.d.ts'].map((filename) =>
+          readFile(
+            join(consumerRoot, 'node_modules/vue-ssr-lite/dist', filename),
+            'utf8'
+          )
+        )
+      )
     assert(
       /string\s*\|\s*readonly string\[\]\s*\|\s*undefined/.test(
         installedRuntimeTypes
@@ -585,6 +594,22 @@ const main = async () => {
         installedRuntimeTypes
       ),
       'SsrPublicConfigRequest domain params must be readonly in the public declarations.'
+    )
+    assert(
+      !/\bRobotsLegacyConfig\b/.test(`${installedRootTypes}\n${installedServerTypes}`),
+      'RobotsLegacyConfig must not exist in public entrypoint declarations.'
+    )
+    assert(
+      !/\bSeoInput\b/.test(`${installedRootTypes}\n${installedServerTypes}`),
+      'SeoInput must not exist in public entrypoint declarations; use SeoPageInput.'
+    )
+    assert(
+      !/\bSsrConfig\b/.test(installedServerTypes),
+      'the internal SsrConfig alias must not exist in the server entrypoint declaration.'
+    )
+    assert(
+      !/\bSsrViteApplicationEntry\b/.test(installedViteTypes),
+      'the internal Vite application entry must not exist in the Vite entrypoint declaration.'
     )
     assert(
       await pathExists(join(consumerRoot, 'node_modules/vue-ssr-lite/LICENSE')),
@@ -599,6 +624,10 @@ const main = async () => {
       'defineApplication must export from vue-ssr-lite.'
     )
     assert(typeof packedRoot.useSeo === 'function', 'useSeo must export from vue-ssr-lite.')
+    assert(
+      typeof packedRoot.useSsrDomain === 'function',
+      'useSsrDomain must export from vue-ssr-lite.'
+    )
     assert(
       packedRoot.defineSsrConfig === undefined,
       'defineSsrConfig must not exist on the packaged root export.'
