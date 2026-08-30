@@ -31,3 +31,7 @@ export default defineServer({
   applications: [website, admin, docs],
 })
 ```
+
+Core selects the application from the normalized request hostname. The same
+request domain supplies each SSR application's default `siteOrigin`, including
+custom domains; fixed `PUBLIC_URL` configuration is not required.
