@@ -110,12 +110,9 @@ export type SsrRouterFactory = (options: {
  * Multi-application registration. Identity is `name`, never array index.
  * Applications are always registered explicitly on `defineServer()`.
  */
-export interface ApplicationConfig {
+interface ApplicationConfigBase {
   name: string
   render?: SsrRenderMode
-  domain?: SsrApplicationDomainConfig
-  /** Simple host pattern(s), primarily for multi-application routing. */
-  host?: string | readonly string[]
   /** Existing Vite HTML entry. Defaults to `./index.html` when present. */
   template?: string
   cookies?: SsrApplicationCookiesConfig
@@ -136,6 +133,24 @@ export interface ApplicationConfig {
   cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
   createInitialState?: import('./SsrRuntimeTypes').SsrApplicationDefinition['createInitialState']
 }
+
+type SsrApplicationRoutingConfig =
+  | {
+      /** Simple static host pattern(s). Use `domain` instead for environment-aware routing. */
+      host?: string | readonly string[]
+      domain?: never
+    }
+  | {
+      host?: never
+      /** Environment-aware domain, subdomain, custom-domain, and domain-param routing. */
+      domain?: SsrApplicationDomainConfig
+    }
+
+/**
+ * Public application registration. `host` and `domain` are alternative routing
+ * models and cannot be declared together.
+ */
+export type ApplicationConfig = ApplicationConfigBase & SsrApplicationRoutingConfig
 
 export interface SsrConfigServerOptions {
   root?: string
@@ -165,8 +180,6 @@ export interface SsrConfigServerOptions {
 export interface SsrConfigShared {
   name?: string
   server?: SsrConfigServerOptions
-  /** Used only when no application host pattern matches. */
-  defaultApplicationId?: string
   readiness?: SsrReadinessProbe[]
   /**
    * Server-only advanced origin override after Core host/domain resolution.
@@ -183,12 +196,10 @@ export interface SsrConfigShared {
  * Flat convention overrides for one application.
  * Routes belong on `src/main.ts` (`export { routes }`), not `defineServer()`.
  */
-export type SsrSingleApplicationConfig = SsrConfigShared & {
+type SsrSingleApplicationFields = {
   applications?: never
   render?: SsrRenderMode
   template?: string
-  host?: string | readonly string[]
-  domain?: SsrApplicationDomainConfig
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
   mount?: string
@@ -202,6 +213,10 @@ export type SsrSingleApplicationConfig = SsrConfigShared & {
   cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
   createInitialState?: import('./SsrRuntimeTypes').SsrApplicationDefinition['createInitialState']
 }
+
+export type SsrSingleApplicationConfig = SsrConfigShared &
+  SsrSingleApplicationFields &
+  SsrApplicationRoutingConfig
 
 /** Multi-application configuration. Per-app fields belong on `defineApplication()`. */
 export type SsrMultiApplicationConfig = SsrConfigShared & {
@@ -226,6 +241,7 @@ export type ServerConfig = SsrSingleApplicationConfig | SsrMultiApplicationConfi
 /** @internal Normalized alias used by the compile/runtime pipeline. */
 export type SsrConfig = ServerConfig
 
+/** @internal Configuration-module export shape used only by the compiler. */
 export type SsrConfigExport = SsrConfig | (() => SsrConfig | Promise<SsrConfig>)
 
 /** Serializable domain snapshot attached to every request and hydration state. */
