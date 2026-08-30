@@ -5,7 +5,7 @@ import { defineExtension } from './core/extensions/defineExtension'
 import { useSeo } from './extensions/seo/useSeo'
 import { serializeManagedHead } from './SsrManagedHead'
 import { renderSsrApplication } from './SsrRenderRuntime'
-import { setResponseStatus } from './SsrResponseStatus'
+import { setHttpStatus } from './SsrResponseStatus'
 import { createTestApplication, createTestRenderRequest } from './SsrTestFixtures'
 
 const Shell = defineComponent({
@@ -127,7 +127,7 @@ describe('approved architecture acceptance', () => {
         {
           path: '/lookup/:slug',
           component: page(() => {
-            setResponseStatus(404)
+            setHttpStatus(404)
             useSeo({ index: true, title: 'Missing article' })
           }),
           meta: { seo: { status: 200 } },
@@ -158,7 +158,7 @@ describe('approved architecture acceptance', () => {
           path: '/gone',
           component: page(() => {
             useSeo({ title: 'Should not render' })
-            setResponseStatus(404)
+            setHttpStatus(404)
           }),
           meta: { seo: { status: 404 } },
         },
@@ -200,7 +200,7 @@ describe('approved architecture acceptance', () => {
       routes: [
         {
           path: '/',
-          component: page(() => setResponseStatus(0 as number)),
+          component: page(() => setHttpStatus(0 as number)),
         },
       ],
       seo: { enabled: false },
