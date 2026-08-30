@@ -21,4 +21,9 @@ describe('robots.txt', () => {
     expect(body).toContain('Disallow: /user/')
     expect(body).toContain('Allow: /')
   })
+
+  it('keeps an explicit empty sitemap list as an opt-out', () => {
+    expect(serializeRobotsTxt('https://ex.com/sitemap.xml', { sitemaps: [] }))
+      .not.toContain('Sitemap:')
+  })
 })
