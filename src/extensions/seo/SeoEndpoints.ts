@@ -240,9 +240,6 @@ export const createSeoEndpoints = async (
         if (isSitemapNotFound(result)) return notFound(validateNotFoundStatus(result.responseStatus))
         const shardMatch = /^\/sitemap-([1-9]\d*)\.xml$/.exec(request.pathname)
         if (isSitemapSharded(result)) {
-          if (result.revision === undefined || result.revision === null || String(result.revision) === '') {
-            throw new Error('[vue-ssr-lite] sharded sitemap revision is required.')
-          }
           if (!Number.isInteger(result.shardCount) || result.shardCount < 1 || result.shardCount > 50_000) {
             throw new Error('[vue-ssr-lite] sharded sitemap shardCount must be an integer from 1 through 50,000.')
           }
