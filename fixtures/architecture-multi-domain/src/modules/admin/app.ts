@@ -4,10 +4,10 @@ import routes from './routes'
 export default defineApplication({
   name: 'admin',
   render: 'spa',
-  host: ['admin.localhost', 'admin.test'],
   domain: {
     development: 'admin.localhost',
     production: 'admin.test',
+    mode: 'root',
   },
   routes,
   seo: {
