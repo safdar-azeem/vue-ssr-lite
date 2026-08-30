@@ -28,7 +28,6 @@ export type {
   JsonPrimitive,
   JsonValue,
   SeoApplicationConfig,
-  SeoInput,
   SeoPageInput,
   SeoLinkEntry,
   SeoMetaEntry,
