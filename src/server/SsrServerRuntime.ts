@@ -62,14 +62,19 @@ export interface SsrManagedServer {
   address: () => { host: string; port: number }
 }
 
-const parsePort = (value: number | undefined): number => {
+export const resolveManagedServerPort = (value: number | undefined): number => {
   const environmentPort = Number(process.env.PORT)
   const port =
-    value ?? (Number.isFinite(environmentPort) && environmentPort > 0 ? environmentPort : 4173)
+    Number.isFinite(environmentPort) && environmentPort > 0 ? environmentPort : value ?? 4173
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('SSR server port must be an integer between 0 and 65535.')
   }
   return port
+}
+
+export const resolveManagedServerHost = (configuredHost: string): string => {
+  const environmentHost = process.env.HOST?.trim()
+  return environmentHost || configuredHost
 }
 
 const resolveLocalDisplayHost = (host: string): string => {
@@ -343,8 +348,8 @@ export const createSsrManagedServer = async (
       }
     },
   })
-  const host = initialServerOptions.host
-  const port = parsePort(initialServerOptions.port)
+  const host = resolveManagedServerHost(initialServerOptions.host)
+  const port = resolveManagedServerPort(initialServerOptions.port)
   const clientRoot = resolve(initialServerOptions.root, initialServerOptions.clientOutDir)
   const hasEnabledSsrApplications =
     options.production &&
