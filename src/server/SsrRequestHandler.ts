@@ -347,11 +347,7 @@ export const handleSsrRequest = async (
         },
       }
     }
-    const hostResolution = resolveSsrHostEntry(
-      definition.applications,
-      incomingHost,
-      definition.defaultApplicationId
-    )
+    const hostResolution = resolveSsrHostEntry(definition.applications, incomingHost)
     if (!hostResolution) {
       return jsonResponse(421, {
         status: 'error',
