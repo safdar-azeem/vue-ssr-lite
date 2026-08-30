@@ -22,14 +22,8 @@ export type {
   JsonValue,
   RobotsConfig,
   RobotsGroup,
-  RobotsGroupsConfig,
-  RobotsLegacyConfig,
-  SeoApplicationConfig,
-  SeoEndpointContext,
-  SeoEndpointResultMeta,
   SeoImageInput,
   SeoImageValue,
-  SeoInput,
   SeoLinkEntry,
   SeoMediaInput,
   SeoMediaValue,
@@ -37,11 +31,9 @@ export type {
   SeoOpenGraphDefaults,
   SeoOpenGraphInput,
   SeoPageInput,
-  SeoProviderMeta,
   SeoResolvable,
   SeoRobotsInput,
   SeoRouteInput,
-  SeoServerContext,
   SeoSiteDefaults,
   SeoTwitterInput,
   SiteRobotsConfig,
@@ -59,6 +51,7 @@ export { useSeo } from './extensions/seo/useSeo'
 export { usePublicConfig } from './SsrPublicConfig'
 /** Authoritative public origin for application-owned absolute URLs. */
 export { useSiteOrigin } from './SsrRequestContext'
+export { useSsrDomain, type SsrDomainApi } from './SsrDomainRuntime'
 export { setResponseRedirect, setResponseStatus } from './SsrResponseStatus'
 export type { SsrResponseRedirectOptions } from './SsrResponseStatus'
 
@@ -72,20 +65,26 @@ export const defineApplication = <T extends ApplicationConfig>(config: T): T => 
   if (!config || typeof config !== 'object') {
     throw new Error('defineApplication() requires an application configuration object.')
   }
-  if (typeof config.name !== 'string' || !APPLICATION_NAME.test(config.name)) {
+  const applicationName = config.name
+  if (typeof applicationName !== 'string' || !APPLICATION_NAME.test(applicationName)) {
     throw new Error(
       'defineApplication() name must be a stable identifier matching /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.'
     )
   }
   if (config.render != null && config.render !== 'ssr' && config.render !== 'spa') {
-    throw new Error(`Application "${config.name}" render must be "ssr" or "spa".`)
+    throw new Error(`Application "${applicationName}" render must be "ssr" or "spa".`)
   }
   if (config.routes && config.router) {
-    throw new Error(`Application "${config.name}" cannot declare both routes and router.`)
+    throw new Error(`Application "${applicationName}" cannot declare both routes and router.`)
+  }
+  if (config.host != null && config.domain != null) {
+    throw new Error(
+      `Application "${applicationName}" cannot declare both "host" and "domain". Use "host" for simple static host matching or "domain" for environment-aware domain routing.`
+    )
   }
   if ('port' in config && (config as { port?: unknown }).port != null) {
     throw new Error(
-      `Application "${config.name}" cannot declare a port. Use defineServer({ server: { port } }).`
+      `Application "${applicationName}" cannot declare a port. Use defineServer({ server: { port } }).`
     )
   }
   return config
