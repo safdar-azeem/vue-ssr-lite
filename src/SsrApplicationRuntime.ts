@@ -262,7 +262,6 @@ export const createSsrApplication = async <
       if (!options.server) {
         installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
       }
-      app.use(router)
       router.afterEach((to, _from, failure) => {
         if (failure) return
         resolveResponseStatusForRoute(context.response, to)
@@ -293,6 +292,11 @@ export const createSsrApplication = async <
       server: options.server,
     })
     extensionRuntime.setup()
+    // Vue Router starts its initial browser navigation from `install()`. Keep
+    // that installation behind the (possibly async) application initializer so
+    // consumer auth/permission guards are registered before any route-level
+    // guard can observe incomplete session state.
+    if (router) app.use(router)
     hydration.onDispose(() => {
       extensionRuntime.dispose()
       managedHead.dispose()
