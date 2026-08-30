@@ -574,15 +574,19 @@ const main = async () => {
       join(consumerRoot, 'node_modules/vue-ssr-lite/dist/SsrRuntimeTypes.d.ts'),
       'utf8'
     )
-    const [installedRootTypes, installedServerTypes, installedViteTypes] =
-      await Promise.all(
-        ['index.d.ts', 'server.d.ts', 'vite.d.ts'].map((filename) =>
-          readFile(
-            join(consumerRoot, 'node_modules/vue-ssr-lite/dist', filename),
-            'utf8'
-          )
+    const [
+      installedRootTypes,
+      installedClientTypes,
+      installedServerTypes,
+      installedViteTypes,
+    ] = await Promise.all(
+      ['index.d.ts', 'client.d.ts', 'server.d.ts', 'vite.d.ts'].map((filename) =>
+        readFile(
+          join(consumerRoot, 'node_modules/vue-ssr-lite/dist', filename),
+          'utf8'
         )
       )
+    )
     assert(
       /string\s*\|\s*readonly string\[\]\s*\|\s*undefined/.test(
         installedRuntimeTypes
@@ -625,9 +629,38 @@ const main = async () => {
     )
     assert(typeof packedRoot.useSeo === 'function', 'useSeo must export from vue-ssr-lite.')
     assert(
-      typeof packedRoot.useSsrDomain === 'function',
-      'useSsrDomain must export from vue-ssr-lite.'
+      typeof packedRoot.useDomain === 'function',
+      'useDomain must export from vue-ssr-lite.'
     )
+    assert(
+      typeof packedRoot.useOrigin === 'function',
+      'useOrigin must export from vue-ssr-lite.'
+    )
+    assert(
+      typeof packedRoot.setHttpStatus === 'function',
+      'setHttpStatus must export from vue-ssr-lite.'
+    )
+    assert(
+      typeof packedRoot.redirectTo === 'function',
+      'redirectTo must export from vue-ssr-lite.'
+    )
+    for (const obsoleteName of [
+      'useSsrDomain',
+      'useSiteOrigin',
+      'setResponseStatus',
+      'setResponseRedirect',
+    ]) {
+      assert(
+        packedRoot[obsoleteName] === undefined,
+        `${obsoleteName} must not exist on the packaged root export.`
+      )
+      assert(
+        !new RegExp(`\\b${obsoleteName}\\b`).test(
+          `${installedRootTypes}\n${installedClientTypes}\n${installedServerTypes}`
+        ),
+        `${obsoleteName} must not exist in packaged public declarations.`
+      )
+    }
     assert(
       packedRoot.defineSsrConfig === undefined,
       'defineSsrConfig must not exist on the packaged root export.'
