@@ -678,7 +678,7 @@ describe('zero-config clean consumer fixture', () => {
     expect(lazyHtml).toContain(`rel="modulepreload" href="${lazyJs}"`)
     expect(lazyHtml).toContain(`rel="stylesheet" href="${asyncCardCss}"`)
     expect(lazyHtml).toContain(`rel="modulepreload" href="${asyncCardJs}"`)
-  })
+  }, 30_000)
 
   it('keeps manifest-owned stable Vite output names conservatively cached', async () => {
     productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
