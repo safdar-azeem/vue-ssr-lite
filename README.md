@@ -418,13 +418,20 @@ useSeo(
 # HTTP Status Codes
 
 ```ts
-import { setResponseRedirect, setResponseStatus } from 'vue-ssr-lite'
+import { redirectTo, setHttpStatus } from 'vue-ssr-lite'
 
-setResponseStatus(404)
-setResponseRedirect('/new-location', { status: 308 })
+setHttpStatus(404)
+redirectTo('/new-location', { status: 308 })
 ```
 
-Status precedence is framework/route status, deepest matched route `meta.seo.status`, active `useSeo({ status })` layers, imperative `setResponseStatus()`, then an actual redirect response.
+`setHttpStatus()` sets the current HTTP/page status. During SSR this controls the
+HTTP response status; browser runtime state remains component-scoped according
+to the existing navigation lifecycle.
+
+`redirectTo()` sets a validated HTTP redirect for the current server-rendered
+request. It does not perform Vue Router or browser-history navigation.
+
+Status precedence is framework/route status, deepest matched route `meta.seo.status`, active `useSeo({ status })` layers, imperative `setHttpStatus()`, then an actual redirect response.
 
 # Sitemap
 
@@ -507,10 +514,13 @@ The factory runs server-side once per request. Returned values must be JSON-safe
 # Site Origin
 
 ```ts
-import { useSiteOrigin } from 'vue-ssr-lite'
+import { useOrigin } from 'vue-ssr-lite'
 
-const origin = useSiteOrigin()
+const origin = useOrigin()
 ```
+
+`useOrigin()` reads the authoritative public origin for the current
+application/request.
 
 By default, Core derives the origin from the normalized request domain after
 host selection and trusted-proxy processing. A non-empty result from the
@@ -604,27 +614,27 @@ import {
   defineApplication,
   useSeo,
   usePublicConfig,
-  useSiteOrigin,
-  useSsrDomain,
-  setResponseRedirect,
-  setResponseStatus,
+  useOrigin,
+  useDomain,
+  redirectTo,
+  setHttpStatus,
   defineExtension,
 } from 'vue-ssr-lite'
 import type { AppContext } from 'vue-ssr-lite'
 ```
 
-| API                   | Purpose                              |
-| --------------------- | ------------------------------------ |
-| `defineServer`        | Configure the server/runtime         |
-| `defineApplication`   | Register an explicit application     |
-| `useSeo`              | Set reactive SEO/head data           |
-| `usePublicConfig`     | Read browser-safe server config      |
-| `useSiteOrigin`       | Read resolved public origin          |
-| `useSsrDomain`        | Read the selected request domain     |
-| `setResponseStatus`   | Set SSR status and component-scoped browser status |
-| `setResponseRedirect` | Set a validated server redirect      |
-| `defineExtension`     | Create an advanced runtime extension |
-| `AppContext`          | Type for the `main.ts` initializer   |
+| API                 | Purpose                                            |
+| ------------------- | -------------------------------------------------- |
+| `defineServer`      | Configure the server/runtime                       |
+| `defineApplication` | Register an explicit application                   |
+| `useSeo`            | Set reactive SEO/head data                         |
+| `usePublicConfig`   | Read browser-safe server config                    |
+| `useOrigin`         | Read the authoritative public origin               |
+| `useDomain`         | Read the selected normalized application domain    |
+| `setHttpStatus`     | Set the current HTTP/page status                   |
+| `redirectTo`        | Set a validated server-rendered-request redirect   |
+| `defineExtension`   | Create an advanced runtime extension               |
+| `AppContext`        | Type for the `main.ts` initializer                 |
 
 ## `vue-ssr-lite/vite`
 
@@ -699,13 +709,13 @@ domain: {
 ```
 
 ```ts
-import { useSsrDomain } from 'vue-ssr-lite'
+import { useDomain } from 'vue-ssr-lite'
 
-const domain = useSsrDomain()
+const domain = useDomain()
 ```
 
-`useSsrDomain()` is universal: the same import works in Vue code during SSR and
-in the browser after hydration. It exposes the selected application, normalized
+`useDomain()` reads the selected application's normalized domain information
+during SSR and after hydration. It exposes the selected application, normalized
 authority/hostname, base domain, subdomain, custom-domain flag, and declared
 domain params.
 
