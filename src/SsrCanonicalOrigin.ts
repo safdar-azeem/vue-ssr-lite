@@ -1,7 +1,5 @@
-export const PRODUCTION_ORIGIN_ERROR = `[vue-ssr-lite] Missing PUBLIC_URL for production deployment.
-
-Add:
-PUBLIC_URL=https://example.com`
+export const PRODUCTION_ORIGIN_ERROR =
+  '[vue-ssr-lite] A valid site origin is required for this request.'
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
 
@@ -71,7 +69,6 @@ export const resolveCanonicalOrigin = (
   const candidates = [
     options.siteUrl,
     options.requestOrigin,
-    options.production ? undefined : options.fallbackOrigin,
   ]
   for (const candidate of candidates) {
     if (!candidate) continue
@@ -83,7 +80,10 @@ export const resolveCanonicalOrigin = (
     return origin
   }
   if (options.requireProductionOrigin && options.production) {
-    throw new Error(PRODUCTION_ORIGIN_ERROR)
+    if (!options.fallbackOrigin) throw new Error(PRODUCTION_ORIGIN_ERROR)
+    return assertPublicProductionOrigin(options.fallbackOrigin, 'site origin', {
+      allowHttpOrigin: options.allowHttpOrigin,
+    })
   }
   if (options.fallbackOrigin) {
     return normalizeSiteOrigin(options.fallbackOrigin)
