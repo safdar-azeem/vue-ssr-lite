@@ -315,7 +315,6 @@ For multi-application configuration, put `seo` on the relevant `defineApplicatio
 import { defineServer, type SiteSeoResolution } from 'vue-ssr-lite'
 
 export default defineServer({
-  resolveSiteUrl: async (request) => lookupAuthoritativeOrigin(request),
   seo: {
     site: {
       resolve: async ({ applicationId, siteOrigin, domain, signal }): Promise<SiteSeoResolution> => {
@@ -338,7 +337,8 @@ export default defineServer({
 })
 ```
 
-The resolver never runs in the browser. Missing authoritative origin still fails closed for public production SSR.
+The resolver never runs in the browser. Core supplies `siteOrigin` from the
+selected application's normalized request domain.
 
 ## Route SEO
 
@@ -470,7 +470,12 @@ import { useSiteOrigin } from 'vue-ssr-lite'
 const origin = useSiteOrigin()
 ```
 
-Configure `seo.siteUrl`, `PUBLIC_URL`, or server-only `resolveSiteUrl()`. When configured, `resolveSiteUrl()` is authoritative. Enable `server.trustProxy` only behind a trusted reverse proxy.
+By default, Core derives the origin from the normalized request domain after
+host selection and trusted-proxy processing. A non-empty result from the
+server-only `resolveSiteUrl()` is authoritative; an undefined, empty, or
+whitespace result falls through to `seo.siteUrl`, then `PUBLIC_URL`, then the
+normalized request origin. Enable `server.trustProxy` only behind a trusted
+reverse proxy.
 
 # Server Configuration
 
@@ -522,7 +527,8 @@ dist/
     └── SsrRuntime.js
 ```
 
-An authoritative production origin is required for public SSR applications with SEO enabled. SPA entries do not inherit that SSR-only requirement.
+Production public origins still require HTTPS by default. Set
+`seo.allowHttpOrigin` only for an intentional exception.
 
 # CLI
 
@@ -542,7 +548,7 @@ vue-ssr-lite start
 | Variable                | Description              |
 | ----------------------- | ------------------------ |
 | `PORT`                  | Server port              |
-| `PUBLIC_URL`            | Public production origin |
+| `PUBLIC_URL`            | Optional fixed public origin override |
 | `VUE_SSR_LITE_HMR_PORT` | Development HMR port     |
 | `NODE_ENV`              | Runtime environment      |
 
@@ -571,7 +577,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | `useSeo`              | Set reactive SEO/head data           |
 | `usePublicConfig`     | Read browser-safe server config      |
 | `useSiteOrigin`       | Read resolved public origin          |
-| `setResponseStatus`   | Set imperative SSR HTTP status       |
+| `setResponseStatus`   | Set SSR status and component-scoped browser status |
 | `setResponseRedirect` | Set a validated server redirect      |
 | `defineExtension`     | Create an advanced runtime extension |
 | `AppContext`          | Type for the `main.ts` initializer   |
@@ -686,9 +692,10 @@ Move Node-only work from `src/**` into `server.ts` or other server-only modules.
 
 Install the plugin inside the `main.ts` initializer so Core creates it per Vue application/request.
 
-## Missing production canonical origin
+## Production origin rejected
 
-Set `PUBLIC_URL` or `seo.siteUrl`.
+Use an HTTPS request origin or configure an explicit HTTPS `PUBLIC_URL` /
+`seo.siteUrl`. HTTP requires the intentional `seo.allowHttpOrigin` exception.
 
 ## Wrong host/protocol behind a proxy
 
