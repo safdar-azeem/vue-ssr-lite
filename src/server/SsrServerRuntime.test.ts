@@ -19,6 +19,8 @@ import { useSeo } from '../extensions/seo/useSeo'
 import { createSsrMemoryResponseCache } from './SsrResponseCacheRuntime'
 import {
   createSsrManagedServer,
+  resolveManagedServerHost,
+  resolveManagedServerPort,
   writeSsrProductionAsset,
   type SsrManagedServer,
 } from './SsrServerRuntime'
@@ -77,6 +79,37 @@ const requestRawPathStatus = (port: number, path: string): Promise<number> =>
   })
 
 describe('managed SSR server lifecycle', () => {
+  it('uses a non-empty HOST override and otherwise preserves the configured host', () => {
+    const previousHost = process.env.HOST
+    try {
+      delete process.env.HOST
+      expect(resolveManagedServerHost('0.0.0.0')).toBe('0.0.0.0')
+      process.env.HOST = ' 127.0.0.1 '
+      expect(resolveManagedServerHost('0.0.0.0')).toBe('127.0.0.1')
+      process.env.HOST = '   '
+      expect(resolveManagedServerHost('0.0.0.0')).toBe('0.0.0.0')
+    } finally {
+      if (previousHost === undefined) delete process.env.HOST
+      else process.env.HOST = previousHost
+    }
+  })
+
+  it('uses PORT when valid and otherwise preserves the configured port/default', () => {
+    const previousPort = process.env.PORT
+    try {
+      delete process.env.PORT
+      expect(resolveManagedServerPort(4302)).toBe(4302)
+      expect(resolveManagedServerPort(undefined)).toBe(4173)
+      process.env.PORT = '5000'
+      expect(resolveManagedServerPort(4302)).toBe(5000)
+      process.env.PORT = 'not-a-port'
+      expect(resolveManagedServerPort(4302)).toBe(4302)
+    } finally {
+      if (previousPort === undefined) delete process.env.PORT
+      else process.env.PORT = previousPort
+    }
+  })
+
   it('completes idle development shutdown promptly and safely before listen', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(
@@ -2152,6 +2185,10 @@ describe('managed SSR server lifecycle', () => {
                   storeDomain: { source: 'subdomain-or-hostname' },
                 },
               },
+              seo: {
+                sitemap: async () => [],
+                robots: { allow: ['/'] },
+              },
               publicConfig: {
                 api: { endpoint: 'http://localhost/graphql', timeout: 8000 },
               },
@@ -2202,6 +2239,18 @@ describe('managed SSR server lifecycle', () => {
         'x-forwarded-host': 'customer-store.test',
       },
     })
+    const hostedSubdomainRobots = await fetch(`http://127.0.0.1:${port}/robots.txt`, {
+      headers: {
+        'x-forwarded-host': 'classic-modern-7963.shop.localhost',
+        'x-forwarded-proto': 'https',
+      },
+    })
+    const customDomainRobots = await fetch(`http://127.0.0.1:${port}/robots.txt`, {
+      headers: {
+        'x-forwarded-host': 'customer-store.test',
+        'x-forwarded-proto': 'https',
+      },
+    })
 
     expect(workspace.status).toBe(200)
     expect(await workspace.text()).toContain('<div id="app">spa</div>')
@@ -2209,6 +2258,12 @@ describe('managed SSR server lifecycle', () => {
     expect(await shop.text()).toContain('storefront')
     expect(customDomain.status).toBe(200)
     expect(await customDomain.text()).toContain('storefront')
+    expect(await hostedSubdomainRobots.text()).toContain(
+      'Sitemap: https://classic-modern-7963.shop.localhost/sitemap.xml'
+    )
+    expect(await customDomainRobots.text()).toContain(
+      'Sitemap: https://customer-store.test/sitemap.xml'
+    )
   })
 
   it('coalesces concurrent runtime reloads and keeps the last good config on failure', async () => {
