@@ -1,6 +1,6 @@
 import { dirname, extname, resolve } from 'node:path'
 import { builtinModules, createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readFile, stat } from 'node:fs/promises'
 import { transformSync } from 'esbuild'
 
@@ -61,16 +61,35 @@ const OBJECT_MUTATORS = new Set(['assign', 'defineProperty', 'defineProperties']
 
 const CONFIG_HELPER_EXPORTS = new Set(['defineServer', 'defineApplication'])
 
-const isLibraryConfigSpecifier = (specifier: string, importer: string): boolean => {
+const LIBRARY_CONFIG_DIRECTORY = dirname(fileURLToPath(import.meta.url)).replaceAll('\\', '/')
+
+const isLibraryConfigPath = (filePath: string): boolean => {
+  const normalized = filePath
+    .replaceAll('\\', '/')
+    .replace(/^external-file:/, '')
+    .replace(/\.(?:ts|js|mts|mjs)$/, '')
+  return (
+    normalized === `${LIBRARY_CONFIG_DIRECTORY}/index` ||
+    normalized === `${LIBRARY_CONFIG_DIRECTORY}/SsrConfigRuntime` ||
+    /\/vue-ssr-lite\/src\/(?:index|SsrConfigRuntime)$/.test(normalized)
+  )
+}
+
+const isLibraryConfigSpecifier = (
+  specifier: string,
+  importer: string,
+  moduleResolver?: SsrUniversalModuleResolver
+): boolean => {
   if (specifier === 'vue-ssr-lite' || specifier.startsWith('vue-ssr-lite/')) return true
   const resolved = (
     specifier.startsWith('.') || specifier.startsWith('/')
       ? resolve(dirname(importer), specifier)
       : specifier
   ).replaceAll('\\', '/')
-  return /\/vue-ssr-lite\/src\/(?:index|SsrConfigRuntime)(?:\.(?:ts|js|mts|mjs))?$/.test(
-    resolved
-  )
+  if (isLibraryConfigPath(resolved)) return true
+  const authoritative = moduleResolver?.(importer, specifier)
+  const identity = authoritative?.path ?? authoritative?.identity
+  return Boolean(identity && isLibraryConfigPath(identity))
 }
 
 type ConfigHelpers = {
@@ -1231,13 +1250,17 @@ const configHelperFromExpression = (
     : undefined
 }
 
-const collectConfigHelpers = (program: EstreeNode, filePath: string): ConfigHelpers => {
+const collectConfigHelpers = (
+  program: EstreeNode,
+  filePath: string,
+  moduleResolver?: SsrUniversalModuleResolver
+): ConfigHelpers => {
   const scopes = collectLexicalScopes(program)
   for (const statement of asNodes(program.body)) {
     if (statement.type !== 'ImportDeclaration' || statement.importKind === 'type') continue
     const source = asNode(statement.source)
     const specifier = typeof source?.value === 'string' ? source.value : ''
-    if (!isLibraryConfigSpecifier(specifier, filePath)) continue
+    if (!isLibraryConfigSpecifier(specifier, filePath, moduleResolver)) continue
     for (const item of asNodes(statement.specifiers)) {
       const local = asNode(item.local)
       if (local?.type !== 'Identifier') continue
@@ -2335,7 +2358,8 @@ export const assertUniversalProjectionCoverage = (
  */
 export const isDefineApplicationModuleSource = async (
   source: string,
-  filePath: string
+  filePath: string,
+  moduleResolver?: SsrUniversalModuleResolver
 ): Promise<boolean> => {
   const transformed = transformSync(source, {
     loader: loaderForFile(filePath),
@@ -2355,7 +2379,7 @@ export const isDefineApplicationModuleSource = async (
     const sourceNode = asNode(statement.source)
     if (
       typeof sourceNode?.value !== 'string' ||
-      !isLibraryConfigSpecifier(sourceNode.value, filePath)
+      !isLibraryConfigSpecifier(sourceNode.value, filePath, moduleResolver)
     ) {
       continue
     }
@@ -2575,6 +2599,48 @@ const bindingFromRoutesValue = (
 }
 
 /**
+ * Route isolation also supports a statically transparent application factory:
+ * `export default createApplication({ routes })`. The factory itself remains
+ * outside projection's trusted helper set; only its literal argument is
+ * inspected so the route import can be removed from Node evaluation.
+ */
+const unwrapApplicationRoutesObject = (
+  input: EstreeNode | undefined,
+  bindings: Map<string, Binding>,
+  helpers: ConfigHelpers,
+  seen: Set<string> = new Set()
+): UnwrapResult | undefined => {
+  const known = unwrapConfigObject(input, bindings, helpers)
+  if (known) return known
+  const node = unwrapExpression(input)
+  if (!node) return undefined
+  if (node.type === 'Identifier') {
+    const name = node.name as string
+    if (seen.has(name)) return undefined
+    const binding = bindings.get(name)
+    // esbuild lowers an expression default export to a generated `*_default`
+    // var before Rollup parses it. That binding is immutable source identity,
+    // while a consumer-authored let/var alias must remain unsupported.
+    const transformedDefault =
+      binding?.declarationKind === 'var' && /_default(?:_\d+)?$/.test(name)
+    if (
+      binding?.kind !== 'declaration' ||
+      binding.node.type !== 'VariableDeclarator' ||
+      (binding.declarationKind !== 'const' && !transformedDefault)
+    ) {
+      return undefined
+    }
+    const next = new Set(seen)
+    next.add(name)
+    return unwrapApplicationRoutesObject(asNode(binding.node.init), bindings, helpers, next)
+  }
+  if (node.type !== 'CallExpression') return undefined
+  const args = asNodes(node.arguments)
+  if (args.length !== 1) return undefined
+  return unwrapConfigObject(args[0], bindings, helpers)
+}
+
+/**
  * Import specifiers that feed `defineApplication({ routes })` (or an equivalent
  * application-factory object). The config compiler stubs these modules so Node
  * never evaluates the Vite-owned route/Vue/CSS graph.
@@ -2594,7 +2660,11 @@ export const resolveApplicationRoutesImportBindings = async (
   const program = parseAst(transformed) as EstreeNode
   const bindings = collectModuleBindings(program)
   const helpers = collectConfigHelpers(program, filePath)
-  const application = unwrapConfigObject(findDefaultExport(program), bindings, helpers)
+  const application = unwrapApplicationRoutesObject(
+    findDefaultExport(program),
+    bindings,
+    helpers
+  )
   if (!application) return []
   const values = asNodes(application.object.properties)
     .filter((property) => property.type === 'Property' && propertyName(property) === 'routes')
@@ -2665,7 +2735,7 @@ export const projectUniversalRuntimeSource = async (
   const parseAst = await loadParseAst()
   const program = parseAst(transformed) as EstreeNode
   const bindings = collectModuleBindings(program)
-  const helpers = collectConfigHelpers(program, filePath)
+  const helpers = collectConfigHelpers(program, filePath, moduleResolver)
   const defaultExport = findDefaultExport(program)
   if (!defaultExport) return undefined
   const unwrapped = unwrapConfigObject(defaultExport, bindings, helpers)
@@ -2994,7 +3064,7 @@ export const assertNoImportedUniversalConfigMutation = async (
     audits.set(candidate, {
       filePath: candidate,
       program,
-      helpers: collectConfigHelpers(program, candidate),
+      helpers: collectConfigHelpers(program, candidate, moduleResolver),
       bindings: collectModuleBindings(program),
       resolvedSources,
       dynamicAcquisitions,
