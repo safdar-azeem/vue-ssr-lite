@@ -53,7 +53,7 @@ export interface SsrApplicationDomainConfig {
   /** Extra exact hostnames owned by this application. */
   additionalHosts?: readonly string[]
   /**
-   * Named values exposed on `useSsrDomain().params`.
+   * Named values exposed on `useDomain().params`.
    * Example: `{ workspace: { source: 'last-subdomain-label' } }`.
    */
   params?: Record<string, SsrDomainParamDefinition>
