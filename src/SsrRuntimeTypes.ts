@@ -113,7 +113,7 @@ export interface SsrRequestContext<
   request: SsrRenderRequest<TPublicConfig>
   url: URL
   host: string
-  /** Library-resolved domain context (also available via `useSsrDomain()`). */
+  /** Library-resolved domain context (also available via `useDomain()`). */
   domain: import('./SsrConfigTypes').SsrDomainContext
   publicConfig: TPublicConfig
   /** Authoritative public origin for canonical URLs and structured data. */
