@@ -5,7 +5,6 @@ import {
   normalizeCanonicalPath,
   normalizeSiteOrigin,
   PRODUCTION_HTTP_ORIGIN_ERROR,
-  PRODUCTION_ORIGIN_ERROR,
   resolveCanonicalHref,
   resolveCanonicalOrigin,
 } from './SsrCanonicalOrigin'
@@ -44,14 +43,14 @@ describe('canonical origin and path', () => {
     expect(resolveCanonicalHref('https://ex.com', '/about', false)).toBeNull()
   })
 
-  it('fails production public SEO without an authoritative origin', () => {
-    expect(() =>
+  it('uses the resolved request origin for production public SEO', () => {
+    expect(
       resolveCanonicalOrigin({
         production: true,
         requireProductionOrigin: true,
-        fallbackOrigin: 'http://localhost:4173',
+        fallbackOrigin: 'https://tenant.example.com',
       })
-    ).toThrow(PRODUCTION_ORIGIN_ERROR)
+    ).toBe('https://tenant.example.com')
   })
 
   it('rejects localhost in production', () => {
@@ -59,7 +58,7 @@ describe('canonical origin and path', () => {
       resolveCanonicalOrigin({
         production: true,
         requireProductionOrigin: true,
-        requestOrigin: 'http://localhost:4173',
+        fallbackOrigin: 'http://localhost:4173',
       })
     ).toThrow(/localhost/)
   })
