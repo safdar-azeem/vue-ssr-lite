@@ -9,7 +9,7 @@ export {
 } from './SsrBrowserRuntime'
 export {
   createDomainUrl,
-  useSsrDomain,
+  useDomain,
   type SsrCreateDomainUrlOptions,
   type SsrDomainApi,
 } from './SsrDomainRuntime'
