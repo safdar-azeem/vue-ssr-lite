@@ -42,6 +42,26 @@ describe('SSR host matching', () => {
     )
   })
 
+  it('fails closed for unowned hosts and uses only an explicit catch-all', () => {
+    const owned = [
+      { id: 'website', hosts: ['example.com'] },
+      { id: 'store', hosts: ['*.shop.example.com'] },
+    ]
+    expect(resolveSsrHostEntry(owned, 'unknown.example.net')).toBeNull()
+
+    const withCustomDomains = [
+      ...owned,
+      { id: 'custom-store', hosts: ['*'] },
+    ]
+    expect(
+      resolveSsrHostEntry(withCustomDomains, 'unknown.example.net')
+    ).toMatchObject({
+      entry: { id: 'custom-store' },
+      category: 'catch-all',
+      matchedPattern: '*',
+    })
+  })
+
   it('validates duplicate ownership and multiple catch-alls', () => {
     expect(() =>
       validateSsrHostEntries([
