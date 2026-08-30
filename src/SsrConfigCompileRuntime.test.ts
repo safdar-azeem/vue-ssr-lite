@@ -258,12 +258,10 @@ describe('defineServer application architecture', () => {
       {
         default: defineServer({
           name: 'demo',
-          runtime: 'unified',
           applications: [
             defineApplication({
               name: 'erp',
               render: 'spa',
-              roles: ['unified', 'erp'],
               domain: {
                 development: 'localhost',
                 production: 'app.example.com',
@@ -280,7 +278,6 @@ describe('defineServer application architecture', () => {
             defineApplication({
               name: 'storefront',
               render: 'ssr',
-              roles: ['unified', 'storefront'],
               domain: {
                 development: 'shop.localhost',
                 production: 'shop.example.com',
@@ -335,34 +332,11 @@ describe('defineServer application architecture', () => {
     ).toBe('storefront')
   })
 
-  it('defaults the production runtime to unified', async () => {
-    const compiled = await compileSsrConfig(
-      {
-        default: defineServer({
-          name: 'demo',
-          applications: [
-            defineApplication({
-              name: 'erp',
-              render: 'spa',
-              domain: {
-                development: 'localhost',
-                production: 'app.example.com',
-              },
-            }),
-          ],
-        }),
-      },
-      { development: false }
-    )
-    expect(compiled.server.role).toBe('unified')
-  })
-
   it('lets a single production application serve the incoming host', async () => {
     const compiled = await compileSsrConfig(
       {
         default: defineServer({
           name: 'demo',
-          runtime: 'unified',
           applications: [
             defineApplication({
               name: 'erp',
@@ -385,7 +359,6 @@ describe('defineServer application architecture', () => {
       {
         default: defineServer({
           name: 'demo',
-          runtime: 'unified',
           applications: [
             defineApplication({
               name: 'erp',
@@ -411,7 +384,6 @@ describe('defineServer application architecture', () => {
       {
         default: defineServer({
           name: 'demo',
-          runtime: 'unified',
           applications: [
             defineApplication({
               name: 'erp',
@@ -457,7 +429,6 @@ describe('defineServer application architecture', () => {
       {
         default: defineServer({
           name: 'demo',
-          runtime: 'unified',
           server: { onMetrics, renderError },
           applications: [
             defineApplication({
