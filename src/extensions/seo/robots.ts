@@ -84,9 +84,9 @@ export const serializeRobotsTxt = (
   siteOrigin?: string
 ): string => {
   const config = { ...(robotsTxt as any) }
-  const sitemaps = [...list(config.sitemaps)]
-  if (sitemapUrl && !sitemaps.includes(sitemapUrl)) sitemaps.push(sitemapUrl)
-  config.sitemaps = sitemaps
+  // An omitted value delegates advertisement of Core's managed sitemap to
+  // Core. An explicit empty list is a deliberate private/unpublished opt-out.
+  if (config.sitemaps === undefined && sitemapUrl) config.sitemaps = [sitemapUrl]
   return serializeRobotsConfig(config, siteOrigin)
 }
 
