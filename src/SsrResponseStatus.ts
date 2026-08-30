@@ -82,7 +82,7 @@ export const validateResponseStatus = (status: unknown): number => {
 const validateNonRedirectResponseStatus = (status: unknown): number => {
   const validated = validateResponseStatus(status)
   if (validated >= 300 && validated < 400) {
-    throw new Error('[vue-ssr-lite] A 3xx status is a redirect; use setResponseRedirect().')
+    throw new Error('[vue-ssr-lite] A 3xx status is a redirect; use redirectTo().')
   }
   return validated
 }
@@ -201,7 +201,7 @@ export const isErrorResponseStatus = (status: number): boolean => status >= 400 
  * Dynamic SSR status override. In the browser a call made during component
  * setup is owned by that component; calls outside setup remain validated no-ops.
  */
-export const setResponseStatus = (status: number): number => {
+export const setHttpStatus = (status: number): number => {
   const validated = validateNonRedirectResponseStatus(status)
   if (typeof window !== 'undefined') {
     const instance = getCurrentInstance()
@@ -266,7 +266,7 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
 const REDIRECT_CONTROL = /[\u0000-\u001f\u007f]/
 
 /** Record a validated HTTP redirect during SSR. Browser calls are intentionally inert. */
-export const setResponseRedirect = (
+export const redirectTo = (
   location: string,
   options: SsrResponseRedirectOptions = {}
 ): void => {
