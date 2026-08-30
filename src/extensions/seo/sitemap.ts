@@ -45,7 +45,6 @@ export interface SitemapEntriesResult extends SeoEndpointResultMeta {
 }
 export interface SitemapShardCollection extends SeoEndpointResultMeta {
   kind: 'sharded'
-  revision: string | number
   shardCount: number
   getShard: (
     context: SitemapContext,
