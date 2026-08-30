@@ -290,7 +290,6 @@ export const handleSsrRequest = async (
       return jsonResponse(200, {
         status: 'ok',
         service: definition.name,
-        role: serverOptions.role || 'default',
         timestamp: new Date(request.startedAt).toISOString(),
       })
     }
@@ -307,7 +306,6 @@ export const handleSsrRequest = async (
         return jsonResponse(200, {
           status: 'ok',
           service: definition.name,
-          role: serverOptions.role || 'default',
         })
       } catch {
         return jsonResponse(503, {
@@ -372,23 +370,7 @@ export const handleSsrRequest = async (
       specificity: hostResolution.specificity,
       matchedPattern: hostResolution.matchedPattern,
       hostname: hostResolution.normalizedHostname,
-      role: serverOptions.role || 'default',
     })
-    if (entry.roles?.length && serverOptions.role && !entry.roles.includes(serverOptions.role)) {
-      const message = `Runtime role does not serve application "${entry.id}".`
-      const html = isHtmlNavigation(request, pathname)
-      return {
-        statusCode: 421,
-        body: html
-          ? renderSsrErrorDocument('Misdirected request', message)
-          : JSON.stringify({ status: 'error', message }),
-        headers: {
-          'content-type': html ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-          ...htmlSecurityHeaders,
-        },
-      }
-    }
 
     const protocol = resolveSsrForwardedProtocol(
       headerValue(request.headers, 'x-forwarded-proto'),
