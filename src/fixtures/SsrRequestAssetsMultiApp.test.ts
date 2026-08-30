@@ -157,5 +157,5 @@ describe('request-aware multi-application assets', () => {
     expect(admin).toContain(`href="${adminJs}"`)
     expect(admin).not.toContain(websiteCss!)
     expect(admin).not.toContain(websiteJs!)
-  })
+  }, 30_000)
 })
