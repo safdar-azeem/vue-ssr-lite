@@ -465,27 +465,23 @@ Large providers may return a sharded collection. Each sitemap file is limited to
 
 # robots.txt
 
+For a normal static policy, declare only the policy:
+
 ```ts
 export default defineServer({
   seo: {
     robots: {
-      resolve: async ({ siteOrigin }) => ({
-        status: 'resolved',
-        config: {
-          groups: [
-            {
-              userAgents: ['*'],
-              allow: ['/'],
-              disallow: ['/app', '/admin'],
-            },
-          ],
-          sitemaps: [`${siteOrigin}/sitemap.xml`],
-        },
-      }),
+      groups: [{ userAgents: ['*'], allow: ['/'], disallow: ['/app', '/admin'] }],
     },
   },
 })
 ```
+
+When Core serves an application's sitemap, omitted `sitemaps` advertises that
+sitemap using the authoritative request origin. `sitemaps: [...]` uses exactly
+the supplied values, while `sitemaps: []` suppresses sitemap advertisement.
+Use `resolve` only when tenant or publication policy requires a request-time
+decision; it returns the same configuration shape.
 
 Private mode emits `Disallow: /`. If `public/robots.txt` exists, that file is used instead.
 
@@ -563,7 +559,11 @@ Unavailable`; queue time remains part of `requestTimeoutMs`. Set
 `maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are
 occupied.
 
-`PORT` can override the configured port.
+`PORT` overrides the configured port. A non-empty `HOST` overrides the
+configured bind host; whitespace-only `HOST` is ignored.
+
+Application code supplies business data and policy. `vue-ssr-lite` owns
+SSR, HTTP, domain, origin, head, sitemap, and robots mechanics.
 
 # Production
 
@@ -600,6 +600,7 @@ vue-ssr-lite start
 | Variable                | Description              |
 | ----------------------- | ------------------------ |
 | `PORT`                  | Server port              |
+| `HOST`                  | Server bind host         |
 | `PUBLIC_URL`            | Optional fixed public origin override |
 | `VUE_SSR_LITE_HMR_PORT` | Development HMR port     |
 | `NODE_ENV`              | Runtime environment      |
