@@ -1316,9 +1316,8 @@ describe('managed SSR server lifecycle', () => {
             defineApplication({
               name: 'alpha',
               template: 'alpha.html',
-              host: '*.alpha.test',
               domain: {
-                development: 'alpha.test',
+                development: '*.alpha.test',
                 params: { tenant: { source: 'last-subdomain-label' } },
               },
               cookies: { allow: ['locale'] },
@@ -1327,9 +1326,8 @@ describe('managed SSR server lifecycle', () => {
             defineApplication({
               name: 'beta',
               template: 'beta.html',
-              host: '*.beta.test',
               domain: {
-                development: 'beta.test',
+                development: '*.beta.test',
                 params: { tenant: { source: 'last-subdomain-label' } },
               },
               cookies: { allow: ['locale'] },
@@ -1983,7 +1981,6 @@ describe('managed SSR server lifecycle', () => {
                 render: 'ssr',
                 template: 'website.html',
                 host: 'website.test',
-                domain: { production: 'website.test' },
               }),
               defineApplication({
                 name: 'admin',
@@ -1991,7 +1988,6 @@ describe('managed SSR server lifecycle', () => {
                 app: { main: './Admin.ts' },
                 template: 'admin.html',
                 host: 'admin.test',
-                domain: { production: 'admin.test' },
               }),
             ],
           }),
