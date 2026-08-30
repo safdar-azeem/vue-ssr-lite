@@ -22,7 +22,7 @@ import {
 import { renderSsrApplication } from '../../SsrRenderRuntime'
 import { serializeManagedHead } from '../../SsrManagedHead'
 import { createTestDomain, createTestRenderRequest } from '../../SsrTestFixtures'
-import { setResponseRedirect } from '../../SsrResponseStatus'
+import { redirectTo } from '../../SsrResponseStatus'
 import { useSeo } from './useSeo'
 import { resolveServerSiteOrigin } from '../../server/SsrSiteOriginRuntime'
 import type { SsrHttpRequest } from '../../SsrRuntimeTypes'
@@ -214,7 +214,7 @@ describe('SEO 1.0 Core status, redirects, and hydration snapshot', () => {
       id: 'redirect',
       root: defineComponent({
         setup() {
-          setResponseRedirect('/target', { status: 308 })
+          redirectTo('/target', { status: 308 })
           useSeo({ title: 'Old', structuredData: { '@type': 'Article' } })
           return () => h('main', 'old')
         },
@@ -235,7 +235,7 @@ describe('SEO 1.0 Core status, redirects, and hydration snapshot', () => {
       id: `bad-redirect-${location.length}`,
       root: defineComponent({
         setup() {
-          setResponseRedirect(location, { allowExternal })
+          redirectTo(location, { allowExternal })
           return () => h('main')
         },
       }),
