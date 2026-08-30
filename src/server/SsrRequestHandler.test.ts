@@ -47,11 +47,9 @@ const compiledDefinition = (
 ): SsrCompiledConfig => ({
   name: 'request-handler-test',
   development: true,
-  resolveSiteUrl: (request) => `${request.protocol}://${request.host}`,
   server: {
     root: '/virtual/request-handler-test',
     host: '127.0.0.1',
-    role: 'unified',
     trustProxy: false,
     clientOutDir: 'dist/client',
     requestTimeoutMs: 15_000,
@@ -184,6 +182,52 @@ describe('transport-independent SSR request handler', () => {
       expect(endpointToolsSignal).toBe(scope.signal)
     } finally {
       scope.dispose()
+    }
+  })
+
+  it('derives site origin after trusted proxy normalization', async () => {
+    const endpoint: SsrEndpointDefinition = {
+      id: 'site-origin',
+      match: (request) => request.pathname === '/origin',
+      handle: (request) => ({ statusCode: 200, body: request.siteOrigin }),
+    }
+    const request = Object.freeze({
+      ...normalizedRequest('/origin'),
+      protocol: 'http' as const,
+      headers: Object.freeze({
+        host: 'direct.test',
+        'x-forwarded-host': 'tenant.test',
+        'x-forwarded-proto': 'https',
+      }),
+    })
+
+    const directDefinition = compiledDefinition(endpoint)
+    directDefinition.applications[0]!.hosts = ['*']
+    directDefinition.applications[0]!.domain.customDomains = true
+    const directScope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        request,
+        handlerRuntime(directScope, directDefinition),
+      )
+      expect(response?.body).toBe('http://direct.test')
+    } finally {
+      directScope.dispose()
+    }
+
+    const proxyDefinition = compiledDefinition(endpoint)
+    proxyDefinition.server.trustProxy = true
+    proxyDefinition.applications[0]!.hosts = ['*']
+    proxyDefinition.applications[0]!.domain.customDomains = true
+    const proxyScope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        request,
+        handlerRuntime(proxyScope, proxyDefinition),
+      )
+      expect(response?.body).toBe('https://tenant.test')
+    } finally {
+      proxyScope.dispose()
     }
   })
 
