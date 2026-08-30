@@ -534,6 +534,28 @@ describe('SEO 1.0 robots, sitemap, endpoints, and origin authority', () => {
     expect(second?.body).toBeUndefined()
   })
 
+  it('advertises the managed sitemap for static and dynamic robots policies only when omitted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-robots-sitemap-'))
+    const sitemapProvider = async () => []
+    const endpoints = await createSeoEndpoints({
+      applicationId: 'website', root, existingEndpoints: [], seo: {}, sitemapProvider,
+      siteRobots: { resolve: async () => ({ status: 'resolved' as const, config: { allow: ['/'] } }) },
+      resolveSiteUrl: async () => 'https://tenant.test',
+    })
+    const robots = endpoints.find((entry) => entry.match(request('/robots.txt')))!
+    const omitted = await robots.handle(request('/robots.txt'), { signal: request('/').signal })
+    expect(omitted?.body).toContain('Sitemap: https://tenant.test/sitemap.xml')
+
+    const optedOutEndpoints = await createSeoEndpoints({
+      applicationId: 'private-website', root, existingEndpoints: [], seo: {}, sitemapProvider,
+      siteRobots: { resolve: async () => ({ status: 'resolved' as const, config: { sitemaps: [] } }) },
+      resolveSiteUrl: async () => 'https://tenant.test',
+    })
+    const optedOut = optedOutEndpoints.find((entry) => entry.match(request('/robots.txt')))!
+    const body = await optedOut.handle(request('/robots.txt'), { signal: request('/').signal })
+    expect(body?.body).not.toContain('Sitemap:')
+  })
+
   it('makes resolveSiteUrl authoritative over seo.siteUrl and PUBLIC_URL', async () => {
     const req = request('/')
     const origin = await resolveServerSiteOrigin({
