@@ -25,8 +25,6 @@ import {
   resolveApplicationStyleDependencies,
 } from './SsrViteAssetRuntime'
 
-export type { SsrViteApplicationEntry }
-
 export interface SsrVitePluginOptions {
   /** Optional path to `server.ts` (auto-discovered when omitted). */
   config?: string
