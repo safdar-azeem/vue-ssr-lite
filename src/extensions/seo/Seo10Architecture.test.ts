@@ -283,6 +283,13 @@ describe('SEO 1.0 Core status, redirects, and hydration snapshot', () => {
 
 describe('SEO 1.0 robots, sitemap, endpoints, and origin authority', () => {
   it('serializes multiple robots groups and rejects mixed/reserved/injected fields', () => {
+    const simple = serializeRobotsConfig({
+      allow: '/',
+      disallow: '/private',
+    })
+    expect(simple).toContain('Allow: /')
+    expect(simple).toContain('Disallow: /private')
+
     const body = serializeRobotsConfig({
       groups: [
         { userAgents: ['Googlebot', 'Bingbot'], allow: ['/'], disallow: ['/admin'] },
