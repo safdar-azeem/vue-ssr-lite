@@ -6,7 +6,7 @@ import {
   resetRouteResponseStatus,
   resolveResponseStatusForRoute,
   restoreResponseStatus,
-  setResponseStatus,
+  setHttpStatus,
   snapshotResponseStatus,
   validateResponseStatus,
 } from './SsrResponseStatus'
@@ -32,13 +32,13 @@ describe('response status validation', () => {
 
   it('validates and ignores status updates in the browser', () => {
     vi.stubGlobal('window', {})
-    expect(setResponseStatus(404)).toBe(404)
-    expect(() => setResponseStatus(302)).toThrow(/redirect/)
-    expect(() => setResponseStatus(0)).toThrow(/Invalid HTTP status/)
+    expect(setHttpStatus(404)).toBe(404)
+    expect(() => setHttpStatus(302)).toThrow(/redirect/)
+    expect(() => setHttpStatus(0)).toThrow(/Invalid HTTP status/)
   })
 
   it('still requires a request context in Node', () => {
-    expect(() => setResponseStatus(404)).toThrow(/request context is not installed/)
+    expect(() => setHttpStatus(404)).toThrow(/request context is not installed/)
   })
 
   it('gives runtime status precedence over route metadata', () => {
