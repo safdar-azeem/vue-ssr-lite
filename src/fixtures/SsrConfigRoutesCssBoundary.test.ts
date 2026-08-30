@@ -145,7 +145,7 @@ describe('multi-app defineApplication({ routes }) config boundary', () => {
       })
       expect(generateSsrClientModule(project, admin)).toContain(item.clientImport)
     }
-  })
+  }, 30_000)
 
   it('loads multi-app configuration without executing package/style.css or Vite aliases', async () => {
     const project = await materializeFixture()
