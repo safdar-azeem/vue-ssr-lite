@@ -421,4 +421,4 @@ export const installSsrRequestContextObservation = <
  * Advanced universal helper for application-owned absolute URLs.
  * Technical canonical/Open Graph origin resolution remains Core-owned.
  */
-export const useSiteOrigin = (): string => useSsrRequestContext().siteOrigin
+export const useOrigin = (): string => useSsrRequestContext().siteOrigin
