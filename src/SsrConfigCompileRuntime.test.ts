@@ -10,6 +10,7 @@ import {
   generateSsrClientModule,
   generateSsrRuntimeModule,
   loadSsrConfigFile,
+  normalizeRobotsConfig,
   normalizeSsrConfig,
 } from './SsrConfigCompileRuntime'
 import { sourceDeclaresServerConfigRoutes } from './SsrUniversalProjection'
@@ -23,6 +24,21 @@ import { defineComponent, h } from 'vue'
 const Root = defineComponent({ setup: () => () => h('div') })
 
 describe('defineServer application architecture', () => {
+  it('accepts a direct static robots policy while preserving dynamic resolvers', async () => {
+    const staticRobots = normalizeRobotsConfig({
+      groups: [{ userAgents: '*', allow: ['/'] }],
+    })!
+    await expect(staticRobots.resolve({
+      applicationId: 'app', siteOrigin: 'https://example.test',
+      domain: {} as any, signal: new AbortController().signal, pathname: '/robots.txt', search: '',
+    })).resolves.toEqual({
+      status: 'resolved', config: { groups: [{ userAgents: '*', allow: ['/'] }] },
+    })
+
+    const resolve = async () => ({ status: 'resolved' as const, config: { sitemaps: [] } })
+    expect(normalizeRobotsConfig({ resolve })?.resolve).toBe(resolve)
+  })
+
   it('excludes default fallback routing from the public server contract', () => {
     expectTypeOf<
       'defaultApplicationId' extends keyof ServerConfig ? true : false
