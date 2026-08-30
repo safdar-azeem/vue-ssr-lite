@@ -1,6 +1,6 @@
 {
   "name": "vue-ssr-lite",
-  "version": "1.0.0-rc.5",
+  "version": "1.0.0-rc.6",
   "description": "A Server-Side Rendering (SSR) runtime for Vue 3",
   "license": "MIT",
   "type": "module",
@@ -38,9 +38,10 @@
     "test": "vitest run",
     "test:package": "node scripts/SsrPackageSmoke.mjs",
     "prepublishOnly": "npm run build && npm test && npm run test:package",
-    "release:patch": "npm version patch && npm publish",
-    "release:minor": "npm version minor && npm publish",
-    "release:major": "npm version major && npm publish"
+    "release:rc": "npm version prerelease --preid=rc && npm publish --tag next",
+    "release:patch": "npm version patch && npm publish --tag latest",
+    "release:minor": "npm version minor && npm publish --tag latest",
+    "release:major": "npm version major && npm publish --tag latest"
   },
   "engines": {
     "node": ">=22.12.0"
