@@ -118,6 +118,31 @@ const handlerRuntime = (
 })
 
 describe('transport-independent SSR request handler', () => {
+  it('returns 421 when no application owns the request host', async () => {
+    const scope = createSsrRequestScope(0)
+    const request = Object.freeze({
+      ...normalizedRequest('/'),
+      headers: Object.freeze({
+        host: 'unknown.test',
+        accept: 'application/json',
+      }),
+    })
+    try {
+      const response = await handleSsrRequest(
+        request,
+        handlerRuntime(scope, compiledDefinition())
+      )
+
+      expect(response?.statusCode).toBe(421)
+      expect(JSON.parse(String(response?.body))).toMatchObject({
+        status: 'error',
+        message: 'No application serves this host.',
+      })
+    } finally {
+      scope.dispose()
+    }
+  })
+
   it('returns a normal Core response without Node HTTP request or response objects', async () => {
     const scope = createSsrRequestScope(0)
     try {
