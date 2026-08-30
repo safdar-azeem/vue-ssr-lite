@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it } from 'vitest'
 import {
   DEFINE_SERVER_ROUTES_ERROR,
   compileSsrConfig,
@@ -14,6 +14,7 @@ import {
 } from './SsrConfigCompileRuntime'
 import { sourceDeclaresServerConfigRoutes } from './SsrUniversalProjection'
 import { defineApplication, defineServer } from './index'
+import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
 import { withSsrShells } from './SsrTestFixtures'
@@ -22,6 +23,12 @@ import { defineComponent, h } from 'vue'
 const Root = defineComponent({ setup: () => () => h('div') })
 
 describe('defineServer application architecture', () => {
+  it('excludes default fallback routing from the public server contract', () => {
+    expectTypeOf<
+      'defaultApplicationId' extends keyof ServerConfig ? true : false
+    >().toEqualTypeOf<false>()
+  })
+
   it('uses fixed bounded SSR admission defaults', async () => {
     const compiled = await compileSsrConfig(
       { default: defineServer({ render: 'spa' }) },
@@ -135,6 +142,40 @@ describe('defineServer application architecture', () => {
         ],
       })
     ).toThrow(/needs host routing/)
+  })
+
+  it('treats host and domain as mutually exclusive routing models', () => {
+    expectTypeOf<
+      {
+        name: 'broken'
+        host: 'a.example.com'
+        domain: { production: 'b.example.com' }
+      } extends ApplicationConfig
+        ? true
+        : false
+    >().toEqualTypeOf<false>()
+
+    expect(() =>
+      defineApplication({
+        name: 'broken',
+        host: 'a.example.com',
+        domain: { production: 'b.example.com' },
+      } as never)
+    ).toThrow(
+      'Application "broken" cannot declare both "host" and "domain". Use "host" for simple static host matching or "domain" for environment-aware domain routing.'
+    )
+
+    expect(() =>
+      normalizeSsrConfig({
+        applications: [
+          {
+            name: 'broken',
+            host: 'a.example.com',
+            domain: { production: 'b.example.com' },
+          },
+        ],
+      } as never)
+    ).toThrow(/cannot declare both "host" and "domain"/)
   })
 
   it('rejects duplicate application names', () => {
@@ -310,11 +351,7 @@ describe('defineServer application architecture', () => {
     ] as const
 
     for (const [host, entryId, expectedParam] of matrix) {
-      const matched = resolveSsrHostEntry(
-        compiled.applications,
-        host,
-        compiled.defaultApplicationId
-      )
+      const matched = resolveSsrHostEntry(compiled.applications, host)
       expect(matched?.entry.id).toBe(entryId)
       const domain = resolveSsrDomainContext(host, matched!.entry, true)
       if (entryId === 'erp') {
