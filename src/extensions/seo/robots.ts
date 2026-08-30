@@ -33,7 +33,7 @@ export const normalizeRobotsConfig = (config: RobotsConfig = {}, siteOrigin?: st
 } => {
   const record = config as any
   if (record.groups !== undefined && (record.allow !== undefined || record.disallow !== undefined)) {
-    throw new Error('[vue-ssr-lite] robots groups cannot be mixed with legacy allow/disallow.')
+    throw new Error('[vue-ssr-lite] robots groups cannot be mixed with top-level allow/disallow.')
   }
   const groups: RobotsGroup[] = record.groups !== undefined
     ? [...record.groups]
