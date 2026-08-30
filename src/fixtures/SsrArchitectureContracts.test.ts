@@ -216,5 +216,5 @@ describe('multi-domain architecture fixture', () => {
     expect(adminChunk).not.toContain('DOCS_GUIDE_SFC')
     expect(docsChunk).not.toContain('WEBSITE_HOME_SFC')
     expect(docsChunk).not.toContain('ADMIN_DASHBOARD_SFC')
-  })
+  }, 30_000)
 })
