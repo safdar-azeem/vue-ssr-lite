@@ -7,7 +7,6 @@ import type {
   SeoApplicationConfig,
   SeoImageInput,
   SeoImageValue,
-  SeoInput,
   SeoLinkEntry,
   SeoMediaInput,
   SeoMediaValue,
@@ -286,11 +285,16 @@ export const routeSeoLayers = (
 
 export const mergeSeoLayers = (
   state: SeoState,
-  route: RouteLocationNormalizedLoaded | SeoInput | null | undefined
+  route: RouteLocationNormalizedLoaded | SeoPageInput | null | undefined
 ): SeoResolvedInput => {
   let merged = applicationSeoInput(state.config)
   if (state.siteDefaults) merged = mergeSeoInput(merged, siteSeoInput(state.siteDefaults))
-  const routeLayers = route && 'matched' in route ? routeSeoLayers(route) : route ? [route as SeoInput] : []
+  const routeLayers =
+    route && 'matched' in route
+      ? routeSeoLayers(route)
+      : route
+        ? [route as SeoPageInput]
+        : []
   for (const routeLayer of routeLayers) merged = mergeSeoInput(merged, routeLayer)
   for (const layer of state.layers) {
     if (layer.active) merged = mergeSeoInput(merged, resolveUseSeoInput(layer.input))
