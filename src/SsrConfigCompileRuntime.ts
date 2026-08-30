@@ -140,7 +140,6 @@ export interface SsrCompiledApplication {
 export interface SsrCompiledConfig {
   name: string
   applications: SsrCompiledApplication[]
-  defaultApplicationId?: string
   server: SsrResolvedServerOptions
   readiness?: SsrReadinessProbe[]
   development: boolean
@@ -226,7 +225,6 @@ export interface SsrNormalizedApplicationConfig {
 export interface SsrNormalizedConfig {
   name: string
   applications: Record<string, SsrNormalizedApplicationConfig>
-  defaultApplicationId?: string
   server?: SsrConfig['server']
   readiness?: SsrConfig['readiness']
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
@@ -581,6 +579,11 @@ const normalizeApplication = (
   if (input.routes && input.router) {
     throw new Error(`Application "${id}" cannot declare both routes and router.`)
   }
+  if (input.host != null && input.domain != null) {
+    throw new Error(
+      `Application "${id}" cannot declare both "host" and "domain". Use "host" for simple static host matching or "domain" for environment-aware domain routing.`
+    )
+  }
   const explicitHosts = normalizeHostPatterns(input.host, id)
   const domain = { ...(input.domain || {}) }
   let hosts = explicitHosts.length ? explicitHosts : expandApplicationHosts(domain, options.development)
@@ -671,29 +674,31 @@ const asApplicationList = (
     return { applications: [...config.applications], single: false }
   }
   const single = config as SsrSingleApplicationConfig
+  const applicationBase = {
+    name: SSR_DEFAULT_APPLICATION_ID,
+    render: single.render,
+    template: single.template,
+    cookies: single.cookies,
+    endpoints: single.endpoints,
+    mount: single.mount,
+    cacheControl: single.cacheControl,
+    responseCache: single.responseCache,
+    publicConfig: single.publicConfig,
+    seo: single.seo,
+    app: undefined,
+    router: single.router,
+    scrollBehavior: single.scrollBehavior,
+    extensions: single.extensions,
+    cleanup: single.cleanup,
+    createInitialState: single.createInitialState,
+  }
+  const application: ApplicationConfig = single.host != null
+    ? { ...applicationBase, host: single.host }
+    : single.domain != null
+      ? { ...applicationBase, domain: single.domain }
+      : applicationBase
   return {
-    applications: [
-      {
-        name: SSR_DEFAULT_APPLICATION_ID,
-        render: single.render,
-        template: single.template,
-        host: single.host,
-        domain: single.domain,
-        cookies: single.cookies,
-        endpoints: single.endpoints,
-        mount: single.mount,
-        cacheControl: single.cacheControl,
-        responseCache: single.responseCache,
-        publicConfig: single.publicConfig,
-        seo: single.seo,
-        app: undefined,
-        router: single.router,
-        scrollBehavior: single.scrollBehavior,
-        extensions: single.extensions,
-        cleanup: single.cleanup,
-        createInitialState: single.createInitialState,
-      },
-    ],
+    applications: [application],
     single: true,
   }
 }
@@ -737,7 +742,6 @@ export const normalizeSsrConfig = (
   return {
     name: String(config.name || basename(root) || 'app'),
     applications,
-    defaultApplicationId: config.defaultApplicationId,
     server: config.server,
     readiness: config.readiness,
     resolveSiteUrl: config.resolveSiteUrl,
@@ -1452,18 +1456,9 @@ export const compileSsrConfig = async (
     applications.push(compiled)
   }
   validateSsrHostEntries(applications)
-  if (
-    config.defaultApplicationId &&
-    !applications.some((app) => app.id === config.defaultApplicationId)
-  ) {
-    throw new Error(
-      `defaultApplicationId "${config.defaultApplicationId}" does not match an application.`
-    )
-  }
   return {
     name: config.name,
     applications,
-    defaultApplicationId: config.defaultApplicationId,
     development,
     viteBase,
     readiness: config.readiness,
