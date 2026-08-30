@@ -88,9 +88,6 @@ export interface SeoPageInput {
   htmlAttributes?: { lang?: string | null; dir?: 'ltr' | 'rtl' | 'auto' | null }
 }
 
-/** Backward-compatible name for the plain page SEO input. */
-export type SeoInput = SeoPageInput
-
 export interface SeoApplicationConfig {
   enabled?: boolean
   title?: string | null
@@ -179,19 +176,19 @@ export interface RobotsGroup {
   disallow?: readonly string[]
   directives?: Record<string, string | number | boolean>
 }
-export interface RobotsLegacyConfig {
+interface RobotsSimpleConfig {
   groups?: never
   allow?: string | readonly string[]
   disallow?: string | readonly string[]
   sitemaps?: readonly string[]
 }
-export interface RobotsGroupsConfig {
+interface RobotsGroupedConfig {
   groups: readonly RobotsGroup[]
   sitemaps?: readonly string[]
   allow?: never
   disallow?: never
 }
-export type RobotsConfig = RobotsLegacyConfig | RobotsGroupsConfig
+export type RobotsConfig = RobotsSimpleConfig | RobotsGroupedConfig
 
 export type SiteRobotsResolution =
   | ({ status: 'resolved'; config: RobotsConfig } & SeoEndpointResultMeta)
