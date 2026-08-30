@@ -91,6 +91,7 @@ export interface SsrSeoConfig {
   trailingSlash?: boolean
 }
 
+/** Awaited before Core installs Vue Router and starts browser navigation. */
 export type SsrAppInitializer = (context: AppContext) => void | Promise<void>
 
 export interface SsrMainModule {
@@ -117,7 +118,6 @@ export interface ApplicationConfig {
   host?: string | readonly string[]
   /** Existing Vite HTML entry. Defaults to `./index.html` when present. */
   template?: string
-  roles?: readonly string[]
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
   mount?: string
@@ -165,14 +165,12 @@ export interface SsrConfigServerOptions {
 export interface SsrConfigShared {
   name?: string
   server?: SsrConfigServerOptions
-  /** Advanced process role (`unified`, `erp`, `storefront`, …). */
-  runtime?: string
   /** Used only when no application host pattern matches. */
   defaultApplicationId?: string
   readiness?: SsrReadinessProbe[]
   /**
-   * Server-only custom origin resolution for multi-tenant platforms.
-   * Never trust a raw Host header unless this function validates it.
+   * Server-only advanced origin override after Core host/domain resolution.
+   * Returned values still pass Core's origin and production HTTPS validation.
    */
   resolveSiteUrl?: (
     request: SsrHttpRequest<any>
@@ -189,7 +187,6 @@ export type SsrSingleApplicationConfig = SsrConfigShared & {
   applications?: never
   render?: SsrRenderMode
   template?: string
-  roles?: readonly string[]
   host?: string | readonly string[]
   domain?: SsrApplicationDomainConfig
   cookies?: SsrApplicationCookiesConfig
