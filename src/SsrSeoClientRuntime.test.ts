@@ -6,8 +6,8 @@ import { useSeo } from './extensions/seo/useSeo'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import {
   resolveResponseStatusForRoute,
-  setResponseRedirect,
-  setResponseStatus,
+  redirectTo,
+  setHttpStatus,
 } from './SsrResponseStatus'
 import { createTestRenderRequest } from './SsrTestFixtures'
 
@@ -313,7 +313,7 @@ describe('scoped whole-object useSeo status', () => {
     const Page = (label: string) => defineComponent(() => () => h('main', label))
     const Imperative = defineComponent({
       setup() {
-        setResponseStatus(418)
+        setHttpStatus(418)
         return () => h('main', 'override')
       },
     })
@@ -374,12 +374,12 @@ describe('scoped whole-object useSeo status', () => {
     created.app.unmount()
   })
 
-  it('keeps setResponseRedirect as a non-throwing browser no-op', async () => {
+  it('keeps redirectTo as a non-throwing browser no-op', async () => {
     const created = await mountClient({
       id: 'browser-redirect-noop',
       root: defineComponent({
         setup() {
-          setResponseRedirect('javascript:alert(1)')
+          redirectTo('javascript:alert(1)')
           return () => h('main', 'still here')
         },
       }),
@@ -499,7 +499,7 @@ describe('browser response status across navigation', () => {
     created.app.unmount()
   })
 
-  it('clears setResponseStatus(404) when navigating to a normal route', async () => {
+  it('clears setHttpStatus(404) when navigating to a normal route', async () => {
     const created = await mountClient(
       {
         id: 'status-runtime',
@@ -518,7 +518,7 @@ describe('browser response status across navigation', () => {
             path: '/gone',
             component: defineComponent({
               setup() {
-                setResponseStatus(404)
+                setHttpStatus(404)
                 useSeo({ title: 'Gone', index: true })
                 return () => h('main', 'gone')
               },
@@ -559,7 +559,7 @@ describe('browser response status across navigation', () => {
             path: '/missing',
             component: defineComponent({
               setup() {
-                setResponseStatus(404)
+                setHttpStatus(404)
                 useSeo({ title: 'Missing', index: true })
                 return () => h('main', 'missing')
               },
@@ -645,7 +645,7 @@ describe('browser response status across navigation', () => {
           path: '/article',
           component: defineComponent({
             setup() {
-              setResponseStatus(410)
+              setHttpStatus(410)
               useSeo({ title: 'Gone article', index: true })
               return () => h('main', 'article')
             },
@@ -684,7 +684,7 @@ describe('browser response status across navigation', () => {
             path: '/missing',
             component: defineComponent({
               setup() {
-                setResponseStatus(404)
+                setHttpStatus(404)
                 useSeo({ title: 'Missing' })
                 return () => h('main', 'missing')
               },
