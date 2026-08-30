@@ -12,12 +12,12 @@ const ROOT_RUNTIME_EXPORTS = [
   'defineApplication',
   'defineExtension',
   'defineServer',
-  'setResponseRedirect',
-  'setResponseStatus',
+  'redirectTo',
+  'setHttpStatus',
   'usePublicConfig',
   'useSeo',
-  'useSiteOrigin',
-  'useSsrDomain',
+  'useOrigin',
+  'useDomain',
 ]
 
 const CLIENT_RUNTIME_EXPORTS = [
@@ -28,7 +28,7 @@ const CLIENT_RUNTIME_EXPORTS = [
   'mountSpaApplication',
   'ssrWatch',
   'ssrWatchEffect',
-  'useSsrDomain',
+  'useDomain',
   'useSsrResolution',
 ]
 
@@ -46,11 +46,18 @@ const SERVER_RUNTIME_EXPORTS = [
   'ssrEnvBoolean',
   'ssrEnvList',
   'ssrEnvNumber',
-  'useSsrDomain',
+  'useDomain',
   'useSsrRequestContext',
 ]
 
 const VITE_RUNTIME_EXPORTS = ['vueSsrLite']
+
+const OBSOLETE_RUNTIME_EXPORTS = [
+  'useSsrDomain',
+  'useSiteOrigin',
+  'setResponseStatus',
+  'setResponseRedirect',
+]
 
 /** PUBLIC CONSUMER CONTRACT: normal universal application types. */
 const ROOT_TYPE_EXPORTS = [
@@ -291,6 +298,14 @@ describe('public package entrypoint contracts', () => {
   it('does not publish server or renderer internals from the package root', () => {
     for (const name of HIDDEN_ROOT_RUNTIME_EXPORTS) {
       expect(publicApi).not.toHaveProperty(name)
+    }
+  })
+
+  it('does not publish obsolete runtime API names from affected entrypoints', () => {
+    for (const api of [publicApi, clientApi, serverApi]) {
+      for (const name of OBSOLETE_RUNTIME_EXPORTS) {
+        expect(api).not.toHaveProperty(name)
+      }
     }
   })
 
