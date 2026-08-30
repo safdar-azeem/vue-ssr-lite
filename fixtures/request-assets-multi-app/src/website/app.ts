@@ -4,10 +4,10 @@ import routes from './routes'
 export default defineApplication({
   name: 'website',
   render: 'ssr',
-  host: ['website.localhost', 'website.test'],
   domain: {
     development: 'website.localhost',
     production: 'website.test',
+    mode: 'root',
   },
   template: './website.html',
   routes,
