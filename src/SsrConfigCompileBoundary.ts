@@ -5,6 +5,7 @@ import { init as initEsModuleLexer, parse as parseEsModule } from 'es-module-lex
 import type { Plugin } from 'esbuild'
 import type { ApplicationConfig } from './SsrConfigTypes'
 import {
+  isDefineApplicationModuleSource,
   resolveApplicationRoutesImportBindings,
   resolveApplicationRoutesImportSpecifiers,
   type SsrApplicationRoutesImportBinding,
@@ -187,6 +188,16 @@ export const resolveSsrConfigGraphModule = (
 const isUniversalSpecifier = (specifier: string): boolean =>
   SSR_CONFIG_UNIVERSAL_MODULE_RE.test(specifier)
 
+const resolveLibraryInternalConfigImport = async (
+  specifier: string
+): Promise<string | undefined> => {
+  if (!specifier.startsWith('.')) return undefined
+  const normalized = specifier.replaceAll('\\', '/').replace(/\.[cm]?[jt]sx?$/, '')
+  const match = normalized.match(/(?:^|\/)src\/(index|SsrConfigRuntime)$/)
+  if (!match) return undefined
+  return resolveExistingModule(resolve(dirname(fileURLToPath(import.meta.url)), match[1]))
+}
+
 export const sourceImportsUniversalModules = async (source: string): Promise<boolean> => {
   await initEsModuleLexer
   const [imports] = parseEsModule(source)
@@ -335,7 +346,17 @@ export const createSsrConfigBoundaryPlugin = (
         resolveDir: args.resolveDir,
         pluginData: { vueSsrLiteConfigBoundary: true },
       })
-      if (resolved.errors.length) return resolved
+      if (resolved.errors.length) {
+        // Source fixtures can be copied to an isolated project directory while
+        // retaining their library-internal `../../src/index` import. Preserve
+        // that import's package identity instead of treating the copied path as
+        // a new consumer-relative module.
+        const libraryInternal = await resolveLibraryInternalConfigImport(args.path)
+        if (!libraryInternal) return resolved
+        recordResolution(graph, args.importer, args.path, libraryInternal, false)
+        recordImport(graph, args.importer, libraryInternal)
+        return { path: libraryInternal, external: false }
+      }
       if (resolved.path) {
         recordResolution(graph, args.importer, args.path, resolved.path, Boolean(resolved.external))
       }
@@ -533,8 +554,15 @@ export const collectApplicationDeclarationFiles = async (
   if (!isScriptModule(entryFile) && depth > 0) return { files: [], truncated: false }
   const files = depth > 0 ? [entryFile] : []
   let truncated = false
-  const routesSpecifiers = isScriptModule(entryFile)
-    ? await resolveApplicationRoutesImportSpecifiers(await readFile(entryFile, 'utf8'), entryFile)
+  const source = isScriptModule(entryFile) ? await readFile(entryFile, 'utf8') : ''
+  // A proven defineApplication() module is the terminal declaration node. Its
+  // route, component, CSS, and server-provider imports belong to other graphs
+  // and must not be reclassified as application declarations.
+  if (depth > 0 && source && (await isDefineApplicationModuleSource(source, entryFile))) {
+    return { files, truncated: false }
+  }
+  const routesSpecifiers = source
+    ? await resolveApplicationRoutesImportSpecifiers(source, entryFile)
     : []
   for (const specifier of await readRelativeSpecifiers(entryFile)) {
     if (routesSpecifiers.includes(specifier)) continue
