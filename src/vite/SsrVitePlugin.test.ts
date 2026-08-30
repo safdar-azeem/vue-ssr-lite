@@ -155,7 +155,6 @@ export default {
       render: 'spa',
       template: 'site.html',
       host: 'admin.test',
-      domain: { production: 'admin.test' },
     },
   ],
 }
