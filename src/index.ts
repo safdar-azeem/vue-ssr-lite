@@ -50,9 +50,9 @@ export type {
 export { useSeo } from './extensions/seo/useSeo'
 export { usePublicConfig } from './SsrPublicConfig'
 /** Authoritative public origin for application-owned absolute URLs. */
-export { useSiteOrigin } from './SsrRequestContext'
-export { useSsrDomain, type SsrDomainApi } from './SsrDomainRuntime'
-export { setResponseRedirect, setResponseStatus } from './SsrResponseStatus'
+export { useOrigin } from './SsrRequestContext'
+export { useDomain, type SsrDomainApi } from './SsrDomainRuntime'
+export { redirectTo, setHttpStatus } from './SsrResponseStatus'
 export type { SsrResponseRedirectOptions } from './SsrResponseStatus'
 
 const APPLICATION_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
