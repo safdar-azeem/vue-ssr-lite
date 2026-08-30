@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyRouteResponseStatus,
   applyRuntimeResponseStatus,
@@ -6,6 +6,7 @@ import {
   resetRouteResponseStatus,
   resolveResponseStatusForRoute,
   restoreResponseStatus,
+  setResponseStatus,
   snapshotResponseStatus,
   validateResponseStatus,
 } from './SsrResponseStatus'
@@ -16,6 +17,8 @@ const response = (): SsrResponseState => ({
   headers: {},
 })
 
+afterEach(() => vi.unstubAllGlobals())
+
 describe('response status validation', () => {
   it.each([200, 404, 503, 100, 599])('accepts %s', (status) => {
     expect(isValidResponseStatus(status)).toBe(true)
@@ -25,6 +28,17 @@ describe('response status validation', () => {
   it.each([0, -1, 999, Number.NaN, 404.5])('rejects %s', (status) => {
     expect(isValidResponseStatus(status)).toBe(false)
     expect(() => validateResponseStatus(status)).toThrow(/Invalid HTTP status/)
+  })
+
+  it('validates and ignores status updates in the browser', () => {
+    vi.stubGlobal('window', {})
+    expect(setResponseStatus(404)).toBe(404)
+    expect(() => setResponseStatus(302)).toThrow(/redirect/)
+    expect(() => setResponseStatus(0)).toThrow(/Invalid HTTP status/)
+  })
+
+  it('still requires a request context in Node', () => {
+    expect(() => setResponseStatus(404)).toThrow(/request context is not installed/)
   })
 
   it('gives runtime status precedence over route metadata', () => {
