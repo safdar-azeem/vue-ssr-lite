@@ -56,6 +56,40 @@ const mountClient = async (definition: Parameters<typeof createSsrApplication>[0
 }
 
 describe('reactive useSeo() in the browser', () => {
+  it('finishes async application initialization before the first browser navigation', async () => {
+    let initialized = false
+    let enteredBeforeInitialization = false
+    const created = await mountClient(
+      {
+        id: 'async-router-initialization',
+        root: defineComponent({ setup: () => () => h(RouterView) }),
+        routes: [
+          {
+            path: '/protected',
+            component: defineComponent({
+              setup: () => () => h('main', 'protected'),
+            }),
+            beforeEnter: () => {
+              if (!initialized) enteredBeforeInitialization = true
+            },
+          },
+        ],
+        install: async ({ router }) => {
+          await Promise.resolve()
+          router?.beforeEach(() => {
+            initialized = true
+          })
+        },
+      },
+      '/protected'
+    )
+
+    expect(created.router!.currentRoute.value.path).toBe('/protected')
+    expect(enteredBeforeInitialization).toBe(false)
+    created.hydration.dispose()
+    created.app.unmount()
+  })
+
   it('updates document.title when a Ref changes after mount', async () => {
     const title = ref('Initial')
     const created = await mountClient({
