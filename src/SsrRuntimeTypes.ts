@@ -320,7 +320,6 @@ export interface SsrServerOptions<TPublicConfig = unknown> {
   root?: string
   host?: string
   port?: number
-  role?: string
   trustProxy?: boolean
   clientOutDir?: string
   /** One deadline for the complete application request. Defaults to 15 seconds. */
