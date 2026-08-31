@@ -195,7 +195,7 @@ export const createSsrNavigationRuntime = (options: {
       redirectOriginId === active.transaction.id
     ) {
       if (options.diagnostics) {
-        console.warn(
+        console.debug(
           `[vue-ssr-lite] navigation #${active.transaction.id} recovered terminal ownership from ${hook} redirect ancestry.`,
           {
             to: to.fullPath,
