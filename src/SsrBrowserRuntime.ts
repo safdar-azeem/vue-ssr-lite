@@ -151,6 +151,9 @@ export const hydrateSsrApplication = async (
       }
     }
 
+    // The initial START_LOCATION navigation is intentionally outside browser
+    // loading UI. Server markup remains visible until this hydration mount;
+    // RouteSuspense and LoadingIndicator observe subsequent navigations only.
     created.app.mount(options.mountSelector ?? '#app')
     created.managedHead.hydrate(document.head)
     stateElement.remove()
@@ -240,6 +243,8 @@ export const mountSpaApplication = async <
     }
     const app = created.app
     const activeCreated = created
+    // The static index.html shell owns initial SPA feedback. Framework loading
+    // components mount only after middleware accepted the initial navigation.
     app.mount(options.mountSelector ?? '#app')
     activeCreated.managedHead.hydrate(document.head)
     document.getElementById('vue-ssr-lite-domain')?.remove()
