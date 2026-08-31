@@ -29,7 +29,7 @@ import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
       </header>
 
       <main>
-        <RouteSuspense :delay="120">
+        <RouteSuspense>
           <RouterView />
 
           <template #fallback>
