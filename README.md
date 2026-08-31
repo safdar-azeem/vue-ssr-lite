@@ -13,6 +13,7 @@ A lightweight SSR runtime for **Vue 3**.
 - Built-in SEO and head management
 - Route SEO with `meta.seo`
 - Route-level SSR/SPA with `meta.render`
+- Universal global and route middleware
 - Reactive page SEO with `useSeo()`
 - Canonical URLs, Open Graph, Twitter cards, and JSON-LD
 - HTTP status handling
@@ -318,6 +319,64 @@ export default ({ app }: AppContext) => {
 }
 ```
 
+# Middleware
+
+Use `defineMiddleware()` for small universal navigation checks and route data:
+
+```ts
+import { defineMiddleware } from 'vue-ssr-lite'
+
+export const authMiddleware = defineMiddleware(async (context) => {
+  const session = context.cookies.get('session')
+  if (!session) {
+    return {
+      path: '/login',
+      query: { redirect: context.to.fullPath },
+    }
+  }
+  return { props: { userName: 'john' } }
+})
+```
+
+Application-wide middleware is declared once in `server.ts` for a single app,
+or on the relevant `defineApplication()` in multi-app mode:
+
+```ts
+export default defineServer({
+  middleware: [loggerMiddleware],
+})
+```
+
+Route middleware uses direct function references:
+
+```ts
+{
+  path: '/dashboard',
+  component: DashboardPage,
+  meta: { middleware: [authMiddleware] },
+}
+```
+
+Global middleware runs first, followed by matched parent and child middleware.
+The same function runs once per target navigation. Middleware may be synchronous
+or async. Return nothing or `true` to continue, `false` to cancel, a normal Vue
+Router location to redirect, or `{ props }` to add props to the default component
+of the route that declared that middleware. Existing route props are composed,
+with later middleware values winning. Parent middleware applies to nested routes,
+but its props remain owned by the parent component.
+
+On a direct SSR request, a middleware redirect becomes a real HTTP redirect and
+the rejected component tree is not rendered. A direct SPA request still receives
+the SPA shell first; middleware starts with the browser application navigation.
+Use `context.redirect()` only for an explicit redirect status or intentional
+external full-document navigation.
+
+Middleware receives the current app/router, target and previous route, normalized
+cookies, domain, authoritative origin, public config, environment flag, and an
+abort signal. Global middleware configured in `server.ts` is statically projected
+into the browser definition, so its complete dependency graph must be universal
+and browser-safe.
+
 # SEO
 
 SEO is composed from:
@@ -620,6 +679,7 @@ import {
   redirectTo,
   setHttpStatus,
   defineExtension,
+  defineMiddleware,
 } from 'vue-ssr-lite'
 import type { AppContext } from 'vue-ssr-lite'
 ```
@@ -635,6 +695,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | `setHttpStatus`     | Set the current HTTP/page status                   |
 | `redirectTo`        | Set a validated server-rendered-request redirect   |
 | `defineExtension`   | Create an advanced runtime extension               |
+| `defineMiddleware`  | Create typed universal route middleware            |
 | `AppContext`        | Type for the `main.ts` initializer                 |
 
 ## `vue-ssr-lite/vite`
@@ -677,7 +738,7 @@ components
 
 `defineApplication()` may mention routes and SEO in `app.ts`. The compiler projects a client graph from `main`, `App.vue`, and the routes module. It does not import the complete server configuration into browser bundles.
 
-Five configuration fields are also universal: `extensions`, `router`,
+Six configuration fields are also universal: `extensions`, `middleware`, `router`,
 `scrollBehavior`, `createInitialState`, and `cleanup`. Core statically projects only
 those fields and their proven browser-safe dependencies. This boundary keeps SEO,
 sitemap, robots, endpoints, Node APIs, secrets, and other server-only imports out of
@@ -736,7 +797,7 @@ const analytics = defineExtension({
 ```
 
 Register extensions on `defineServer()` or `defineApplication()`, not in `main.ts`.
-Universal fields (`extensions`, `router`, `scrollBehavior`, `createInitialState`, `cleanup`)
+Universal fields (`extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, `cleanup`)
 follow the static projection contract above. Prefer defining an extension inline or
 in a dedicated `const`; `defineServer(factory())` and mutation-capable reference
 indirection are rejected because the server and browser definitions could silently
