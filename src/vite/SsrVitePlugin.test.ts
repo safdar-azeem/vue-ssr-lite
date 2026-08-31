@@ -201,7 +201,7 @@ export default {
 
     expect(config.resolve?.dedupe).not.toContain('@apollo/client')
     expect(config.resolve?.dedupe).not.toContain('vue-apollo-client')
-    expect(config.ssr?.external).not.toContain('@apollo/client')
+    expect(config.ssr?.external).toBeUndefined()
     expect(config.ssr?.noExternal).not.toContain('@apollo/client')
     expect(config.ssr?.noExternal).not.toContain('vue-apollo-client')
   })
