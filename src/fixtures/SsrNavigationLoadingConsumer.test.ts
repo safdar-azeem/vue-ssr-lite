@@ -2,7 +2,9 @@ import {
   cp,
   copyFile,
   mkdir,
+  mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -475,9 +477,8 @@ const linkDependency = async (
 }
 
 const prepareLinkedConsumer = async () => {
-  workspaceRoot = join(
-    tmpdir(),
-    `vue-ssr-lite-linked-navigation-${process.pid}-${Date.now()}`
+  workspaceRoot = await realpath(
+    await mkdtemp(join(tmpdir(), 'vue-ssr-lite-linked-navigation-'))
   )
   fixtureRoot = join(workspaceRoot, 'consumer')
   linkedPackageRoot = join(workspaceRoot, 'vue-ssr-lite')
@@ -524,6 +525,26 @@ const prepareLinkedConsumer = async () => {
     join(consumerNodeModules, '@vue'),
     { recursive: true }
   )
+  // The physical Vue compiler copies intentionally preserve the linked-package
+  // identity boundary. Link their non-Vue transitive dependencies so Node can
+  // execute the isolated compiler graph without falling back to the host tree.
+  for (const dependency of [
+    '@babel',
+    '@jridgewell',
+    'entities',
+    'estree-walker',
+    'magic-string',
+    'nanoid',
+    'picocolors',
+    'postcss',
+    'source-map-js',
+  ]) {
+    await linkDependency(
+      consumerNodeModules,
+      dependency,
+      join(repositoryRoot, 'node_modules', dependency)
+    )
+  }
   await linkDependency(
     consumerNodeModules,
     'vite',
@@ -1066,6 +1087,10 @@ describe('linked-package real SFC navigation loading consumer', () => {
 
     expect(documentRequests).toEqual(['/'])
     if (browserExecutable) {
+      // Undici's Node WebSocket requires Node's Event constructor. The JSDOM
+      // navigation phase is complete, so restore host globals before CDP.
+      restoreBrowserGlobals?.()
+      restoreBrowserGlobals = undefined
       const requestOffset = documentRequests.length
       const browserResult = await runChromiumNavigationRegression(
         browserExecutable,
