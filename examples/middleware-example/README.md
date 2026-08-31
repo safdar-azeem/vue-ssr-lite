@@ -77,7 +77,10 @@ import { authMiddleware } from './middleware/authMiddleware'
 }
 ```
 
-Middleware declared on a parent route also applies to its matched children. Therefore `/dashboard/nested` is protected by the middleware declared on `/dashboard`.
+Route middleware runs when its route record is entered. The middleware on
+`/dashboard` therefore protects direct entry to `/dashboard/nested`, but it does
+not rerun when navigation moves from `/dashboard` to `/dashboard/nested` while
+the Dashboard parent remains active.
 
 ## `defineMiddleware()`
 
@@ -86,11 +89,20 @@ Middleware is normal application code and may be async:
 ```ts
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    signal.addEventListener('abort', () => {
+    if (signal.aborted) {
+      reject(signal.reason)
+      return
+    }
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = () => {
       clearTimeout(timer)
       reject(signal.reason)
-    }, { once: true })
+    }
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
   })
 
 export const authMiddleware = defineMiddleware(async (context) => {
@@ -194,15 +206,18 @@ Normal internal redirects do **not** require a `{ redirect: ... }` wrapper. This
 For `/dashboard/nested`:
 
 - `authMiddleware` is declared by `/dashboard`.
-- The middleware still runs for the nested route.
-- Its returned props belong to `DashboardPage.vue`.
+- It runs when the Dashboard route record is entered.
+- Its returned props belong to `DashboardPage.vue` and remain accepted while
+  that parent stays active.
+- Navigating between Dashboard descendants does not rerun it or clear those
+  accepted parent props.
 - They are not automatically injected into `DashboardNestedPage.vue`.
 
 This keeps nested-route inheritance predictable without changing the meaning of route ownership.
 
 ## Execution order
 
-For `/dashboard/nested`:
+When `/dashboard/nested` is entered from outside the Dashboard branch:
 
 ```text
 request or browser navigation
@@ -211,18 +226,31 @@ global middleware
   ↓
 loggerMiddleware
   ↓
-matched parent route middleware
+entered parent route middleware
   ↓
 authMiddleware
   ↓
-matched child route middleware, if any
+entered child route middleware, if any
   ↓
 redirect OR continue
   ↓
 render / confirm navigation
 ```
 
-Core collects matched route middleware parent-to-child and avoids executing the same middleware function more than once for one logical navigation.
+Global middleware runs for every navigation. Core collects route middleware only
+from route records entered by that navigation, parent-to-child, and avoids
+executing the same middleware function more than once for one logical navigation.
+
+```text
+/about → /dashboard
+authMiddleware runs
+
+/dashboard → /dashboard/nested
+loggerMiddleware runs; authMiddleware does not rerun
+
+/dashboard/nested → /about → /dashboard/nested
+authMiddleware runs again
+```
 
 During SSR, middleware executes once for the logical request even if Core performs internal render reconciliation passes.
 
