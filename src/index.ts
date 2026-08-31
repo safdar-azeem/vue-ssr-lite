@@ -1,7 +1,20 @@
 import './extensions/seo/types'
+import './middleware/SsrMiddlewareTypes'
 import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 
 export { defineExtension } from './core/extensions/defineExtension'
+export { defineMiddleware } from './middleware/defineMiddleware'
+export type {
+  Middleware,
+  MiddlewareContext,
+  MiddlewareCookieOptions,
+  MiddlewareCookies,
+  MiddlewarePropsResult,
+  MiddlewareRedirectOptions,
+  MiddlewareRedirectResult,
+  MiddlewareRedirectStatus,
+  MiddlewareResult,
+} from './middleware/SsrMiddlewareTypes'
 export type {
   ExtensionContext,
   ExtensionDefinition,
