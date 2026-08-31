@@ -1,4 +1,9 @@
 import type { App } from 'vue'
+import {
+  isNavigationFailure,
+  NavigationFailureType,
+  START_LOCATION,
+} from 'vue-router'
 import { createSsrApplication } from './SsrApplicationRuntime'
 import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
@@ -44,7 +49,10 @@ const browserRequest = <TPublicConfig>(
   signal: AbortSignal
 ): SsrRenderRequest<TPublicConfig> => ({
   requestId: `${prefix}-${Date.now().toString(36)}`,
-  url,
+  // Browser callers may provide a Vue Router-style relative target. Request
+  // context consumers require an absolute URL, while navigation continues to
+  // use the original target passed to mountSpaApplication().
+  url: new URL(url, window.location.href).href,
   host: window.location.host,
   protocol: window.location.protocol === 'https:' ? 'https' : 'http',
   method: 'GET',
@@ -110,14 +118,37 @@ export const hydrateSsrApplication = async (
       hydrationState,
     })
     if (created.router) {
-      await created.router.push(
+      const target =
         `${window.location.pathname}${window.location.search}${window.location.hash}`
+      const targetFullPath = created.router.resolve(target).fullPath
+      const current = created.router.currentRoute.value
+      const middlewareOutcomeBeforePush =
+        created.middleware?.navigationOutcome(targetFullPath)
+      const automaticNavigationHandled =
+        Boolean(middlewareOutcomeBeforePush) ||
+        (current !== START_LOCATION &&
+          (current.fullPath === targetFullPath ||
+            current.redirectedFrom?.fullPath === targetFullPath))
+      const navigationFailure = automaticNavigationHandled
+        ? undefined
+        : await created.router.push(target)
+      const middlewareOutcome =
+        created.middleware?.navigationOutcome(targetFullPath)
+      const navigationAborted = isNavigationFailure(
+        navigationFailure,
+        NavigationFailureType.aborted
       )
-      await created.router.isReady()
-      resolveResponseStatusForRoute(
-        created.context.response,
-        created.router.currentRoute.value
-      )
+      if (!middlewareOutcome && !navigationAborted) {
+        await created.router.isReady()
+        resolveResponseStatusForRoute(
+          created.context.response,
+          created.router.currentRoute.value
+        )
+      } else if (middlewareOutcome === 'redirect') {
+        controller.abort()
+        created.hydration.dispose()
+        return
+      }
     }
 
     created.app.mount(options.mountSelector ?? '#app')
@@ -174,15 +205,38 @@ export const mountSpaApplication = async <
       request,
     })
     if (created.router) {
-      await created.router.push(
+      const target =
         options.url ??
-          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        `${window.location.pathname}${window.location.search}${window.location.hash}`
+      const targetFullPath = created.router.resolve(target).fullPath
+      const current = created.router.currentRoute.value
+      const middlewareOutcomeBeforePush =
+        created.middleware?.navigationOutcome(targetFullPath)
+      const automaticNavigationHandled =
+        Boolean(middlewareOutcomeBeforePush) ||
+        (current !== START_LOCATION &&
+          (current.fullPath === targetFullPath ||
+            current.redirectedFrom?.fullPath === targetFullPath))
+      const navigationFailure = automaticNavigationHandled
+        ? undefined
+        : await created.router.push(target)
+      const middlewareOutcome =
+        created.middleware?.navigationOutcome(targetFullPath)
+      const navigationAborted = isNavigationFailure(
+        navigationFailure,
+        NavigationFailureType.aborted
       )
-      await created.router.isReady()
-      resolveResponseStatusForRoute(
-        created.context.response,
-        created.router.currentRoute.value
-      )
+      if (!middlewareOutcome && !navigationAborted) {
+        await created.router.isReady()
+        resolveResponseStatusForRoute(
+          created.context.response,
+          created.router.currentRoute.value
+        )
+      } else if (middlewareOutcome === 'redirect') {
+        controller.abort()
+        created.hydration.dispose()
+        return { app: created.app, unmount: () => undefined }
+      }
     }
     const app = created.app
     const activeCreated = created
