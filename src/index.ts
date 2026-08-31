@@ -4,6 +4,7 @@ import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 
 export { defineExtension } from './core/extensions/defineExtension'
 export { defineMiddleware } from './middleware/defineMiddleware'
+export { LoadingIndicator, RouteSuspense } from './navigation/index'
 export type {
   Middleware,
   MiddlewareContext,
