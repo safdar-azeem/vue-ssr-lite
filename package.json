@@ -1,16 +1,21 @@
 {
   "name": "vue-ssr-lite",
-  "version": "1.0.0-rc.7",
+  "version": "1.0.0-rc.8",
   "description": "A Server-Side Rendering (SSR) runtime for Vue 3",
   "license": "MIT",
   "type": "module",
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "sideEffects": false,
   "author": "safdar-azeem",
   "repository": "https://github.com/safdar-azeem/vue-ssr-lite",
+  "homepage": "https://github.com/safdar-azeem/vue-ssr-lite#readme",
+  "bugs": "https://github.com/safdar-azeem/vue-ssr-lite/issues",
   "files": [
     "dist",
-    "docs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "bin": {
     "vue-ssr-lite": "./dist/cli.mjs"
@@ -18,19 +23,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
     },
     "./client": {
       "types": "./dist/client.d.ts",
-      "import": "./dist/client.mjs"
+      "import": "./dist/client.mjs",
+      "default": "./dist/client.mjs"
     },
     "./server": {
       "types": "./dist/server.d.ts",
-      "import": "./dist/server.mjs"
+      "import": "./dist/server.mjs",
+      "default": "./dist/server.mjs"
     },
     "./vite": {
       "types": "./dist/vite.d.ts",
-      "import": "./dist/vite.mjs"
+      "import": "./dist/vite.mjs",
+      "default": "./dist/vite.mjs"
     }
   },
   "scripts": {
@@ -44,7 +53,7 @@
     "release:major": "npm version major && npm publish --tag latest"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "dependencies": {
     "es-module-lexer": "^2.3.1",
