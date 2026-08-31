@@ -32,7 +32,7 @@ export interface MiddlewareRedirectOptions {
   status?: MiddlewareRedirectStatus
 }
 
-/** @internal Created only by `context.redirect()`. */
+/** Opaque redirect result created only by `context.redirect()`. */
 export interface MiddlewareRedirectResult {
   readonly __vueSsrLiteMiddlewareRedirect: true
   readonly location: RouteLocationRaw
