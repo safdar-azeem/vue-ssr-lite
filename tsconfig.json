@@ -6,7 +6,7 @@
     "strict": true,
     "isolatedModules": true,
     "declaration": true,
-    "declarationMap": true,
+    "declarationMap": false,
     "sourceMap": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
