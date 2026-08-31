@@ -616,7 +616,11 @@ export const handleSsrRequest = async (
       }
       return {
         statusCode: redirect.statusCode ?? 302,
-        headers: { location: target.href, 'cache-control': 'no-store' },
+        headers: {
+          ...rendered.response.headers,
+          location: target.href,
+          'cache-control': 'no-store',
+        },
       }
     }
     const renderedAssets = runtime.production
