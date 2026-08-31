@@ -283,8 +283,16 @@ const runChromiumNavigationRegression = async (
       'Chromium did not show the slow middleware fallback.'
     )
     await waitForExpression(
-      `Boolean(document.querySelector('.dashboard-page')) && ${noLoading}`,
+      `document.querySelector('.dashboard-page')?.dataset.authRuns === '1' && ` +
+        noLoading,
       'Chromium authenticated Dashboard navigation did not settle.'
+    )
+    await click('.dashboard-nested-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.dashboard-nested-page')) && ` +
+        `document.querySelector('.dashboard-page')?.dataset.authRuns === '1' && ` +
+        noLoading,
+      'Chromium nested Dashboard navigation reran parent middleware or left loading active.'
     )
     await click('.about-link')
     await waitForExpression(
@@ -313,6 +321,17 @@ const runChromiumNavigationRegression = async (
     await waitForExpression(
       `Boolean(document.querySelector('.login-page')) && ${noLoading}`,
       'Chromium middleware redirect did not settle on Login.'
+    )
+    await click('.dashboard-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton'))`,
+      'Chromium did not show loading for the redirect back to current Login.'
+    )
+    await waitForExpression(
+      `location.pathname === '/login' && ` +
+        `location.search === '?redirect=/dashboard' && ` +
+        `Boolean(document.querySelector('.login-page')) && ${noLoading}`,
+      'Chromium redirect back to current Login did not settle loading.'
     )
     await evaluate('history.back()')
     await waitForExpression(
@@ -747,6 +766,59 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(replaced).not.toHaveBeenCalled()
     expect(jsdomErrors).toEqual([])
 
+    const dashboard = dom.window.document.querySelector('.dashboard-page')
+    const nestedLink = dom.window.document.querySelector<HTMLAnchorElement>(
+      '.dashboard-nested-link'
+    )!
+    let nestedLoadingAppeared = false
+    const nestedObserver = new dom.window.MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (
+            node instanceof dom!.window.Element &&
+            (node.matches('.page-skeleton, .vssl-loading-indicator') ||
+              node.querySelector('.page-skeleton, .vssl-loading-indicator'))
+          ) {
+            nestedLoadingAppeared = true
+          }
+        }
+      }
+    })
+    nestedObserver.observe(dom.window.document.body, {
+      childList: true,
+      subtree: true,
+    })
+    const documentRequestCount = documentRequests.length
+    const nestedClick = new dom.window.MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    })
+    nestedLink.dispatchEvent(nestedClick)
+    expect(nestedClick.defaultPrevented).toBe(true)
+    await waitFor(
+      () =>
+        Boolean(
+          dom!.window.document.querySelector('.dashboard-nested-page')
+        ),
+      'The nested Dashboard route did not render client-side.'
+    )
+    await waitFor(
+      () =>
+        !dom!.window.document.querySelector('.page-skeleton') &&
+        !dom!.window.document.querySelector('.vssl-loading-indicator'),
+      'The nested Dashboard navigation left loading active.'
+    )
+    nestedObserver.disconnect()
+    expect(nestedLoadingAppeared).toBe(false)
+    expect(dom.window.document.querySelector('.dashboard-page')).toBe(dashboard)
+    expect(dashboard?.getAttribute('data-auth-runs')).toBe('1')
+    expect(dashboard?.textContent).toContain('john')
+    expect(dashboard?.textContent).toContain('admin')
+    expect(documentRequests).toHaveLength(documentRequestCount)
+    expect(assigned).not.toHaveBeenCalled()
+    expect(replaced).not.toHaveBeenCalled()
+
     const aboutClick = new dom.window.MouseEvent('click', {
       bubbles: true,
       cancelable: true,
@@ -862,6 +934,32 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(loadingDisappearedDuringRedirect).toBe(false)
     expect(dom.window.location.pathname).toBe('/login')
     expect(dom.window.location.search).toBe('?redirect=/dashboard')
+    expect(assigned).not.toHaveBeenCalled()
+    expect(replaced).not.toHaveBeenCalled()
+
+    const currentLogin = dom.window.document.querySelector('.login-page')
+    const redirectToCurrentDocumentRequests = documentRequests.length
+    const redirectToCurrentClick = new dom.window.MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    })
+    dashboardLink.dispatchEvent(redirectToCurrentClick)
+    expect(redirectToCurrentClick.defaultPrevented).toBe(true)
+    await waitFor(
+      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
+      'The redirect back to current Login did not show its fallback.'
+    )
+    await waitFor(
+      () =>
+        !dom!.window.document.querySelector('.page-skeleton') &&
+        !dom!.window.document.querySelector('.vssl-loading-indicator'),
+      'The redirect back to current Login did not settle its loading UI.'
+    )
+    expect(dom.window.location.pathname).toBe('/login')
+    expect(dom.window.location.search).toBe('?redirect=/dashboard')
+    expect(dom.window.document.querySelector('.login-page')).toBe(currentLogin)
+    expect(documentRequests).toHaveLength(redirectToCurrentDocumentRequests)
     expect(assigned).not.toHaveBeenCalled()
     expect(replaced).not.toHaveBeenCalled()
 
