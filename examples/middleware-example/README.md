@@ -1,6 +1,6 @@
 # vue-ssr-lite Middleware Example
 
-This repository demonstrates the proposed `vue-ssr-lite` middleware API with a deliberately small mental model.
+This example demonstrates the `vue-ssr-lite` middleware API with a deliberately small mental model.
 
 There are only two places where application developers declare middleware:
 
@@ -91,7 +91,7 @@ interface MiddlewareContext {
   origin: string
   publicConfig: unknown
 
-  signal?: AbortSignal
+  signal: AbortSignal
 
   redirect(
     location: string | RouteLocationRaw,
@@ -177,13 +177,13 @@ redirect OR continue
 render / confirm navigation
 ```
 
-Core should collect matched route middleware parent-to-child and avoid executing the same middleware function more than once for one logical navigation.
+Core collects matched route middleware parent-to-child and avoids executing the same middleware function more than once for one logical navigation.
 
-During SSR, middleware should execute once for the logical request even if Core performs internal render reconciliation passes.
+During SSR, middleware executes once for the logical request even if Core performs internal render reconciliation passes.
 
 ## SSR redirects
 
-A middleware redirect during SSR should become an actual HTTP redirect response rather than merely changing the internal Vue Router location.
+A middleware redirect during SSR becomes an actual HTTP redirect response rather than merely changing the internal Vue Router location.
 
 In the browser, the same middleware result becomes a normal Vue Router redirect.
 
@@ -227,4 +227,4 @@ A real application can replace the fake cookie check with its own authentication
 
 ## Important
 
-This repository demonstrates the proposed API shape. It requires the matching middleware feature to exist in `vue-ssr-lite` before it can run against the published package.
+Global middleware used from `server.ts` is universal code, so it and its dependencies must remain browser-safe. Route middleware already belongs to the route module's universal graph.
