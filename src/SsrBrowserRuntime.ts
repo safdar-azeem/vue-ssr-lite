@@ -118,36 +118,40 @@ export const hydrateSsrApplication = async (
       hydrationState,
     })
     if (created.router) {
-      const target =
-        `${window.location.pathname}${window.location.search}${window.location.hash}`
-      const targetFullPath = created.router.resolve(target).fullPath
-      const current = created.router.currentRoute.value
-      const middlewareOutcomeBeforePush =
-        created.middleware?.navigationOutcome(targetFullPath)
-      const automaticNavigationHandled =
-        Boolean(middlewareOutcomeBeforePush) ||
-        (current !== START_LOCATION &&
-          (current.fullPath === targetFullPath ||
-            current.redirectedFrom?.fullPath === targetFullPath))
-      const navigationFailure = automaticNavigationHandled
-        ? undefined
-        : await created.router.push(target)
-      const middlewareOutcome =
-        created.middleware?.navigationOutcome(targetFullPath)
-      const navigationAborted = isNavigationFailure(
-        navigationFailure,
-        NavigationFailureType.aborted
-      )
-      if (!middlewareOutcome && !navigationAborted) {
-        await created.router.isReady()
-        resolveResponseStatusForRoute(
-          created.context.response,
-          created.router.currentRoute.value
+      try {
+        const target =
+          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        const targetFullPath = created.router.resolve(target).fullPath
+        const current = created.router.currentRoute.value
+        const middlewareOutcomeBeforePush =
+          created.middleware?.navigationOutcome(targetFullPath)
+        const automaticNavigationHandled =
+          Boolean(middlewareOutcomeBeforePush) ||
+          (current !== START_LOCATION &&
+            (current.fullPath === targetFullPath ||
+              current.redirectedFrom?.fullPath === targetFullPath))
+        const navigationFailure = automaticNavigationHandled
+          ? undefined
+          : await created.router.push(target)
+        const middlewareOutcome =
+          created.middleware?.navigationOutcome(targetFullPath)
+        const navigationAborted = isNavigationFailure(
+          navigationFailure,
+          NavigationFailureType.aborted
         )
-      } else if (middlewareOutcome === 'redirect') {
-        controller.abort()
-        created.hydration.dispose()
-        return
+        if (!middlewareOutcome && !navigationAborted) {
+          await created.router.isReady()
+          resolveResponseStatusForRoute(
+            created.context.response,
+            created.router.currentRoute.value
+          )
+        } else if (middlewareOutcome === 'redirect') {
+          controller.abort()
+          created.hydration.dispose()
+          return
+        }
+      } finally {
+        created.middleware?.completeBrowserBootstrap()
       }
     }
 
@@ -208,37 +212,41 @@ export const mountSpaApplication = async <
       request,
     })
     if (created.router) {
-      const target =
-        options.url ??
-        `${window.location.pathname}${window.location.search}${window.location.hash}`
-      const targetFullPath = created.router.resolve(target).fullPath
-      const current = created.router.currentRoute.value
-      const middlewareOutcomeBeforePush =
-        created.middleware?.navigationOutcome(targetFullPath)
-      const automaticNavigationHandled =
-        Boolean(middlewareOutcomeBeforePush) ||
-        (current !== START_LOCATION &&
-          (current.fullPath === targetFullPath ||
-            current.redirectedFrom?.fullPath === targetFullPath))
-      const navigationFailure = automaticNavigationHandled
-        ? undefined
-        : await created.router.push(target)
-      const middlewareOutcome =
-        created.middleware?.navigationOutcome(targetFullPath)
-      const navigationAborted = isNavigationFailure(
-        navigationFailure,
-        NavigationFailureType.aborted
-      )
-      if (!middlewareOutcome && !navigationAborted) {
-        await created.router.isReady()
-        resolveResponseStatusForRoute(
-          created.context.response,
-          created.router.currentRoute.value
+      try {
+        const target =
+          options.url ??
+          `${window.location.pathname}${window.location.search}${window.location.hash}`
+        const targetFullPath = created.router.resolve(target).fullPath
+        const current = created.router.currentRoute.value
+        const middlewareOutcomeBeforePush =
+          created.middleware?.navigationOutcome(targetFullPath)
+        const automaticNavigationHandled =
+          Boolean(middlewareOutcomeBeforePush) ||
+          (current !== START_LOCATION &&
+            (current.fullPath === targetFullPath ||
+              current.redirectedFrom?.fullPath === targetFullPath))
+        const navigationFailure = automaticNavigationHandled
+          ? undefined
+          : await created.router.push(target)
+        const middlewareOutcome =
+          created.middleware?.navigationOutcome(targetFullPath)
+        const navigationAborted = isNavigationFailure(
+          navigationFailure,
+          NavigationFailureType.aborted
         )
-      } else if (middlewareOutcome === 'redirect') {
-        controller.abort()
-        created.hydration.dispose()
-        return { app: created.app, unmount: () => undefined }
+        if (!middlewareOutcome && !navigationAborted) {
+          await created.router.isReady()
+          resolveResponseStatusForRoute(
+            created.context.response,
+            created.router.currentRoute.value
+          )
+        } else if (middlewareOutcome === 'redirect') {
+          controller.abort()
+          created.hydration.dispose()
+          return { app: created.app, unmount: () => undefined }
+        }
+      } finally {
+        created.middleware?.completeBrowserBootstrap()
       }
     }
     const app = created.app
