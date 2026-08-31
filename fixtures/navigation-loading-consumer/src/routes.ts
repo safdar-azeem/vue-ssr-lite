@@ -1,6 +1,7 @@
 import AboutPage from './AboutPage.vue'
 import CancelledPage from './CancelledPage.vue'
 import DashboardPage from './DashboardPage.vue'
+import DashboardNestedPage from './DashboardNestedPage.vue'
 import HomePage from './HomePage.vue'
 import LoginPage from './LoginPage.vue'
 import SettingsPage from './SettingsPage.vue'
@@ -20,6 +21,12 @@ export const routes = [
     path: '/dashboard',
     component: DashboardPage,
     meta: { middleware: [authMiddleware] },
+    children: [
+      {
+        path: 'nested',
+        component: DashboardNestedPage,
+      },
+    ],
   },
   { path: '/login', component: LoginPage },
 ]
