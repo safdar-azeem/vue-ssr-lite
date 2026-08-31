@@ -33,6 +33,10 @@ A lightweight SSR runtime for **Vue 3**.
 npm install vue-ssr-lite vue-router
 ```
 
+Requires Node `^20.19.0 || >=22.12.0` and an existing Vue 3 + Vite
+application. Vue, Vue Router, and Vite remain host-owned peer dependencies; the
+package does not install a private framework runtime.
+
 # Minimal Setup
 
 ## 1. Add the Vite plugin
