@@ -4,6 +4,7 @@ import {
   snapshotSsrReconciliationState,
 } from './SsrApplicationRuntime'
 import { createSsrResolutionController } from './SsrRequestResolution'
+import { createSsrMiddlewareExecutionController } from './middleware/SsrMiddlewareRuntime'
 import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
@@ -114,6 +115,10 @@ export const renderSsrApplication = async <
   // One resolution controller is shared across every pass so tracked work and
   // pass requests accumulate coherently while the app is recreated per pass.
   const resolution = createSsrResolutionController(true)
+  const middlewareController = createSsrMiddlewareExecutionController({
+    server: true,
+    request,
+  })
 
   let contextReadyAt = startedAt
   let routeReadyAt = startedAt
@@ -128,6 +133,7 @@ export const renderSsrApplication = async <
   let teleports: Record<string, string> = {}
   let renderedModules: string[] = []
   let passes = 0
+  let middlewareEarlyExit = false
   let deadlineSnapshot:
     | {
         application: TApplicationState
@@ -179,6 +185,7 @@ export const renderSsrApplication = async <
           pass === 0 ? undefined : carriedApplication,
         resumeResponseState: pass === 0 ? undefined : carriedResponse,
         resolution,
+        middlewareController,
       })
       throwIfRequestAborted(request.signal)
       if (pass === 0) contextReadyAt = now()
@@ -186,6 +193,16 @@ export const renderSsrApplication = async <
       if (created.router) {
         const url = new URL(request.url)
         await created.router.push(`${url.pathname}${url.search}${url.hash}`)
+        if (
+          created.context.response.redirect ||
+          middlewareController.navigationOutcome()
+        ) {
+          routeReadyAt = now()
+          renderedAt = routeReadyAt
+          middlewareEarlyExit = true
+          finalized = true
+          break
+        }
         await created.router.isReady()
         throwIfRequestAborted(request.signal)
         resolveResponseStatusForRoute(
@@ -288,7 +305,7 @@ export const renderSsrApplication = async <
       deadlineSnapshot?.head ??
       snapshotSsrReconciliationState(created.managedHead.collect())
 
-    if (diagnosticsEnabled) {
+    if (diagnosticsEnabled && !middlewareEarlyExit) {
       reportDiagnostics(
         options.logger,
         request.requestId,
@@ -369,5 +386,6 @@ export const renderSsrApplication = async <
       }
     }
     resolution.dispose()
+    middlewareController.dispose()
   }
 }
