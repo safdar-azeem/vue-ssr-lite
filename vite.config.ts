@@ -10,6 +10,10 @@ export default defineConfig({
       entry: {
         index: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/index.ts'),
         client: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/client.ts'),
+        'internal-ssr-renderer': resolve(
+          fileURLToPath(new URL('.', import.meta.url)),
+          'src/SsrRenderRuntime.ts'
+        ),
         server: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/server.ts'),
         vite: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/vite.ts'),
         cli: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/cli/SsrCli.ts'),
