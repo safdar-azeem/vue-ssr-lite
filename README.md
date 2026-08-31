@@ -44,7 +44,7 @@ import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 
 export default defineConfig({
-  plugins: [vue(), vueSsrLite()],
+  plugins: [vueSsrLite(), vue()],
 })
 ```
 
@@ -377,6 +377,83 @@ abort signal. Global middleware configured in `server.ts` is statically projecte
 into the browser definition, so its complete dependency graph must be universal
 and browser-safe.
 
+Middleware should primarily handle navigation decisions such as authentication,
+authorization, workspace resolution, redirects, and small route prerequisites.
+Normal page data usually belongs in the page's query or data layer. When a valid
+navigation check is async, it automatically participates in navigation loading.
+
+# Navigation Loading
+
+Wrap a route outlet to give that part of the page a custom delayed fallback:
+
+```vue
+<script setup lang="ts">
+import { RouteSuspense } from 'vue-ssr-lite'
+</script>
+
+<template>
+  <AppLayout>
+    <Sidebar />
+    <Header />
+
+    <RouteSuspense :delay="120">
+      <RouterView />
+
+      <template #fallback>
+        <PageSkeleton />
+      </template>
+    </RouteSuspense>
+  </AppLayout>
+</template>
+```
+
+`RouteSuspense` follows Vue Router automatically, including async middleware,
+redirects, cancellation, other guards, and route component resolution. There
+is no manual pending state. The current page remains mounted while navigation
+is pending, and successful navigation loading settles after Vue has had a DOM
+update tick to commit the accepted route. Only the wrapped route area exposes
+the fallback, so persistent layout such as the sidebar and header stays in
+place. Nested boundaries automatically select the closest outlet whose matched
+route record is changing. Native Vue `<Suspense>` remains responsible for
+arbitrary component-level async `setup()` and data dependencies.
+
+The boundary containers use layout-transparent `display: contents` while
+inactive and become a positioned loading surface only while a supplied
+fallback covers the route area.
+
+The fallback is optional and entirely application-owned. Quick navigations that
+finish before the delay do not flash it. For a simple global bar, use the optional
+CSS-animated indicator alone or together with a route fallback:
+
+```vue
+<script setup lang="ts">
+import { LoadingIndicator } from 'vue-ssr-lite'
+</script>
+
+<template>
+  <LoadingIndicator :delay="120" />
+  <RouterView />
+</template>
+```
+
+SSR renders the accepted route content directly and hydration does not show a
+loader for that already-rendered page. A direct SPA load happens before Vue is
+mounted, so keep a small static shell fallback in `index.html` for initial boot:
+
+```html
+<div id="app"></div>
+<div class="initial-loader">Loading application…</div>
+
+<style>
+  #app:not(:empty) + .initial-loader {
+    display: none;
+  }
+</style>
+```
+
+After mount, `RouteSuspense` and `LoadingIndicator` own subsequent browser
+navigation feedback.
+
 # SEO
 
 SEO is composed from:
@@ -680,6 +757,8 @@ import {
   setHttpStatus,
   defineExtension,
   defineMiddleware,
+  RouteSuspense,
+  LoadingIndicator,
 } from 'vue-ssr-lite'
 import type { AppContext } from 'vue-ssr-lite'
 ```
@@ -696,6 +775,8 @@ import type { AppContext } from 'vue-ssr-lite'
 | `redirectTo`        | Set a validated server-rendered-request redirect   |
 | `defineExtension`   | Create an advanced runtime extension               |
 | `defineMiddleware`  | Create typed universal route middleware            |
+| `RouteSuspense`     | Add a delayed fallback around a changing route area |
+| `LoadingIndicator`  | Show an optional delayed global navigation bar      |
 | `AppContext`        | Type for the `main.ts` initializer                 |
 
 ## `vue-ssr-lite/vite`
