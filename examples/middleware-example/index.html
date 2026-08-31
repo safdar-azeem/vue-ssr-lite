@@ -4,8 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simple Middleware Example</title>
+    <style>
+      .initial-loader {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+        color: #475569;
+        font: 600 14px/1.5 system-ui, sans-serif;
+      }
+
+      #app:not(:empty) + .initial-loader {
+        display: none;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
+    <div class="initial-loader">Loading application…</div>
   </body>
 </html>
