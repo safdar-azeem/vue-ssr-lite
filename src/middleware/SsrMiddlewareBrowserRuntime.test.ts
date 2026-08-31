@@ -49,6 +49,13 @@ const waitForVisualLoading = async (delay = 0) => {
   await nextTick()
 }
 
+const waitForSuccessfulNavigationUi = async () => {
+  // Successful navigation settles after the route's DOM update. That settle
+  // schedules the loading components' own render update for the following tick.
+  await nextTick()
+  await nextTick()
+}
+
 describe('browser middleware navigation', () => {
   let dispose: (() => void) | undefined
 
@@ -255,7 +262,7 @@ describe('browser middleware navigation', () => {
 
     gate.resolve()
     await navigationSettled
-    await nextTick()
+    await waitForSuccessfulNavigationUi()
 
     expect(navigationFailure).toBeUndefined()
     expect(mountedRouter.currentRoute.value.path).toBe('/dashboard')
@@ -797,7 +804,7 @@ describe('browser middleware navigation', () => {
 
     gate.resolve()
     await navigation
-    await nextTick()
+    await waitForSuccessfulNavigationUi()
     expect(mount.querySelector('.page-loader')).toBeNull()
     expect(mount.textContent).toContain('Dashboard')
   })
