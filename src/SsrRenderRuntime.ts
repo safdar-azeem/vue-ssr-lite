@@ -389,3 +389,6 @@ export const renderSsrApplication = async <
     middlewareController.dispose()
   }
 }
+
+/** @internal SSR renderer bound to the same module graph as an application. */
+export type SsrApplicationRenderer = typeof renderSsrApplication
