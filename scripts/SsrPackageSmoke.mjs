@@ -9,6 +9,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises'
@@ -16,12 +17,21 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import {
+  assertInstalledArtifactHygiene,
+  assertPackedArtifact,
+  assertPublicApiChecks,
+  writePublicApiChecks,
+} from './SsrPackageArtifact.mjs'
 
 const execFile = promisify(execFileCallback)
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const consumerVersions = {
+  babelTypes: process.env.SSR_SMOKE_BABEL_TYPES_VERSION || '7.29.7',
   pluginVue: process.env.SSR_SMOKE_PLUGIN_VUE_VERSION || '6.0.1',
   jsdom: process.env.SSR_SMOKE_JSDOM_VERSION || '29.0.2',
+  nodeTypes: process.env.SSR_SMOKE_NODE_TYPES_VERSION || '24.10.1',
+  typescript: process.env.SSR_SMOKE_TYPESCRIPT_VERSION || '5.9.3',
   vite: process.env.SSR_SMOKE_VITE_VERSION || '7.3.6',
   vue: process.env.SSR_SMOKE_VUE_VERSION || '3.5.40',
   vueRouter: process.env.SSR_SMOKE_VUE_ROUTER_VERSION || '4.6.4',
@@ -44,6 +54,39 @@ const pathExists = async (path) => {
   }
 }
 
+let npmCliPath
+const resolveNpmCliPath = async () => {
+  if (npmCliPath) return npmCliPath
+  const nodeDirectory = dirname(await realpath(process.execPath))
+  const environmentCli = [
+    process.env.SSR_SMOKE_NPM_CLI,
+    process.env.npm_execpath,
+  ].find((candidate) => candidate && /(?:^|[\\/])npm-cli\.js$/i.test(candidate))
+  const pathDirectories = (process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':')
+  const candidates = [
+    environmentCli,
+    join(nodeDirectory, 'node_modules/npm/bin/npm-cli.js'),
+    resolve(nodeDirectory, '../lib/node_modules/npm/bin/npm-cli.js'),
+    ...pathDirectories.flatMap((directory) => [
+      join(directory, 'node_modules/npm/bin/npm-cli.js'),
+      resolve(directory, '../lib/node_modules/npm/bin/npm-cli.js'),
+    ]),
+  ].filter(Boolean)
+
+  for (const candidate of new Set(candidates)) {
+    if (await pathExists(candidate)) {
+      npmCliPath = await realpath(candidate)
+      return npmCliPath
+    }
+  }
+  throw new Error(
+    'Could not locate npm-cli.js for the packed release smoke. Run through npm or set SSR_SMOKE_NPM_CLI to the npm CLI script.'
+  )
+}
+
+const runNpm = async (arguments_, options) =>
+  execFile(process.execPath, [await resolveNpmCliPath(), ...arguments_], options)
+
 const readMjsTree = async (directory) => {
   const entries = await readdir(directory, { withFileTypes: true })
   const contents = []
@@ -59,6 +102,16 @@ const assertDependencyOwnership = (manifest, options = {}) => {
   const dependencies = manifest.dependencies || {}
   const peerDependencies = manifest.peerDependencies || {}
   const devDependencies = manifest.devDependencies || {}
+
+  for (const [dependency, range] of Object.entries({
+    ...dependencies,
+    ...peerDependencies,
+  })) {
+    assert(
+      !/^(?:file|link|workspace):/.test(range),
+      `${dependency} uses repository-local dependency range ${range}.`
+    )
+  }
 
   for (const framework of ['vue', 'vue-router', 'vite']) {
     assert(peerDependencies[framework], `${framework} must remain a host peer dependency.`)
@@ -76,6 +129,18 @@ const assertDependencyOwnership = (manifest, options = {}) => {
     !peerDependencies['@vue/server-renderer'],
     '@vue/server-renderer must not be a peer dependency.'
   )
+  for (const dependency of [
+    '@apollo/client',
+    '@vue/apollo-composable',
+    'graphql',
+    'vue-apollo-client',
+  ]) {
+    assert(!dependencies[dependency], `${dependency} must remain consumer-owned.`)
+    assert(!peerDependencies[dependency], `${dependency} must remain consumer-owned.`)
+  }
+  for (const dependency of ['esbuild', 'es-module-lexer']) {
+    assert(dependencies[dependency], `${dependency} must remain a runtime dependency.`)
+  }
   if (options.requireDevelopmentTooling) {
     for (const framework of ['vue', 'vue-router', 'vite']) {
       assert(
@@ -179,6 +244,31 @@ useSeo(computed(() => ({ description: 'Packed reactive home' })))
     'utf8'
   )
   await writeFile(
+    join(sourceRoot, 'Dashboard.vue'),
+    `<script setup lang="ts">
+defineProps<{ userName: string; authRuns: number }>()
+</script>
+<template>
+  <section id="dashboard-page" :data-auth-runs="authRuns">
+    <p id="dashboard-user">{{ userName }}</p>
+    <RouterLink id="navigate-dashboard-nested" to="/dashboard/nested">nested</RouterLink>
+    <RouterView />
+  </section>
+</template>
+`,
+    'utf8'
+  )
+  await writeFile(
+    join(sourceRoot, 'DashboardNested.vue'),
+    '<template><section id="dashboard-nested-page">packed-dashboard-nested</section></template>\n',
+    'utf8'
+  )
+  await writeFile(
+    join(sourceRoot, 'Login.vue'),
+    '<template><section id="login-page">packed-login</section></template>\n',
+    'utf8'
+  )
+  await writeFile(
     join(sourceRoot, 'NotFound.vue'),
     `<script setup>
 import { useSeo } from 'vue-ssr-lite'
@@ -213,7 +303,7 @@ useSeo({ status: 404 })
     `<script setup>
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { usePublicConfig } from 'vue-ssr-lite'
+import { LoadingIndicator, RouteSuspense, usePublicConfig } from 'vue-ssr-lite'
 
 const route = useRoute()
 const publicConfig = usePublicConfig()
@@ -224,6 +314,7 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
 </script>
 
 <template>
+  <LoadingIndicator :delay="5" />
   <main id="routed-app" :data-route="route.path" :data-force-light="String(forceLight)">
     <div id="route-path">{{ route.path }}</div>
     <div id="route-meta">{{ String(route.meta.forceLight) }}</div>
@@ -231,7 +322,13 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
     <div id="public-config-application">{{ publicConfig.applicationId }}</div>
     <div id="public-config-revision">{{ publicConfig.revision }}</div>
     <RouterLink id="navigate-about" to="/about">about</RouterLink>
-    <RouterView />
+    <RouterLink id="navigate-dashboard" to="/dashboard">dashboard</RouterLink>
+    <RouteSuspense :delay="5">
+      <RouterView />
+      <template #fallback>
+        <div id="route-fallback">packed-loading</div>
+      </template>
+    </RouteSuspense>
   </main>
 </template>
 `,
@@ -239,16 +336,50 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
   )
   await writeFile(
     join(sourceRoot, 'main.ts'),
-    `import type { AppContext } from 'vue-ssr-lite'
+    `import { defineMiddleware, type AppContext } from 'vue-ssr-lite'
 import Home from './Home.vue'
 import About from './About.vue'
+import Dashboard from './Dashboard.vue'
+import DashboardNested from './DashboardNested.vue'
+import Login from './Login.vue'
 import NotFound from './NotFound.vue'
 import './style.css'
+
+let authRuns = 0
+const wait = (milliseconds: number, signal: AbortSignal) =>
+  new Promise<void>((resolveWait, reject) => {
+    if (signal.aborted) return reject(signal.reason)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal.reason)
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolveWait()
+    }, milliseconds)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+
+const authMiddleware = defineMiddleware(async (context) => {
+  authRuns += 1
+  await wait(40, context.signal)
+  if (context.cookies.get('packed_session') !== 'yes') {
+    return { path: '/login', query: { redirect: context.to.fullPath } }
+  }
+  return { props: { userName: 'john', authRuns } }
+})
 
 const routes = [
   { path: '/', component: Home, meta: { forceLight: true, seo: { title: 'Home' } } },
   { path: '/about', component: About, meta: { forceLight: false, seo: { title: 'About' } } },
   { path: '/lazy', component: () => import('./Lazy.vue'), meta: { seo: { title: 'Lazy' } } },
+  {
+    path: '/dashboard',
+    component: Dashboard,
+    meta: { middleware: [authMiddleware], seo: { title: 'Dashboard' } },
+    children: [{ path: 'nested', component: DashboardNested }],
+  },
+  { path: '/login', component: Login, meta: { seo: { title: 'Login' } } },
   {
     path: '/:pathMatch(.*)*',
     component: NotFound,
@@ -394,6 +525,19 @@ const assertSingleFrameworkResolution = async (consumerRoot) => {
   const hostRequire = createRequire(join(consumerRoot, 'package.json'))
   const packageRoot = join(consumerRoot, 'node_modules/vue-ssr-lite')
   const libraryRequire = createRequire(join(packageRoot, 'dist/index.mjs'))
+  for (const [specifier, entry] of [
+    ['vue-ssr-lite', 'index.mjs'],
+    ['vue-ssr-lite/client', 'client.mjs'],
+    ['vue-ssr-lite/server', 'server.mjs'],
+    ['vue-ssr-lite/vite', 'vite.mjs'],
+  ]) {
+    const resolvedEntry = await realpath(hostRequire.resolve(specifier))
+    const installedEntry = await realpath(join(packageRoot, 'dist', entry))
+    assert(
+      resolvedEntry === installedEntry,
+      `${specifier} resolved outside the installed npm tarball (${resolvedEntry}).`
+    )
+  }
   for (const framework of ['vue', 'vue-router']) {
     const hostEntry = await realpath(hostRequire.resolve(framework))
     const libraryEntry = await realpath(libraryRequire.resolve(framework))
@@ -466,18 +610,21 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       dom.window.document.querySelector('#routed-app')?.getAttribute('data-route') === '/',
       'hydration did not retain the initial route.'
     )
-    const navigationClick = new dom.window.MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-    })
-    dom.window.document
-      .querySelector('#navigate-about')
-      ?.dispatchEvent(navigationClick)
-    assert(
-      navigationClick.defaultPrevented,
-      'RouterLink did not prevent native document navigation.'
-    )
+    const clickRouterLink = (selector) => {
+      const navigationClick = new dom.window.MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      })
+      const link = dom.window.document.querySelector(selector)
+      assert(link, `RouterLink ${selector} was not rendered.`)
+      link.dispatchEvent(navigationClick)
+      assert(
+        navigationClick.defaultPrevented,
+        `RouterLink ${selector} did not prevent native document navigation.`
+      )
+    }
+    clickRouterLink('#navigate-about')
     await waitFor(
       () => dom.window.document.querySelector('#about-page'),
       'router.push(/about) did not update RouterView after hydration.'
@@ -493,6 +640,56 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
     assert(
       dom.window.document.title === 'About | Packed Tenant',
       'managed SEO state did not update after client navigation.'
+    )
+
+    dom.window.document.cookie = 'packed_session=yes; Path=/; SameSite=Lax'
+    clickRouterLink('#navigate-dashboard')
+    await waitFor(
+      () =>
+        Boolean(dom.window.document.querySelector('#route-fallback')) &&
+        Boolean(dom.window.document.querySelector('.vssl-loading-indicator')),
+      'packed RouteSuspense and LoadingIndicator did not cover slow middleware.'
+    )
+    await waitFor(
+      () =>
+        dom.window.document.querySelector('#dashboard-page')?.getAttribute('data-auth-runs') ===
+          '1' &&
+        !dom.window.document.querySelector('#route-fallback') &&
+        !dom.window.document.querySelector('.vssl-loading-indicator'),
+      'packed route middleware did not settle the authenticated Dashboard navigation.'
+    )
+    assert(
+      dom.window.document.querySelector('#dashboard-user')?.textContent === 'john',
+      'packed middleware props did not reach the declaring route component.'
+    )
+    clickRouterLink('#navigate-dashboard-nested')
+    await waitFor(
+      () => Boolean(dom.window.document.querySelector('#dashboard-nested-page')),
+      'packed nested Dashboard navigation did not render.'
+    )
+    assert(
+      dom.window.document.querySelector('#dashboard-page')?.getAttribute('data-auth-runs') === '1',
+      'packed nested navigation reran middleware on its unchanged parent route.'
+    )
+
+    clickRouterLink('#navigate-about')
+    await waitFor(
+      () => Boolean(dom.window.document.querySelector('#about-page')),
+      'packed navigation did not return to About before redirect coverage.'
+    )
+    dom.window.document.cookie =
+      'packed_session=; Path=/; Max-Age=0; SameSite=Lax'
+    clickRouterLink('#navigate-dashboard')
+    await waitFor(
+      () =>
+        Boolean(dom.window.document.querySelector('#login-page')) &&
+        !dom.window.document.querySelector('#route-fallback') &&
+        !dom.window.document.querySelector('.vssl-loading-indicator'),
+      'packed middleware redirect did not settle on Login.'
+    )
+    assert(
+      dom.window.document.querySelector('#route-path')?.textContent === '/login',
+      'packed middleware redirect did not remain Vue Router navigation.'
     )
     assertWarningFree(warnings.join('\n'), 'production hydration/navigation')
   } finally {
@@ -526,14 +723,18 @@ const main = async () => {
     await mkdtemp(join(tmpdir(), 'vue-ssr-lite-package-smoke-'))
   )
   try {
-    const packed = await execFile(
-      'npm',
+    const packed = await runNpm(
       ['pack', '--ignore-scripts', '--json', '--pack-destination', temporaryRoot],
       {
         cwd: repositoryRoot,
       }
     )
     const records = JSON.parse(packed.stdout)
+    const packedFiles = assertPackedArtifact({
+      record: records[0],
+      manifest: repositoryManifest,
+      assert,
+    })
     const tarball = join(temporaryRoot, records[0].filename)
     const consumerRoot = join(temporaryRoot, 'consumer')
     await mkdir(consumerRoot, { recursive: true })
@@ -544,8 +745,11 @@ const main = async () => {
           private: true,
           type: 'module',
           dependencies: {
+            '@babel/types': consumerVersions.babelTypes,
+            '@types/node': consumerVersions.nodeTypes,
             '@vitejs/plugin-vue': consumerVersions.pluginVue,
             jsdom: consumerVersions.jsdom,
+            typescript: consumerVersions.typescript,
             vue: consumerVersions.vue,
             'vue-router': consumerVersions.vueRouter,
             vite: consumerVersions.vite,
@@ -558,8 +762,8 @@ const main = async () => {
       'utf8'
     )
     await writeFixture(consumerRoot)
-    await execFile(
-      'npm',
+    await writePublicApiChecks(consumerRoot)
+    await runNpm(
       [
         'install',
         '--install-strategy=nested',
@@ -574,11 +778,17 @@ const main = async () => {
     const installedManifest = await readJson(
       join(consumerRoot, 'node_modules/vue-ssr-lite/package.json')
     )
-    assertDependencyOwnership(installedManifest)
-    const installedRuntimeTypes = await readFile(
-      join(consumerRoot, 'node_modules/vue-ssr-lite/dist/SsrRuntimeTypes.d.ts'),
-      'utf8'
+    assert(
+      installedManifest.version === repositoryManifest.version,
+      'the installed tarball version does not match the repository manifest.'
     )
+    assertDependencyOwnership(installedManifest)
+    await assertInstalledArtifactHygiene({
+      consumerRoot,
+      packedFiles,
+      repositoryRoot,
+      assert,
+    })
     const [
       installedRootTypes,
       installedClientTypes,
@@ -592,16 +802,22 @@ const main = async () => {
         )
       )
     )
+    const installedPublicTypes = [
+      installedRootTypes,
+      installedClientTypes,
+      installedServerTypes,
+      installedViteTypes,
+    ].join('\n')
     assert(
       /string\s*\|\s*readonly string\[\]\s*\|\s*undefined/.test(
-        installedRuntimeTypes
+        installedPublicTypes
       ),
       'SsrPublicConfigRequest header arrays must be readonly in the public declarations.'
     )
     assert(
-      /export type SsrPublicConfigDomain[\s\S]*?params:\s*Readonly<Record<string, string>>[\s\S]*?export interface SsrPublicConfigRequest/.test(
-        installedRuntimeTypes
-      ),
+      /\b(?:type|interface) SsrPublicConfigDomain\b[\s\S]*?params:\s*Readonly<Record<string, string>>/.test(
+        installedPublicTypes
+      ) && /\binterface SsrPublicConfigRequest\b/.test(installedPublicTypes),
       'SsrPublicConfigRequest domain params must be readonly in the public declarations.'
     )
     assert(
@@ -624,8 +840,29 @@ const main = async () => {
       await pathExists(join(consumerRoot, 'node_modules/vue-ssr-lite/LICENSE')),
       'the packed package must include the MIT license text.'
     )
-    const packedRoot = await import(
-      pathToFileURL(join(consumerRoot, 'node_modules/vue-ssr-lite/dist/index.mjs')).href
+    const cliTarget = join(
+      consumerRoot,
+      'node_modules/vue-ssr-lite',
+      installedManifest.bin['vue-ssr-lite'].replace(/^\.\//, '')
+    )
+    const cliSource = await readFile(cliTarget, 'utf8')
+    assert(cliSource.startsWith('#!/usr/bin/env node\n'), 'the packed CLI lacks its Node shebang.')
+    if (process.platform !== 'win32') {
+      assert(
+        ((await stat(cliTarget)).mode & 0o111) !== 0,
+        'npm did not install the packed CLI target as executable.'
+      )
+    }
+    const packageBin = join(
+      consumerRoot,
+      'node_modules/.bin',
+      process.platform === 'win32' ? 'vue-ssr-lite.cmd' : 'vue-ssr-lite'
+    )
+    assert(await pathExists(packageBin), 'npm did not create the vue-ssr-lite binary shim.')
+
+    await assertPublicApiChecks(consumerRoot)
+    const { root: packedRoot } = await import(
+      `${pathToFileURL(join(consumerRoot, 'package-import-smoke.mjs')).href}?inspect=${Date.now()}`
     )
     assert(typeof packedRoot.defineServer === 'function', 'defineServer must export from vue-ssr-lite.')
     assert(
@@ -735,8 +972,12 @@ const main = async () => {
       await stopCli(dev)
     }
 
-    const cli = join(consumerRoot, 'node_modules/vue-ssr-lite/dist/cli.mjs')
-    await execFile(process.execPath, [cli, 'build', '--root', consumerRoot], {
+    const cli = cliTarget
+    const buildCommand =
+      process.platform === 'win32'
+        ? { executable: process.execPath, arguments: [cli, 'build', '--root', consumerRoot] }
+        : { executable: packageBin, arguments: ['build', '--root', consumerRoot] }
+    await execFile(buildCommand.executable, buildCommand.arguments, {
       cwd: consumerRoot,
       env: { ...process.env, PUBLIC_URL: 'https://packed-smoke.test' },
     })
