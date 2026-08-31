@@ -9,6 +9,8 @@ import * as serverApi from './server'
 import * as viteApi from './vite'
 
 const ROOT_RUNTIME_EXPORTS = [
+  'LoadingIndicator',
+  'RouteSuspense',
   'defineApplication',
   'defineExtension',
   'defineMiddleware',
