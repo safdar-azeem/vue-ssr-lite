@@ -583,7 +583,9 @@ export const handleSsrRequest = async (
           remainingRequestMs > 0
             ? Math.min(configuredResolutionMs, remainingRequestMs)
             : configuredResolutionMs
-        const value = await renderSsrApplication(application, renderRequest, {
+        const renderApplication =
+          definition.renderApplication ?? renderSsrApplication
+        const value = await renderApplication(application, renderRequest, {
           maxResolutionPasses: serverOptions.maxResolutionPasses,
           resolutionDeadlineMs,
           diagnostics: serverOptions.diagnostics,
