@@ -12,7 +12,7 @@ import { defineMiddleware } from './defineMiddleware'
 const RouterRoot = defineComponent({ setup: () => () => h(RouterView) })
 
 describe('universal middleware SSR runtime', () => {
-  it('orders, deduplicates, awaits, and scopes nested route props', async () => {
+  it('executes global, parent, and child middleware for a direct nested SSR target', async () => {
     const order: string[] = []
     const global = defineMiddleware(async () => {
       await Promise.resolve()
