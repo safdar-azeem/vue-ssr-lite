@@ -12,7 +12,7 @@
     "vue": "^3.5.0",
     "vue-router": "^4.6.0",
     "pinia": "^3.0.0",
-    "vue-ssr-lite": "1.0.0-rc.7"
+    "vue-ssr-lite": "1.0.0-rc.8"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",
