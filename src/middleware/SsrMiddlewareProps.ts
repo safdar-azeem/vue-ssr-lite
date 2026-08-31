@@ -1,7 +1,9 @@
 import type {
   RouteLocationMatched,
   RouteLocationNormalized,
+  RouteRecordNormalized,
 } from 'vue-router'
+import { canonicalRouteRecord } from './SsrMiddlewareCollection'
 
 type RouteRecordProps = RouteLocationMatched['props'][string]
 
@@ -11,10 +13,14 @@ export interface MiddlewarePendingProps {
 }
 
 interface RoutePropsState {
-  base: RouteRecordProps
   accepted: RouteRecordProps
   acceptedOrder: number
   layers: Map<number, RouteRecordProps>
+  bindings: Map<RouteLocationMatched, RoutePropsBinding>
+}
+
+interface RoutePropsBinding {
+  base: RouteRecordProps
   current: RouteRecordProps
 }
 
@@ -46,35 +52,59 @@ const routeLabel = (record: RouteLocationMatched): string =>
 export interface SsrMiddlewarePropsRuntime {
   prepare(
     to: RouteLocationNormalized,
-    pending: readonly MiddlewarePendingProps[]
+    pending: readonly MiddlewarePendingProps[],
+    enteredMatchedIndices: readonly number[]
   ): MiddlewarePropsTransaction
   dispose(): void
 }
 
 export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => {
-  const states = new Map<RouteLocationMatched, RoutePropsState>()
+  const states = new Map<RouteRecordNormalized, RoutePropsState>()
   let nextMutationOrder = 1
 
+  const bindingFor = (
+    record: RouteLocationMatched,
+    state: RoutePropsState
+  ): RoutePropsBinding => {
+    const existing = state.bindings.get(record)
+    if (existing) return existing
+    const created = {
+      base: record.props.default,
+      current: record.props.default,
+    }
+    state.bindings.set(record, created)
+    return created
+  }
+
   const stateFor = (record: RouteLocationMatched): RoutePropsState => {
-    const existing = states.get(record)
+    const key = canonicalRouteRecord(record)
+    const existing = states.get(key)
     if (existing) {
-      if (record.props.default !== existing.current) {
-        existing.base = record.props.default
+      const binding = bindingFor(record, existing)
+      if (record.props.default !== binding.current) {
+        binding.base = record.props.default
+        binding.current = record.props.default
         existing.accepted = record.props.default
         existing.acceptedOrder = nextMutationOrder++
         existing.layers.clear()
-        existing.current = record.props.default
       }
       return existing
     }
     const created = {
-      base: record.props.default,
       accepted: record.props.default,
       acceptedOrder: 0,
       layers: new Map<number, RouteRecordProps>(),
-      current: record.props.default,
+      bindings: new Map<RouteLocationMatched, RoutePropsBinding>([
+        [
+          record,
+          {
+            base: record.props.default,
+            current: record.props.default,
+          },
+        ],
+      ]),
     }
-    states.set(record, created)
+    states.set(key, created)
     return created
   }
 
@@ -89,13 +119,27 @@ export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => 
       order = layerOrder
       value = layerValue
     }
+    const binding = bindingFor(record, state)
     record.props.default = value
-    state.current = value
+    binding.current = value
   }
 
   return {
-    prepare(to, pending) {
+    prepare(to, pending, enteredMatchedIndices) {
       const mutationOrder = nextMutationOrder++
+      const entered = new Set<number>()
+      for (const matchedIndex of enteredMatchedIndices) {
+        if (
+          !Number.isInteger(matchedIndex) ||
+          matchedIndex < 0 ||
+          matchedIndex >= to.matched.length
+        ) {
+          throw new Error(
+            `[vue-ssr-lite] Cached middleware route scope no longer matches route "${to.fullPath}".`
+          )
+        }
+        entered.add(matchedIndex)
+      }
       const byRecord = new Map<number, Record<string, unknown>>()
       for (const item of pending) {
         if (
@@ -107,6 +151,11 @@ export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => 
             `[vue-ssr-lite] Cached middleware props no longer match route "${to.fullPath}".`
           )
         }
+        if (!entered.has(item.matchedIndex)) {
+          throw new Error(
+            `[vue-ssr-lite] Cached middleware props target a route record that was not entered for "${to.fullPath}".`
+          )
+        }
         byRecord.set(item.matchedIndex, {
           ...(byRecord.get(item.matchedIndex) ?? {}),
           ...item.props,
@@ -114,6 +163,12 @@ export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => 
       }
       const mutations: RoutePropsMutation[] = []
       for (let index = 0; index < to.matched.length; index += 1) {
+        if (entered.has(index)) continue
+        const record = to.matched[index]!
+        const state = states.get(canonicalRouteRecord(record))
+        if (state) applyState(record, state)
+      }
+      for (const index of entered) {
         const record = to.matched[index]!
         const middlewareProps = byRecord.get(index)
         if (
@@ -125,12 +180,13 @@ export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => 
           )
         }
         const state = stateFor(record)
+        const binding = bindingFor(record, state)
         const after = middlewareProps
           ? ((route: RouteLocationNormalized) => ({
-              ...resolveBaseProps(state.base, route),
+              ...resolveBaseProps(binding.base, route),
               ...middlewareProps,
             }))
-          : state.base
+          : binding.base
         mutations.push({ record, state, after })
       }
       let committed = false
@@ -167,9 +223,11 @@ export const createSsrMiddlewarePropsRuntime = (): SsrMiddlewarePropsRuntime => 
       }
     },
     dispose() {
-      for (const [record, state] of states) {
-        if (record.props.default === state.current) {
-          record.props.default = state.base
+      for (const state of states.values()) {
+        for (const [record, binding] of state.bindings) {
+          if (record.props.default === binding.current) {
+            record.props.default = binding.base
+          }
         }
       }
       states.clear()
