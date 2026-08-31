@@ -42,6 +42,11 @@ import {
   type SsrResolutionController,
 } from './SsrRequestResolution'
 import { installCrossRenderNavigation } from './SsrRouteRenderRuntime'
+import {
+  createSsrMiddlewareExecutionController,
+  type SsrMiddlewareExecutionController,
+  type SsrMiddlewareInstallation,
+} from './middleware/SsrMiddlewareRuntime'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -102,6 +107,8 @@ export interface SsrCreateApplicationOptions<
    * A fresh one is created when omitted.
    */
   resolution?: SsrResolutionController
+  /** Server reconciliation only: request-owned middleware result cache. */
+  middlewareController?: SsrMiddlewareExecutionController
 }
 
 export const createSsrApplication = async <
@@ -254,11 +261,34 @@ export const createSsrApplication = async <
     [SSR_EXTENSION_RUNTIME]: extensionRuntime,
   })
 
+  const ownsMiddlewareController = Boolean(router && !options.middlewareController)
+  const middlewareController = router
+    ? options.middlewareController ??
+      createSsrMiddlewareExecutionController({
+        server: options.server,
+        request: options.request,
+      })
+    : undefined
+  let middlewareInstallation: SsrMiddlewareInstallation | undefined
+
   try {
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
     if (router) {
+      middlewareInstallation = middlewareController!.install({
+        app,
+        router,
+        context,
+        middleware: definition.middleware,
+      })
+      hydration.onDispose(() => {
+        middlewareInstallation?.dispose()
+        if (ownsMiddlewareController) middlewareController?.dispose()
+      })
+      if (!options.server && ownsMiddlewareController) {
+        app.onUnmount(() => middlewareController?.dispose())
+      }
       if (!options.server) {
         installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
       }
@@ -302,8 +332,17 @@ export const createSsrApplication = async <
       managedHead.dispose()
     })
 
-    return { app, router, context, hydration, resolution, managedHead }
+    return {
+      app,
+      router,
+      context,
+      hydration,
+      resolution,
+      managedHead,
+      middleware: middlewareController ?? null,
+    }
   } catch (error) {
+    if (ownsMiddlewareController) middlewareController?.dispose()
     extensionRuntime.dispose()
     managedHead.dispose()
     hydration.dispose()
