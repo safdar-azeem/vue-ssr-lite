@@ -4,6 +4,7 @@ import { RouterView } from 'vue-router'
 import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import type { SsrEndpointDefinition } from '../SsrRuntimeTypes'
 import { SSR_REQUEST_RESOLUTION } from '../SsrRequestResolution'
+import { renderSsrApplication } from '../SsrRenderRuntime'
 import { defineMiddleware } from '../middleware/defineMiddleware'
 import {
   createSsrAdmissionController,
@@ -120,6 +121,25 @@ const handlerRuntime = (
 })
 
 describe('transport-independent SSR request handler', () => {
+  it('uses the renderer carried by the application module graph', async () => {
+    const definition = compiledDefinition(undefined, undefined, 'ssr')
+    const graphRenderer = vi.fn(renderSsrApplication)
+    definition.renderApplication = graphRenderer
+    const scope = createSsrRequestScope(0)
+
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/'),
+        handlerRuntime(scope, definition)
+      )
+
+      expect(response?.statusCode).toBe(200)
+      expect(graphRenderer).toHaveBeenCalledOnce()
+    } finally {
+      scope.dispose()
+    }
+  })
+
   it('returns a real middleware redirect and preserves multiple Set-Cookie values', async () => {
     let protectedSetups = 0
     const definition = compiledDefinition(undefined, undefined, 'ssr')
