@@ -47,6 +47,11 @@ import {
   type SsrMiddlewareExecutionController,
   type SsrMiddlewareInstallation,
 } from './middleware/SsrMiddlewareRuntime'
+import {
+  createSsrNavigationRuntime,
+  SSR_NAVIGATION_RUNTIME,
+} from './navigation/SsrNavigationRuntime'
+import type { SsrNavigationRuntime } from './navigation/SsrNavigationTypes'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -270,12 +275,26 @@ export const createSsrApplication = async <
       })
     : undefined
   let middlewareInstallation: SsrMiddlewareInstallation | undefined
+  let navigationRuntime: SsrNavigationRuntime | undefined
 
   try {
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
     if (router) {
+      // Install the observer before middleware so its transaction surrounds
+      // guards and route resolution. Successful navigation settles only after
+      // Vue's next DOM update tick; middleware still owns cancellation and its
+      // AbortSignal lifecycle.
+      navigationRuntime = createSsrNavigationRuntime({
+        router,
+        server: options.server,
+        diagnostics: Boolean(
+          (definition as { __vueSsrLiteDevelopment?: boolean })
+            .__vueSsrLiteDevelopment
+        ),
+      })
+      app.provide(SSR_NAVIGATION_RUNTIME, navigationRuntime)
       middlewareInstallation = middlewareController!.install({
         app,
         router,
@@ -283,11 +302,15 @@ export const createSsrApplication = async <
         middleware: definition.middleware,
       })
       hydration.onDispose(() => {
+        navigationRuntime?.dispose()
         middlewareInstallation?.dispose()
         if (ownsMiddlewareController) middlewareController?.dispose()
       })
-      if (!options.server && ownsMiddlewareController) {
-        app.onUnmount(() => middlewareController?.dispose())
+      if (!options.server) {
+        app.onUnmount(() => {
+          navigationRuntime?.dispose()
+          if (ownsMiddlewareController) middlewareController?.dispose()
+        })
       }
       if (!options.server) {
         installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
@@ -342,6 +365,7 @@ export const createSsrApplication = async <
       middleware: middlewareController ?? null,
     }
   } catch (error) {
+    navigationRuntime?.dispose()
     if (ownsMiddlewareController) middlewareController?.dispose()
     extensionRuntime.dispose()
     managedHead.dispose()
