@@ -77,6 +77,7 @@ import {
   validateRouteRenderBoundaries,
   type SsrRouteRenderMatcher,
 } from './SsrRouteRenderRuntime'
+import type { SsrApplicationRenderer } from './SsrRenderRuntime'
 
 export { defineServer }
 export { bundleSsrConfigModule } from './SsrConfigCompileBoundary'
@@ -103,6 +104,8 @@ const LOOPBACK_HOST_SET = new Set<string>(LOOPBACK_HOSTS)
 const CONFIG_CANDIDATES = ['server.ts'] as const
 
 export const SSR_RUNTIME_VIRTUAL_ID = 'virtual:vue-ssr-lite/runtime'
+export const SSR_RENDERER_VIRTUAL_ID =
+  'virtual:vue-ssr-lite/internal/ssr-renderer'
 export const SSR_CLIENT_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/client/'
 export const SSR_HTML_VIRTUAL_PREFIX = 'virtual:vue-ssr-lite/html/'
 
@@ -145,6 +148,8 @@ export interface SsrCompiledConfig {
   development: boolean
   /** Vite's resolved client `base`, carried by the generated SSR runtime. */
   viteBase?: string
+  /** Renderer evaluated beside the application in its Vite/server bundle. */
+  renderApplication?: SsrApplicationRenderer
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
 }
 
@@ -1025,6 +1030,9 @@ export const generateSsrRuntimeModule = (
   const importLines: string[] = configPath
     ? [`import __ssrUserConfig from ${JSON.stringify(absoluteImportPath(root, configPath))}`]
     : []
+  importLines.push(
+    `import { renderSsrApplication as __vueSsrLiteRenderApplication } from ${JSON.stringify(SSR_RENDERER_VIRTUAL_ID)}`
+  )
   const shellBindings: string[] = ['  const __vueSsrLiteShells = {']
   const imported = new Map<string, string>()
   entries
@@ -1067,7 +1075,7 @@ export const generateSsrRuntimeModule = (
     '  const __vueSsrLiteApplicationFiles = new Map([',
     ...applicationFiles,
     '  ])',
-    '  return { ...config, __vueSsrLiteViteBase: viteBase, __vueSsrLiteShells, __vueSsrLiteApplicationFiles }',
+    '  return { ...config, __vueSsrLiteViteBase: viteBase, __vueSsrLiteRenderApplication, __vueSsrLiteShells, __vueSsrLiteApplicationFiles }',
     '}',
     '',
     'export default resolveConfig',
@@ -1140,6 +1148,7 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
     '}',
     'export const definition = {',
     `  id: ${JSON.stringify(entry.id)},`,
+    '  __vueSsrLiteDevelopment: import.meta.env.DEV,',
     '  root: App,',
     '  routes,',
     `  defaultRender: ${JSON.stringify(entry.kind)},`,
@@ -1336,6 +1345,7 @@ export const compileSsrConfig = async (
     options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
   const loadedRecord = (raw || {}) as SsrConfig & {
     __vueSsrLiteViteBase?: unknown
+    __vueSsrLiteRenderApplication?: SsrApplicationRenderer
     __vueSsrLiteShells?: Record<string, SsrBoundAppShell>
     __vueSsrLiteApplicationFiles?: Map<string, string>
     __vueSsrLiteRoutesModules?: Map<string, string>
@@ -1368,6 +1378,7 @@ export const compileSsrConfig = async (
     typeof loadedRecord.__vueSsrLiteViteBase === 'string'
       ? loadedRecord.__vueSsrLiteViteBase
       : undefined
+  const renderApplication = loadedRecord.__vueSsrLiteRenderApplication
   const shells = loadedRecord.__vueSsrLiteShells ?? readBoundShells(loaded) ?? {}
   const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord.resolveSiteUrl
   const applications: SsrCompiledApplication[] = []
@@ -1466,6 +1477,7 @@ export const compileSsrConfig = async (
     applications,
     development,
     viteBase,
+    renderApplication,
     readiness: config.readiness,
     resolveSiteUrl,
     server: normalizeCompiledServerOptions(config, options, development),
