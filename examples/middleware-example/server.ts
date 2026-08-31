@@ -5,7 +5,7 @@ export default defineServer({
   render: 'ssr',
 
   server: {
-    port: 4211,
+    port: 4221,
   },
 
   // Global middleware runs for every route.
