@@ -191,9 +191,9 @@ export const installCrossRenderNavigation = (
     const url = to.fullPath
     const replaceDocument =
       intent === 'replace' || intent === 'pop' || Boolean(to.redirectedFrom)
-    if (typeof window !== 'undefined') {
-      if (replaceDocument) window.location.replace(url)
-      else window.location.assign(url)
+    if (typeof location !== 'undefined') {
+      if (replaceDocument) location.replace(url)
+      else location.assign(url)
     }
     resetIntent()
     return false
