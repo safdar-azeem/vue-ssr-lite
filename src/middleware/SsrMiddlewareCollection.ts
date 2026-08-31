@@ -1,10 +1,40 @@
-import type { RouteLocationNormalized } from 'vue-router'
+import type {
+  RouteLocationMatched,
+  RouteLocationNormalized,
+  RouteRecordNormalized,
+} from 'vue-router'
 import type { Middleware } from './SsrMiddlewareTypes'
 
 export interface CollectedMiddleware {
   middleware: Middleware<any>
   matchedIndex: number | null
   routeLabel?: string
+}
+
+export interface MiddlewareCollection {
+  entries: CollectedMiddleware[]
+  enteredMatchedIndices: number[]
+}
+
+export const canonicalRouteRecord = (
+  record: RouteLocationMatched
+): RouteRecordNormalized => record.aliasOf ?? record
+
+export const resolveEnteredMatchedIndices = (
+  from: RouteLocationNormalized,
+  to: RouteLocationNormalized
+): number[] => {
+  const activeRecords = new Set(from.matched.map(canonicalRouteRecord))
+  const enteredMatchedIndices: number[] = []
+
+  for (let index = 0; index < to.matched.length; index += 1) {
+    const record = to.matched[index]!
+    if (!activeRecords.has(canonicalRouteRecord(record))) {
+      enteredMatchedIndices.push(index)
+    }
+  }
+
+  return enteredMatchedIndices
 }
 
 export const middlewareLabel = (
@@ -19,9 +49,11 @@ export const middlewareLabel = (
 
 export const collectMiddleware = (
   globalMiddleware: readonly Middleware<any>[],
-  to: RouteLocationNormalized
-): CollectedMiddleware[] => {
-  const result: CollectedMiddleware[] = []
+  to: RouteLocationNormalized,
+  from: RouteLocationNormalized
+): MiddlewareCollection => {
+  const entries: CollectedMiddleware[] = []
+  const enteredMatchedIndices = resolveEnteredMatchedIndices(from, to)
   const seen = new Set<Middleware<any>>()
   const add = (entry: CollectedMiddleware) => {
     if (typeof entry.middleware !== 'function') {
@@ -32,13 +64,13 @@ export const collectMiddleware = (
     }
     if (seen.has(entry.middleware)) return
     seen.add(entry.middleware)
-    result.push(entry)
+    entries.push(entry)
   }
 
   for (const middleware of globalMiddleware) {
     add({ middleware, matchedIndex: null })
   }
-  for (let matchedIndex = 0; matchedIndex < to.matched.length; matchedIndex += 1) {
+  for (const matchedIndex of enteredMatchedIndices) {
     const record = to.matched[matchedIndex]!
     const declared = record.meta.middleware
     if (declared === undefined) continue
@@ -57,5 +89,5 @@ export const collectMiddleware = (
       })
     }
   }
-  return result
+  return { entries, enteredMatchedIndices }
 }
