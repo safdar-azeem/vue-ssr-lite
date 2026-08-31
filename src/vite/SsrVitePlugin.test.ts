@@ -8,6 +8,7 @@ import { build, createServer, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from './SsrVitePlugin'
 import { closeViteDevServer, provisionHostVuePeers } from '../SsrTestFixtures'
+import { SSR_RENDERER_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 
 let root = ''
 let server: ViteDevServer | undefined
@@ -112,9 +113,12 @@ describe('SSR Vite package identity', () => {
         `${pluginRoot}/virtual:vue-ssr-lite/runtime`
       )
     ).toBe('\0virtual:vue-ssr-lite/runtime')
+    await expect(
+      plugin.resolveId?.call({} as never, SSR_RENDERER_VIRTUAL_ID)
+    ).resolves.toMatch(/SsrRenderRuntime\.ts$/)
   })
 
-  it('deduplicates Vue and externalizes vue-ssr-lite by default', async () => {
+  it('deduplicates Vue and transforms vue-ssr-lite in the host SSR graph', async () => {
     const pluginRoot = await writeMinimalConfig()
     const config = await runConfig(pluginRoot)
 
@@ -125,21 +129,22 @@ describe('SSR Vite package identity', () => {
     expect(config.optimizeDeps?.include).toEqual([
       'vue',
       'vue-router',
+      'vue-ssr-lite',
       'vue-ssr-lite/client',
     ])
-    expect(config.ssr?.external).toContain('vue-ssr-lite')
-    expect(config.ssr?.noExternal).not.toContain('vue-ssr-lite')
+    expect(config.ssr?.external ?? []).not.toContain('vue-ssr-lite')
+    expect(config.ssr?.noExternal).toContain('vue-ssr-lite')
   })
 
-  it('uses the same package externalization contract in development and production', async () => {
+  it('uses the same package identity contract in development and production', async () => {
     const pluginRoot = await writeMinimalConfig()
     const [development, production] = await Promise.all([
       runConfig(pluginRoot, 'serve'),
       runConfig(pluginRoot, 'build'),
     ])
 
-    expect(development.ssr?.external).toContain('vue-ssr-lite')
-    expect(production.ssr?.external).toContain('vue-ssr-lite')
+    expect(development.ssr?.noExternal).toContain('vue-ssr-lite')
+    expect(production.ssr?.noExternal).toContain('vue-ssr-lite')
   })
 
   it.each(['./', ''])('carries relative SPA base %j through a real generated SSR runtime', async (base) => {
