@@ -9,6 +9,7 @@ import type {
   RobotsConfig,
 } from './extensions/seo/types'
 import type { AppContext } from './SsrAppContext'
+import type { Middleware } from './middleware/SsrMiddlewareTypes'
 import type {
   SsrEndpointDefinition,
   SsrErrorRenderContext,
@@ -128,6 +129,8 @@ interface ApplicationConfigBase {
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
+  /** Universal application middleware, executed before matched route middleware. */
+  middleware?: readonly Middleware<any>[]
   /** Universal-safe custom runtime extensions. Built-in SEO is auto-attached. */
   extensions?: readonly ExtensionDefinition[]
   cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
@@ -209,6 +212,7 @@ type SsrSingleApplicationFields = {
   seo?: SsrSeoConfig
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
+  middleware?: readonly Middleware<any>[]
   extensions?: readonly ExtensionDefinition[]
   cleanup?: import('./SsrRuntimeTypes').SsrApplicationDefinition['cleanup']
   createInitialState?: import('./SsrRuntimeTypes').SsrApplicationDefinition['createInitialState']
@@ -234,6 +238,7 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
   seo?: never
   router?: never
   scrollBehavior?: never
+  middleware?: never
   extensions?: never
 }
 
