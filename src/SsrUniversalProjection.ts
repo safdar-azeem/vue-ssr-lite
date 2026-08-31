@@ -6,6 +6,7 @@ import { transformSync } from 'esbuild'
 
 export const SSR_UNIVERSAL_RUNTIME_FIELDS = [
   'extensions',
+  'middleware',
   'router',
   'scrollBehavior',
   'createInitialState',
@@ -1892,7 +1893,7 @@ const assertNoServerRuntimeGlobals = (
       throw projectionBoundaryError(
         filePath,
         `Universal runtime dependency references server-only global ${JSON.stringify(name)}. ` +
-          'Move Node/server environment access outside extensions, router, scrollBehavior, createInitialState, and cleanup.'
+          'Move Node/server environment access outside extensions, middleware, router, scrollBehavior, createInitialState, and cleanup.'
       )
     }
   }
@@ -2328,7 +2329,11 @@ export const hasUniversalRuntimeValue = (
   if (!evaluated) return false
   const value = (evaluated as Record<string, unknown>)[field]
   if (value == null) return false
-  if (field === 'extensions' && Array.isArray(value) && value.length === 0) return false
+  if (
+    (field === 'extensions' || field === 'middleware') &&
+    Array.isArray(value) &&
+    value.length === 0
+  ) return false
   return true
 }
 
@@ -3390,8 +3395,8 @@ export const mergeUniversalRuntimeProjections = (
   for (const key of SSR_UNIVERSAL_RUNTIME_FIELDS) {
     const extraValue = extra.fields[key]
     if (!extraValue) continue
-    if (key === 'extensions' && fields.extensions) {
-      fields.extensions = `[...(${fields.extensions}), ...(${extraValue})]`
+    if ((key === 'extensions' || key === 'middleware') && fields[key]) {
+      fields[key] = `[...(${fields[key]}), ...(${extraValue})]`
       continue
     }
     fields[key] = extraValue
