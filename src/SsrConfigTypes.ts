@@ -129,7 +129,7 @@ interface ApplicationConfigBase {
   routes?: RouteRecordRaw[] | (() => RouteRecordRaw[])
   router?: SsrRouterFactory
   scrollBehavior?: RouterScrollBehavior
-  /** Universal application middleware, executed before matched route middleware. */
+  /** Universal application middleware, executed before entered route middleware. */
   middleware?: readonly Middleware<any>[]
   /** Universal-safe custom runtime extensions. Built-in SEO is auto-attached. */
   extensions?: readonly ExtensionDefinition[]
