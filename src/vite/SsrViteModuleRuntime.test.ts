@@ -147,12 +147,14 @@ describe('Vite SSR ModuleRunner imports', () => {
     const runtime = await importSsrViteModule<{
       default: () => Promise<{
         __vueSsrLiteViteBase: string
+        __vueSsrLiteRenderApplication: (...args: unknown[]) => unknown
         __vueSsrLiteShells: Record<string, { root: unknown; main: unknown }>
       }>
     }>(server!, SSR_RUNTIME_VIRTUAL_ID)
 
     const generated = await runtime.default()
     expect(generated.__vueSsrLiteViteBase).toBe('/')
+    expect(typeof generated.__vueSsrLiteRenderApplication).toBe('function')
     expect(generated.__vueSsrLiteShells.app).toBeDefined()
     expect(generated.__vueSsrLiteShells.app.main).toBeDefined()
   })
