@@ -69,11 +69,6 @@ const deferred = () => {
   return { promise, resolve }
 }
 
-const flushGuards = async () => {
-  await Promise.resolve()
-  await Promise.resolve()
-}
-
 describe('SsrNavigationRuntime', () => {
   it('observes start and settle while ignoring the initial router navigation', async () => {
     const { router, runtime } = await createHarness()
@@ -203,16 +198,24 @@ describe('SsrNavigationRuntime', () => {
     const events = listener()
     const slow = deferred()
     const other = deferred()
+    const slowEntered = deferred()
+    const otherEntered = deferred()
     runtime.subscribe(events.subscriber)
     router.beforeEach((to) => {
-      if (to.path === '/slow') return slow.promise
-      if (to.path === '/other') return other.promise
+      if (to.path === '/slow') {
+        slowEntered.resolve()
+        return slow.promise
+      }
+      if (to.path === '/other') {
+        otherEntered.resolve()
+        return other.promise
+      }
     })
 
     const first = router.push('/slow')
-    await flushGuards()
+    await slowEntered.promise
     const second = router.push('/other')
-    await flushGuards()
+    await otherEntered.promise
 
     expect(events.starts).toEqual([1, 2])
     expect(events.settles).toEqual([1])
@@ -529,13 +532,17 @@ describe('SsrNavigationRuntime', () => {
     const { router, runtime } = await createHarness()
     const events = listener()
     const slow = deferred()
+    const slowEntered = deferred()
     runtime.subscribe(events.subscriber)
     router.beforeEach((to) => {
-      if (to.path === '/slow') return slow.promise
+      if (to.path === '/slow') {
+        slowEntered.resolve()
+        return slow.promise
+      }
     })
 
     const navigation = router.push('/slow')
-    await flushGuards()
+    await slowEntered.promise
     expect(events.starts).toEqual([1])
 
     runtime.dispose()
