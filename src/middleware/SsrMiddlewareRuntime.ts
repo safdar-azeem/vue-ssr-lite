@@ -33,6 +33,8 @@ export interface SsrMiddlewareExecutionController {
     middleware?: readonly Middleware<any>[]
   }): SsrMiddlewareInstallation
   navigationOutcome(target?: string): SsrMiddlewareNavigationOutcome
+  /** @internal Ends eligibility for framework-owned initial navigation replay. */
+  completeBrowserBootstrap(): void
   dispose(): void
 }
 
@@ -48,7 +50,11 @@ const cloneNavigationPlan = (
   plan: MiddlewareNavigationPlan
 ): MiddlewareNavigationPlan =>
   plan.kind === 'continue'
-    ? { kind: 'continue', props: clonePendingProps(plan.props) }
+    ? {
+        kind: 'continue',
+        props: clonePendingProps(plan.props),
+        enteredMatchedIndices: [...plan.enteredMatchedIndices],
+      }
     : plan
 
 const resolveSpecialLocation = (
@@ -91,7 +97,10 @@ export const createSsrMiddlewareExecutionController = (options: {
     installationId: number
     plan: Extract<MiddlewareNavigationPlan, { kind: 'continue' }>
   }>()
-  const browserInFlight = new Map<string, Promise<MiddlewareNavigationPlan>>()
+  const browserInitialInFlight = new Map<
+    string,
+    Promise<MiddlewareNavigationPlan>
+  >()
   const browserInitialReplay = new Map<string, MiddlewareNavigationPlan>()
   const browserInitialTargets = new Set<string>()
   const browserInitialOutcomes = new Map<
@@ -102,6 +111,7 @@ export const createSsrMiddlewareExecutionController = (options: {
   let nextInstallationId = 1
   let navigationSequence = 0
   let activeBrowserNavigation: AbortController | undefined
+  let browserBootstrapActive = !options.server
   let outcome: SsrMiddlewareNavigationOutcome = null
   let outcomeTarget: string | undefined
   let disposed = false
@@ -122,6 +132,7 @@ export const createSsrMiddlewareExecutionController = (options: {
         return {
           kind: 'continue',
           props: clonePendingProps(cached.plan.props),
+          enteredMatchedIndices: [...cached.plan.enteredMatchedIndices],
         }
       }
     }
@@ -187,16 +198,29 @@ export const createSsrMiddlewareExecutionController = (options: {
         from
       )
     }
-    const key = to.fullPath
-    if (from === START_LOCATION) {
-      const replay = browserInitialReplay.get(key)
-      if (replay) {
-        browserInitialReplay.delete(key)
-        return Promise.resolve(cloneNavigationPlan(replay))
-      }
+    if (!browserBootstrapActive || from !== START_LOCATION) {
+      return run(
+        app,
+        router,
+        context,
+        globalMiddleware,
+        installationId,
+        to,
+        from
+      )
     }
-    const existing = browserInFlight.get(key)
+    const key = to.fullPath
+    const replay = browserInitialReplay.get(key)
+    if (replay) {
+      browserInitialReplay.delete(key)
+      return Promise.resolve(cloneNavigationPlan(replay))
+    }
+    const existing = browserInitialInFlight.get(key)
     if (existing) return existing
+    // A different initial target supersedes any still-pending bootstrap work.
+    // Remove its reuse handle immediately even if application middleware does
+    // not observe AbortSignal and keeps the old promise pending.
+    browserInitialInFlight.clear()
     const pending = run(
       app,
       router,
@@ -206,17 +230,19 @@ export const createSsrMiddlewareExecutionController = (options: {
       to,
       from
     )
-    browserInFlight.set(key, pending)
-    if (from === START_LOCATION) {
-      void pending.then(
-        (plan) => {
+    browserInitialInFlight.set(key, pending)
+    void pending.then(
+      (plan) => {
+        if (browserInitialInFlight.get(key) === pending) {
           browserInitialReplay.set(key, cloneNavigationPlan(plan))
-        },
-        () => undefined
-      )
-    }
+        }
+      },
+      () => undefined
+    )
     const clear = () => {
-      if (browserInFlight.get(key) === pending) browserInFlight.delete(key)
+      if (browserInitialInFlight.get(key) === pending) {
+        browserInitialInFlight.delete(key)
+      }
     }
     void pending.then(clear, clear)
     return pending
@@ -238,28 +264,37 @@ export const createSsrMiddlewareExecutionController = (options: {
       const applicationMiddleware = [...middleware]
       const propsRuntime = createSsrMiddlewarePropsRuntime()
       const installationId = nextInstallationId++
-      const transactions = new Map<
-        RouteLocationNormalized,
-        MiddlewarePropsTransaction
-      >()
+      const transactions = new Map<object, MiddlewarePropsTransaction>()
       const stagedCache = new Map<
-        RouteLocationNormalized,
+        object,
         Extract<MiddlewareNavigationPlan, { kind: 'continue' }>
       >()
 
-      const rollback = (to: RouteLocationNormalized) => {
-        const transaction = transactions.get(to)
+      const rollback = (target: object) => {
+        const transaction = transactions.get(target)
         transaction?.rollback()
-        transactions.delete(to)
-        stagedCache.delete(to)
+        transactions.delete(target)
+        stagedCache.delete(target)
+      }
+
+      const resolveTerminalTarget = (
+        to: RouteLocationNormalized
+      ): { target: object; redirected: boolean } | undefined => {
+        if (transactions.has(to)) return { target: to, redirected: false }
+        const redirectOrigin = to.redirectedFrom
+        return redirectOrigin && transactions.has(redirectOrigin)
+          ? { target: redirectOrigin, redirected: true }
+          : undefined
       }
 
       const removeBefore = router.beforeEach(async (to, from) => {
         for (const pendingTarget of [...transactions.keys()]) {
           rollback(pendingTarget)
         }
+        const browserBootstrapNavigation =
+          !options.server && browserBootstrapActive && from === START_LOCATION
         if (!options.server) {
-          if (from === START_LOCATION) browserInitialTargets.add(to.fullPath)
+          if (browserBootstrapNavigation) browserInitialTargets.add(to.fullPath)
           else browserInitialOutcomes.delete(to.fullPath)
         }
         const navigationId = ++navigationSequence
@@ -271,7 +306,7 @@ export const createSsrMiddlewareExecutionController = (options: {
           if (navigationId !== navigationSequence) return
           outcome = value
           outcomeTarget = to.fullPath
-          if (!options.server && from === START_LOCATION) {
+          if (browserBootstrapNavigation) {
             for (const target of browserInitialTargets) {
               browserInitialOutcomes.set(target, value)
             }
@@ -288,7 +323,11 @@ export const createSsrMiddlewareExecutionController = (options: {
         )
         if (disposed || navigationId !== navigationSequence) return false
         if (plan.kind === 'continue') {
-          const transaction = propsRuntime.prepare(to, plan.props)
+          const transaction = propsRuntime.prepare(
+            to,
+            plan.props,
+            plan.enteredMatchedIndices
+          )
           transactions.set(to, transaction)
           try {
             transaction.commit()
@@ -300,6 +339,7 @@ export const createSsrMiddlewareExecutionController = (options: {
             stagedCache.set(to, {
               kind: 'continue',
               props: clonePendingProps(plan.props),
+              enteredMatchedIndices: [...plan.enteredMatchedIndices],
             })
           }
           return true
@@ -337,21 +377,26 @@ export const createSsrMiddlewareExecutionController = (options: {
         return false
       })
       const removeAfter = router.afterEach((to, _from, failure) => {
-        if (failure) rollback(to)
+        const terminal = resolveTerminalTarget(to)
+        if (!terminal) return
+        if (failure || terminal.redirected) rollback(terminal.target)
         else {
-          transactions.get(to)?.accept()
-          transactions.delete(to)
-          const accepted = stagedCache.get(to)
+          transactions.get(terminal.target)?.accept()
+          transactions.delete(terminal.target)
+          const accepted = stagedCache.get(terminal.target)
           if (accepted) {
             cache.set(to.fullPath, {
               installationId,
               plan: accepted,
             })
           }
-          stagedCache.delete(to)
+          stagedCache.delete(terminal.target)
         }
       })
-      const removeError = router.onError((_error, to) => rollback(to))
+      const removeError = router.onError((_error, to) => {
+        const terminal = resolveTerminalTarget(to)
+        if (terminal) rollback(terminal.target)
+      })
       let installation: SsrMiddlewareInstallation
       let installationDisposed = false
       installation = {
@@ -378,14 +423,28 @@ export const createSsrMiddlewareExecutionController = (options: {
       }
       return outcome
     },
+    completeBrowserBootstrap() {
+      if (!browserBootstrapActive) return
+      browserBootstrapActive = false
+      // START_LOCATION can persist after a cancelled or errored initial route.
+      // Once the browser runtime finishes its controlled bootstrap operation,
+      // no later navigation may consume work or decisions owned by that attempt.
+      browserInitialInFlight.clear()
+      browserInitialReplay.clear()
+      browserInitialTargets.clear()
+      browserInitialOutcomes.clear()
+      outcome = null
+      outcomeTarget = undefined
+    },
     dispose() {
       if (disposed) return
       disposed = true
+      browserBootstrapActive = false
       activeBrowserNavigation?.abort(abortReason())
       activeBrowserNavigation = undefined
       for (const installation of [...installations]) installation.dispose()
       cache.clear()
-      browserInFlight.clear()
+      browserInitialInFlight.clear()
       browserInitialReplay.clear()
       browserInitialTargets.clear()
       browserInitialOutcomes.clear()
