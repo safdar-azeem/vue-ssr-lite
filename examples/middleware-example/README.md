@@ -7,7 +7,41 @@ There are only two places where application developers declare middleware:
 1. `server.ts` for middleware that runs on every route.
 2. `route.meta.middleware` for middleware that belongs to a specific route.
 
-Middleware can be synchronous or asynchronous, and the same middleware behavior is used during SSR and browser navigation.
+Middleware can be synchronous or asynchronous, and the same middleware behavior is used during SSR and browser navigation. The demo auth middleware deliberately waits two seconds so the automatic route fallback and global loading bar are easy to see.
+
+## Navigation loading
+
+`App.vue` demonstrates both loading APIs without application-owned pending state:
+
+```vue
+<script setup lang="ts">
+import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
+</script>
+
+<template>
+  <LoadingIndicator />
+
+  <div class="layout">
+    <aside>Persistent sidebar</aside>
+
+    <section>
+      <header>Persistent header</header>
+
+      <RouteSuspense>
+        <RouterView />
+
+        <template #fallback>
+          <div class="page-skeleton">Loading page…</div>
+        </template>
+      </RouteSuspense>
+    </section>
+  </div>
+</template>
+```
+
+Open Dashboard to see the header and sidebar remain mounted while only the route body shows its fallback. The fallback covers navigation middleware, guards, route resolution, and the Vue DOM update that commits the accepted route. Native Vue `<Suspense>` remains responsible for arbitrary async component setup. `LoadingIndicator` simultaneously shows the optional thin global bar. Fast navigations finish before the default visual delay and do not flash either loader.
+
+The static loader in `index.html` is for the initial SPA boot, before Vue can mount safely. `RouteSuspense` and `LoadingIndicator` own later Vue Router navigations. SSR requests still wait for middleware before rendering the final route and do not render browser loading fallback UI.
 
 ## Global middleware
 
@@ -50,7 +84,18 @@ Middleware declared on a parent route also applies to its matched children. Ther
 Middleware is normal application code and may be async:
 
 ```ts
+const sleep = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms)
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(signal.reason)
+    }, { once: true })
+  })
+
 export const authMiddleware = defineMiddleware(async (context) => {
+  await sleep(2000, context.signal)
+
   const session = context.cookies.get('single_session')
 
   if (!session) {
@@ -196,6 +241,11 @@ For an SSR-rendered route, route middleware can execute on the server before the
 For a route intentionally configured for direct SPA rendering, the server returns the SPA shell first, so application route middleware begins when the browser application starts.
 
 Middleware remains application/navigation middleware rather than generic HTTP server middleware.
+
+Use middleware for navigation decisions and small prerequisites, not as the
+default page-data layer. Page queries and larger data loads should normally stay
+with the page. The framework still provides correct feedback whenever a real
+navigation check is asynchronous.
 
 ## What Core owns
 
