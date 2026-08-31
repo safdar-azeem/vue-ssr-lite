@@ -1,0 +1,21 @@
+{
+  "name": "vue-ssr-lite-middleware-example",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vue-ssr-lite dev",
+    "build": "vue-ssr-lite build",
+    "start": "vue-ssr-lite start"
+  },
+  "dependencies": {
+    "vue": "^3.5.22",
+    "vue-router": "^4.5.1",
+    "vue-ssr-lite": "^1.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "vite": "^7.1.3",
+    "typescript": "^5.9.2"
+  }
+}
