@@ -20,7 +20,11 @@ import type {
 } from './SsrMiddlewareTypes'
 
 export type MiddlewareNavigationPlan =
-  | { kind: 'continue'; props: MiddlewarePendingProps[] }
+  | {
+      kind: 'continue'
+      props: MiddlewarePendingProps[]
+      enteredMatchedIndices: number[]
+    }
   | { kind: 'cancel' }
   | { kind: 'redirect'; location: RouteLocationRaw }
   | { kind: 'special-redirect'; redirect: MiddlewareRedirectResult }
@@ -41,7 +45,11 @@ export const executeMiddlewareChain = async (options: {
   server: boolean
   signal: AbortSignal
 }): Promise<MiddlewareNavigationPlan> => {
-  const collected = collectMiddleware(options.globalMiddleware, options.to)
+  const collection = collectMiddleware(
+    options.globalMiddleware,
+    options.to,
+    options.from
+  )
   const pending = new Map<number, Record<string, unknown>>()
   const cookies = createMiddlewareCookies({
     server: options.server,
@@ -49,9 +57,9 @@ export const executeMiddlewareChain = async (options: {
     response: options.context.response,
   })
 
-  for (let index = 0; index < collected.length; index += 1) {
+  for (let index = 0; index < collection.entries.length; index += 1) {
     throwIfAborted(options.signal)
-    const entry = collected[index]!
+    const entry = collection.entries[index]!
     const middlewareContext: MiddlewareContext<any> = {
       app: options.app,
       router: options.router,
@@ -91,6 +99,7 @@ export const executeMiddlewareChain = async (options: {
   throwIfAborted(options.signal)
   return {
     kind: 'continue',
+    enteredMatchedIndices: [...collection.enteredMatchedIndices],
     props: [...pending].map(([matchedIndex, props]) => ({
       matchedIndex,
       props: { ...props },
