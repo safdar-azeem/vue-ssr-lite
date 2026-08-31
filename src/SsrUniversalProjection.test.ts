@@ -133,6 +133,30 @@ const expectUntrustedConfigHelperRejected = async (source: string) => {
 }
 
 describe('browser-safe universal runtime projection', () => {
+  it('projects global middleware as browser-safe application code', async () => {
+    const source = `
+import { defineMiddleware, defineServer } from 'vue-ssr-lite'
+const loggerMiddleware = defineMiddleware(({ to }) => void to.fullPath)
+export default defineServer({ middleware: [loggerMiddleware] })
+`
+    const projection = await projectUniversalRuntimeSource(source, '/app/server.ts')
+    expect(projection?.fields.middleware).toBe('[loggerMiddleware]')
+    expect(projection?.statements?.join('\n')).toContain('loggerMiddleware')
+    expect(projection?.imports.join('\n')).toMatch(/defineMiddleware/)
+  })
+
+  it('rejects server-only dependencies reached by global middleware', async () => {
+    const source = `
+import { readFileSync } from 'node:fs'
+import { defineServer } from 'vue-ssr-lite'
+const middleware = () => void readFileSync('/private/session', 'utf8')
+export default defineServer({ middleware: [middleware] })
+`
+    await expect(
+      projectUniversalRuntimeSource(source, '/app/server.ts')
+    ).rejects.toThrow(/Node built-in/)
+  })
+
   it('extracts defineServer extensions without importing server-only fields', async () => {
     const filePath = '/workspace/app/server.ts'
     const source = `
