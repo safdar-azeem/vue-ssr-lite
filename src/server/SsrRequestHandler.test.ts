@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, inject, onServerPrefetch } from 'vue'
+import { RouterView } from 'vue-router'
 import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import type { SsrEndpointDefinition } from '../SsrRuntimeTypes'
 import { SSR_REQUEST_RESOLUTION } from '../SsrRequestResolution'
+import { defineMiddleware } from '../middleware/defineMiddleware'
 import {
   createSsrAdmissionController,
   type SsrAdmissionController,
@@ -118,6 +120,55 @@ const handlerRuntime = (
 })
 
 describe('transport-independent SSR request handler', () => {
+  it('returns a real middleware redirect and preserves multiple Set-Cookie values', async () => {
+    let protectedSetups = 0
+    const definition = compiledDefinition(undefined, undefined, 'ssr')
+    const auth = defineMiddleware(({ cookies, to }) => {
+      cookies.set('attempted', to.fullPath, { sameSite: 'lax' })
+      cookies.set('flash', 'login-required', { httpOnly: true })
+      return { path: '/login', query: { redirect: to.fullPath } }
+    })
+    definition.applications[0]!.application = {
+      id: 'app',
+      root: defineComponent({ setup: () => () => h(RouterView) }),
+      routes: [
+        {
+          path: '/private',
+          component: defineComponent({
+            setup() {
+              protectedSetups += 1
+              return () => h('main', 'private')
+            },
+          }),
+          meta: { middleware: [auth] },
+        },
+        { path: '/login', component: Root },
+      ],
+    }
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/private'),
+        handlerRuntime(scope, definition)
+      )
+      expect(response).toMatchObject({
+        statusCode: 302,
+        headers: {
+          location: 'https://example.test/login?redirect=/private',
+          'cache-control': 'no-store',
+        },
+      })
+      expect(response?.headers?.['set-cookie']).toEqual([
+        'attempted=%2Fprivate; Path=/; SameSite=Lax',
+        'flash=login-required; Path=/; HttpOnly',
+      ])
+      expect(response?.body).toBeUndefined()
+      expect(protectedSetups).toBe(0)
+    } finally {
+      scope.dispose()
+    }
+  })
+
   it('returns 421 when no application owns the request host', async () => {
     const scope = createSsrRequestScope(0)
     const request = Object.freeze({
