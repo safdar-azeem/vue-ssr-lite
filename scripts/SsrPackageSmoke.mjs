@@ -27,7 +27,7 @@ const consumerVersions = {
   vueRouter: process.env.SSR_SMOKE_VUE_ROUTER_VERSION || '4.6.4',
 }
 const FRAMEWORK_WARNING =
-  /inject\(\) can only be used|Symbol\(route location\)|resolveComponent can only be used|already been installed|reading ['"]meta['"]/i
+  /inject\(\) can only be used|Symbol\(route location\)|resolveComponent can only be used|Non-function value encountered for default slot|missing template or render function|Hydration completed but contains mismatches|already been installed|reading ['"]meta['"]/i
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(`[vue-ssr-lite] package smoke: ${message}`)
@@ -212,18 +212,14 @@ useSeo({ status: 404 })
     join(sourceRoot, 'App.vue'),
     `<script setup>
 import { computed, onMounted } from 'vue'
-import { RouterView, useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { usePublicConfig } from 'vue-ssr-lite'
 
-if (!RouterView) throw new Error('host RouterView import is unavailable')
 const route = useRoute()
-const router = useRouter()
 const publicConfig = usePublicConfig()
 if (!route) throw new Error('host useRoute() did not resolve the installed router')
-if (!router) throw new Error('host useRouter() did not resolve the installed router')
 
 const forceLight = computed(() => route.meta.forceLight !== false)
-const navigate = () => router.push('/about')
 onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
 </script>
 
@@ -234,8 +230,8 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
     <div id="public-config-path">{{ publicConfig.pathname }}</div>
     <div id="public-config-application">{{ publicConfig.applicationId }}</div>
     <div id="public-config-revision">{{ publicConfig.revision }}</div>
-    <button id="navigate-about" type="button" @click="navigate">about</button>
-    <router-view />
+    <RouterLink id="navigate-about" to="/about">about</RouterLink>
+    <RouterView />
   </main>
 </template>
 `,
@@ -470,9 +466,18 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       dom.window.document.querySelector('#routed-app')?.getAttribute('data-route') === '/',
       'hydration did not retain the initial route.'
     )
+    const navigationClick = new dom.window.MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    })
     dom.window.document
       .querySelector('#navigate-about')
-      ?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      ?.dispatchEvent(navigationClick)
+    assert(
+      navigationClick.defaultPrevented,
+      'RouterLink did not prevent native document navigation.'
+    )
     await waitFor(
       () => dom.window.document.querySelector('#about-page'),
       'router.push(/about) did not update RouterView after hydration.'
@@ -695,6 +700,7 @@ const main = async () => {
         'id="routed-app"',
         'data-route="/"',
         'id="route-meta">true',
+        'href="/about"',
         'id="home-page">packed-home',
         'id="public-config-path">/',
         'id="public-config-application">app',
@@ -748,6 +754,7 @@ const main = async () => {
       const origin = `http://127.0.0.1:${productionPort}`
       const homeHtml = await assertResponse(origin, '/', 200, [
         'id="routed-app"',
+        'href="/about"',
         'id="home-page">packed-home',
       ])
       await assertResponse(origin, '/about', 200, ['id="about-page">packed-about'])
