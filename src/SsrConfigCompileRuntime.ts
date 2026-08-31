@@ -217,6 +217,7 @@ export interface SsrNormalizedApplicationConfig {
   routes?: ApplicationConfig['routes']
   router?: ApplicationConfig['router']
   scrollBehavior?: ApplicationConfig['scrollBehavior']
+  middleware?: ApplicationConfig['middleware']
   extensions?: ApplicationConfig['extensions']
   cleanup?: ApplicationConfig['cleanup']
   createInitialState?: ApplicationConfig['createInitialState']
@@ -626,6 +627,7 @@ const normalizeApplication = (
     routes: input.routes,
     router: input.router,
     scrollBehavior: input.scrollBehavior,
+    middleware: input.middleware,
     extensions: input.extensions,
     cleanup: input.cleanup,
     createInitialState: input.createInitialState,
@@ -663,6 +665,7 @@ const asApplicationList = (
       'seo',
       'router',
       'scrollBehavior',
+      'middleware',
       'extensions',
     ] as const
     const mixedKey = singleApplicationKeys.find((key) => configRecord[key] !== undefined)
@@ -688,6 +691,7 @@ const asApplicationList = (
     app: undefined,
     router: single.router,
     scrollBehavior: single.scrollBehavior,
+    middleware: single.middleware,
     extensions: single.extensions,
     cleanup: single.cleanup,
     createInitialState: single.createInitialState,
@@ -1212,6 +1216,7 @@ const bindInternalApplication = (
     routes,
     router: app.router,
     scrollBehavior: app.scrollBehavior,
+    middleware: app.middleware,
     extensions: app.extensions,
     seo: resolveApplicationSeoConfig(app.seo),
     defaultRender: app.render,
