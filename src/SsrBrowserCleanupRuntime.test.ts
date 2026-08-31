@@ -7,6 +7,37 @@ import { getSsrStateElementId } from './SsrSerialization'
 import { createTestDomain } from './SsrTestFixtures'
 
 describe('browser hydration cleanup', () => {
+  it('normalizes relative SPA targets at the browser request boundary', async () => {
+    const cases = [
+      ['/relative?preview=1', new URL('/relative?preview=1', window.location.href).href],
+      ['https://absolute.test/path?preview=1', 'https://absolute.test/path?preview=1'],
+    ] as const
+
+    for (let index = 0; index < cases.length; index += 1) {
+      const [url, expected] = cases[index]!
+      document.body.innerHTML = '<div id="request-boundary-app"></div>'
+      let requestUrl: string | undefined
+      const mounted = await mountSpaApplication(
+        {
+          id: `request-boundary-${index}`,
+          root: defineComponent({ setup: () => () => h('main') }),
+          install: ({ context }) => {
+            requestUrl = context.request.url
+          },
+        },
+        {
+          mountSelector: '#request-boundary-app',
+          url,
+          domain: createTestDomain('localhost', { protocol: 'http' }),
+          publicConfig: {},
+        }
+      )
+
+      expect(requestUrl).toBe(expected)
+      mounted.unmount()
+    }
+  })
+
   it('does not remove rendered CSS merely because the router is ready', async () => {
     document.body.innerHTML = [
       '<link rel="stylesheet" href="/src/AsyncCard.vue?vue&type=style" data-vue-ssr-lite-rendered-style="async">',
