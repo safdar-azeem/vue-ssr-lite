@@ -562,13 +562,9 @@ vue-router@^4.5.1:
   dependencies:
     "@vue/devtools-api" "^6.6.4"
 
-vue-ssr-lite@^1.0.0:
-  version "1.0.0-rc.7"
-  resolved "https://registry.npmjs.org/vue-ssr-lite/-/vue-ssr-lite-1.0.0-rc.7.tgz#76db0029eb83a190ae7b915942be9e43e701b632"
-  integrity sha512-SA4CBOqCkOHOOtkVqfDSxdb5aGnu/Fq1RzkyjpJONWjcUK54jpAcOOsK8hQ8j69JfQjfUoa7zmk35v1rLk62uQ==
-  dependencies:
-    es-module-lexer "^2.3.1"
-    esbuild "^0.27.0 || ^0.28.0"
+"vue-ssr-lite@link:../..":
+  version "0.0.0"
+  uid ""
 
 vue@^3.5.22:
   version "3.5.42"
