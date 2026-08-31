@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { access, readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Plugin, ResolveFn, Rollup, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
 import {
@@ -11,6 +12,7 @@ import {
   resolveSsrConfigPath,
   SSR_CLIENT_VIRTUAL_PREFIX,
   SSR_HTML_VIRTUAL_PREFIX,
+  SSR_RENDERER_VIRTUAL_ID,
   SSR_RUNTIME_VIRTUAL_ID,
   type SsrViteApplicationEntry,
   type SsrViteEntries,
@@ -40,10 +42,8 @@ export interface SsrVitePluginOptions {
   ssrNoExternal?: (string | RegExp)[]
 }
 
-// Vue and Vue Router are host-owned peers: that package contract is the
-// singleton guarantee. Dedupe is still useful defense-in-depth for linked
-// workspaces and Vite's client/SSR module graphs, but must not be the ownership
-// mechanism.
+// Vue and Vue Router are host-owned peers. Dedupe plus SSR transformation keep
+// linked workspaces and installed consumers on that same host identity.
 const FRAMEWORK_DEDUPE = [
   'vue',
   'vue-router',
@@ -59,9 +59,81 @@ const FRAMEWORK_DEDUPE = [
  */
 const SSR_CLIENT_PUBLIC_PREFIX = '/@vue-ssr-lite/client/'
 const RESOLVED_RUNTIME = `\0${SSR_RUNTIME_VIRTUAL_ID}`
+// The HTTP/CLI runtime is intentionally outside Vite. SSR application
+// creation and rendering are not: they must execute beside compiled SFCs so
+// Vue's active render instance and template helpers share one module identity.
+const CURRENT_MODULE_PATH = fileURLToPath(import.meta.url)
+const CURRENT_MODULE_DIRECTORY = dirname(CURRENT_MODULE_PATH)
+const DISTRIBUTION_DIRECTORY =
+  basename(CURRENT_MODULE_DIRECTORY) === 'chunks'
+    ? dirname(CURRENT_MODULE_DIRECTORY)
+    : CURRENT_MODULE_DIRECTORY
+const FALLBACK_SSR_RENDERER_ENTRY = normalizePath(
+  CURRENT_MODULE_PATH.endsWith('.ts')
+    ? resolve(CURRENT_MODULE_DIRECTORY, '../SsrRenderRuntime.ts')
+    : resolve(DISTRIBUTION_DIRECTORY, 'internal-ssr-renderer.mjs')
+)
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
 const RESOLVED_HTML_PREFIX = `\0${SSR_HTML_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
+
+const existingFile = async (filePath: string): Promise<string | undefined> => {
+  try {
+    await access(filePath)
+    return normalizePath(filePath)
+  } catch {
+    return undefined
+  }
+}
+
+const findSourceRendererFromAncestor = async (
+  start: string
+): Promise<string | undefined> => {
+  let directory = resolve(start)
+  while (true) {
+    try {
+      const manifest = JSON.parse(
+        await readFile(resolve(directory, 'package.json'), 'utf8')
+      ) as { name?: unknown }
+      if (manifest.name === 'vue-ssr-lite') {
+        const sourceRenderer = await existingFile(
+          resolve(directory, 'src/SsrRenderRuntime.ts')
+        )
+        if (sourceRenderer) return sourceRenderer
+      }
+    } catch {
+      // Continue through parent package scopes.
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
+}
+
+const resolveSsrRendererEntry = async (
+  projectRoot: string
+): Promise<string> => {
+  if (CURRENT_MODULE_PATH.endsWith('.ts')) return FALLBACK_SSR_RENDERER_ENTRY
+
+  try {
+    // Resolve through the installed package rather than assuming the plugin
+    // itself was not bundled while loading vite.config.ts.
+    const packageViteEntry = fileURLToPath(
+      import.meta.resolve('vue-ssr-lite/vite')
+    )
+    const installedRenderer = await existingFile(
+      resolve(dirname(packageViteEntry), 'internal-ssr-renderer.mjs')
+    )
+    if (installedRenderer) return installedRenderer
+  } catch {
+    // A clean source checkout may not have emitted package files yet.
+  }
+
+  return (
+    (await findSourceRendererFromAncestor(projectRoot)) ??
+    FALLBACK_SSR_RENDERER_ENTRY
+  )
+}
 
 /**
  * Rollup resolves `[hash]` (including a length-qualified `[hash:8]`) from an
@@ -247,14 +319,23 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
           // their Vue imports until the first browser request. Prebundle the
           // stable framework boundary so SPA/SSR hydration does not race an
           // optimizer restart on first load.
-          include: ['vue', 'vue-router', 'vue-ssr-lite/client'],
+          include: [
+            'vue',
+            'vue-router',
+            'vue-ssr-lite',
+            'vue-ssr-lite/client',
+          ],
         },
         ssr: {
-          // Keep the published runtime on its intentional Node package boundary.
-          // Its Vue and Vue Router imports resolve through host-owned peers, so
-          // externalization no longer creates a private framework identity.
-          external: ['vue-ssr-lite'],
-          noExternal: [...new Set(options.ssrNoExternal ?? [])],
+          // Transform the framework in Vite's SSR graph so linked workspaces
+          // and installed consumers share the same deduped Vue/Vue Router
+          // identities as compiled SFCs. Externalizing a symlinked package can
+          // resolve its peer imports from the package checkout instead of the
+          // consuming application, leaving template helpers without Vue's
+          // active render instance during SSR.
+          noExternal: [
+            ...new Set(['vue-ssr-lite', ...(options.ssrNoExternal ?? [])]),
+          ],
         },
         build: environment.isSsrBuild
           ? undefined
@@ -290,6 +371,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     resolveId(id) {
       if (isSsrRuntimeVirtualId(id)) return RESOLVED_RUNTIME
+      if (id === SSR_RENDERER_VIRTUAL_ID) {
+        return resolveSsrRendererEntry(root)
+      }
       if (virtualClients.has(id)) {
         return `${RESOLVED_CLIENT_PREFIX}${id.slice(SSR_CLIENT_VIRTUAL_PREFIX.length)}`
       }
