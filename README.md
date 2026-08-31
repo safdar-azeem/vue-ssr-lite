@@ -357,13 +357,29 @@ Route middleware uses direct function references:
 }
 ```
 
-Global middleware runs first, followed by matched parent and child middleware.
+Global middleware runs on every navigation. Route middleware runs for route
+records entered by the navigation, parent to child. A parent route's middleware
+protects entry into that route branch, but it does not rerun when navigating
+between descendants while the parent remains active. Leaving and later
+re-entering the branch runs it again.
+
+```text
+/about → /dashboard
+authMiddleware runs
+
+/dashboard → /dashboard/nested
+authMiddleware does not rerun
+
+/dashboard/nested → /about → /dashboard/nested
+authMiddleware runs again
+```
+
 The same function runs once per target navigation. Middleware may be synchronous
 or async. Return nothing or `true` to continue, `false` to cancel, a normal Vue
 Router location to redirect, or `{ props }` to add props to the default component
 of the route that declared that middleware. Existing route props are composed,
-with later middleware values winning. Parent middleware applies to nested routes,
-but its props remain owned by the parent component.
+with later middleware values winning. Accepted parent middleware props remain
+owned by the parent component while that route record stays active.
 
 On a direct SSR request, a middleware redirect becomes a real HTTP redirect and
 the rejected component tree is not rendered. A direct SPA request still receives
