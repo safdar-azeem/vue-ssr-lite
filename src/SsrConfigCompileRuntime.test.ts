@@ -14,7 +14,7 @@ import {
   normalizeSsrConfig,
 } from './SsrConfigCompileRuntime'
 import { sourceDeclaresServerConfigRoutes } from './SsrUniversalProjection'
-import { defineApplication, defineServer } from './index'
+import { defineApplication, defineMiddleware, defineServer } from './index'
 import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 import { resolveSsrDomainContext } from './SsrDomainRuntime'
 import { resolveSsrHostEntry } from './server/SsrHostRuntime'
@@ -206,6 +206,7 @@ describe('defineServer application architecture', () => {
   })
 
   it('rejects application ports and mixed single/multi-app fields', () => {
+    const middleware = defineMiddleware(() => undefined)
     expect(() =>
       defineApplication({
         name: 'admin',
@@ -228,6 +229,53 @@ describe('defineServer application architecture', () => {
         ],
       } as never)
     ).toThrow(/single-application field `seo` with applications/)
+    expect(() =>
+      normalizeSsrConfig({
+        middleware: [middleware],
+        applications: [
+          defineApplication({ name: 'website', host: 'example.com' }),
+        ],
+      } as never)
+    ).toThrow(/single-application field `middleware` with applications/)
+  })
+
+  it('keeps global middleware application-scoped in single and multi-app configs', () => {
+    const websiteMiddleware = defineMiddleware(() => undefined)
+    const adminMiddleware = defineMiddleware(() => undefined)
+    const single = normalizeSsrConfig(
+      defineServer({ middleware: [websiteMiddleware] })
+    )
+    expect(single.applications.app.middleware).toEqual([websiteMiddleware])
+
+    const multi = normalizeSsrConfig({
+      applications: [
+        defineApplication({
+          name: 'website',
+          host: 'example.com',
+          middleware: [websiteMiddleware],
+        }),
+        defineApplication({
+          name: 'admin',
+          host: 'admin.example.com',
+          middleware: [adminMiddleware],
+        }),
+      ],
+    })
+    expect(multi.applications.website.middleware).toEqual([websiteMiddleware])
+    expect(multi.applications.admin.middleware).toEqual([adminMiddleware])
+  })
+
+  it('binds normalized middleware into the server application definition', async () => {
+    const middleware = defineMiddleware(() => undefined)
+    const compiled = await compileSsrConfig(
+      withSsrShells(defineServer({ middleware: [middleware] }), {
+        app: { root: Root },
+      }),
+      { development: true, root: '/workspace/middleware-app' }
+    )
+    expect(compiled.applications[0]?.application?.middleware).toEqual([
+      middleware,
+    ])
   })
 
   it('rejects object-map application config', () => {
@@ -587,6 +635,7 @@ describe('defineServer application architecture', () => {
         ],
         fields: {
           extensions: '[analyticsExtension({ propertyId: "UA-123456" })]',
+          middleware: '[() => undefined]',
           createInitialState: '() => ({ marker: "ADVANCED_INITIAL_STATE" })',
           scrollBehavior: '(to) => ({ el: to.hash })',
         },
@@ -594,6 +643,7 @@ describe('defineServer application architecture', () => {
     })
     expect(client).toContain('UA-123456')
     expect(client).toContain('extensions:')
+    expect(client).toContain('middleware:')
     expect(client).toContain('createInitialState:')
     expect(client).toContain('scrollBehavior:')
     expect(client).not.toContain('server.ts')
