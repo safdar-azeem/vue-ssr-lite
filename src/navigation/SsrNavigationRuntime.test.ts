@@ -162,6 +162,42 @@ describe('SsrNavigationRuntime', () => {
     runtime.dispose()
   })
 
+  it('settles a redirect back to the already-current route exactly once', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', component: Page },
+        { path: '/dashboard', component: Page },
+      ],
+    })
+    const runtime = createSsrNavigationRuntime({ router, server: false })
+    await router.push('/login?redirect=/dashboard')
+    const events = listener()
+    runtime.subscribe(events.subscriber)
+    router.beforeEach((to) => {
+      if (to.path === '/dashboard') {
+        return {
+          path: '/login',
+          query: { redirect: '/dashboard' },
+        }
+      }
+    })
+
+    await router.push('/dashboard')
+
+    expect(router.currentRoute.value.fullPath).toBe(
+      '/login?redirect=/dashboard'
+    )
+    expect(events.starts).toEqual([1])
+    expect(events.settles).toEqual([1])
+    await nextTick()
+    expect(events.settles).toEqual([1])
+    const late = listener()
+    runtime.subscribe(late.subscriber)
+    expect(late.starts).toEqual([])
+    runtime.dispose()
+  })
+
   it('ignores stale settlement after a navigation is superseded', async () => {
     const { router, runtime } = await createHarness()
     const events = listener()
@@ -241,16 +277,21 @@ describe('SsrNavigationRuntime', () => {
     runtime.dispose()
   })
 
-  it('recovers current terminal ownership when a router adapter clones the route object', async () => {
+  it('does not let cloned same-target terminal hooks settle a newer generation', async () => {
     const source = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', component: Page },
-        { path: '/about', component: Page },
+        { path: '/dashboard', component: Page },
       ],
     })
     const from = source.resolve('/') as RouteLocationNormalizedLoaded
-    const to = source.resolve('/about') as RouteLocationNormalized
+    const firstDashboard = source.resolve(
+      '/dashboard'
+    ) as RouteLocationNormalized
+    const secondDashboard = {
+      ...source.resolve('/dashboard'),
+    } as RouteLocationNormalized
     let before:
       | ((
           target: RouteLocationNormalized,
@@ -264,6 +305,13 @@ describe('SsrNavigationRuntime', () => {
           failure?: unknown
         ) => unknown)
       | undefined
+    let error:
+      | ((
+          failure: unknown,
+          target: RouteLocationNormalized,
+          previous: RouteLocationNormalizedLoaded
+        ) => unknown)
+      | undefined
     const router = {
       currentRoute: { value: from },
       beforeEach(handler: typeof before) {
@@ -274,7 +322,8 @@ describe('SsrNavigationRuntime', () => {
         after = handler
         return () => undefined
       },
-      onError() {
+      onError(handler: typeof error) {
+        error = handler
         return () => undefined
       },
     } as unknown as Router
@@ -289,16 +338,29 @@ describe('SsrNavigationRuntime', () => {
     runtime.subscribe(events.subscriber)
 
     try {
-      await before!(to, from)
-      await after!({ ...to }, from)
-      await nextTick()
+      await before!(firstDashboard, from)
+      await before!(secondDashboard, from)
+      expect(events.starts).toEqual([1, 2])
+      expect(events.settles).toEqual([1])
 
-      expect(events.starts).toEqual([1])
+      await after!({ ...firstDashboard }, from)
+      await nextTick()
+      expect(events.settles).toEqual([1])
+
+      await error!(new Error('stale failure'), { ...firstDashboard }, from)
       expect(events.settles).toEqual([1])
       expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining('recovered a missing afterEach transaction mapping'),
-        { to: '/about' }
+        expect.stringContaining('ignored unmapped stale afterEach navigation'),
+        { staleTo: '/dashboard', activeTo: '/dashboard' }
       )
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('ignored unmapped stale onError navigation'),
+        { staleTo: '/dashboard', activeTo: '/dashboard' }
+      )
+
+      await after!(secondDashboard, from)
+      await nextTick()
+      expect(events.settles).toEqual([1, 2])
     } finally {
       runtime.dispose()
       warning.mockRestore()
@@ -368,18 +430,83 @@ describe('SsrNavigationRuntime', () => {
         { staleTo: '/slow', activeTo: '/about' }
       )
 
-      await after!({ ...about }, from)
+      await after!(about, from)
       await nextTick()
       expect(events.settles).toEqual([1, 2])
-      expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining('recovered a missing afterEach transaction mapping'),
-        { to: '/about' }
-      )
     } finally {
       runtime.dispose()
       warning.mockRestore()
       debug.mockRestore()
     }
+  })
+
+  it('rejects cloned stale redirect ancestry with the same active origin path', async () => {
+    const source = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', component: Page },
+        { path: '/dashboard', component: Page },
+      ],
+    })
+    const from = source.resolve('/login') as RouteLocationNormalizedLoaded
+    const firstOrigin = source.resolve(
+      '/dashboard'
+    ) as RouteLocationNormalized
+    const secondOrigin = {
+      ...source.resolve('/dashboard'),
+    } as RouteLocationNormalized
+    const login = source.resolve('/login') as RouteLocationNormalized
+    let before:
+      | ((
+          target: RouteLocationNormalized,
+          previous: RouteLocationNormalizedLoaded
+        ) => unknown)
+      | undefined
+    let after:
+      | ((
+          target: RouteLocationNormalized,
+          previous: RouteLocationNormalizedLoaded,
+          failure?: unknown
+        ) => unknown)
+      | undefined
+    const router = {
+      currentRoute: { value: from },
+      beforeEach(handler: typeof before) {
+        before = handler
+        return () => undefined
+      },
+      afterEach(handler: typeof after) {
+        after = handler
+        return () => undefined
+      },
+      onError() {
+        return () => undefined
+      },
+    } as unknown as Router
+    const runtime = createSsrNavigationRuntime({ router, server: false })
+    const events = listener()
+    runtime.subscribe(events.subscriber)
+
+    await before!(firstOrigin, from)
+    await before!(secondOrigin, from)
+    expect(events.starts).toEqual([1, 2])
+    expect(events.settles).toEqual([1])
+
+    const staleTerminal = {
+      ...login,
+      redirectedFrom: { ...firstOrigin },
+    } as RouteLocationNormalized
+    await after!(staleTerminal, from, {})
+    await nextTick()
+    expect(events.settles).toEqual([1])
+
+    const currentTerminal = {
+      ...login,
+      redirectedFrom: secondOrigin,
+    } as RouteLocationNormalized
+    await after!(currentTerminal, from, {})
+    expect(events.settles).toEqual([1, 2])
+    runtime.dispose()
   })
 
   it('cleans up listeners and boundary registrations', async () => {
