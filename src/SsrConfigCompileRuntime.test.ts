@@ -602,6 +602,8 @@ describe('defineServer application architecture', () => {
     expect(runtime).not.toContain('ssr.config')
     expect(runtime).not.toMatch(/ssr\s*:\s*\(\)\s*=>\s*import/)
     expect(runtime).toContain('const viteBase = "/"')
+    expect(runtime).toContain('virtual:vue-ssr-lite/internal/ssr-renderer')
+    expect(runtime).toContain('__vueSsrLiteRenderApplication')
     expect(runtime).toContain('/app/src/App.vue')
     expect(runtime).toContain('/app/src/main.ts')
 
@@ -612,6 +614,9 @@ describe('defineServer application architecture', () => {
     expect(spaClient).toContain('from "/app/src/main.ts"')
     expect(spaClient).toContain('const routes = undefined')
     expect(spaClient).toContain('export const definition')
+    expect(spaClient).toContain(
+      '__vueSsrLiteDevelopment: import.meta.env.DEV'
+    )
     expect(spaClient).not.toContain('src/modules/erp/app.ts')
 
     const ssrClient = generateSsrClientModule('/app', entries.applications[1])
