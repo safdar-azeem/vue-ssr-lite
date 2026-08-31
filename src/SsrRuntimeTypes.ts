@@ -5,6 +5,7 @@ import type { App, Component, Plugin } from 'vue'
 import type { Router, RouterHistory, RouteRecordRaw, RouterScrollBehavior } from 'vue-router'
 import type { SsrHydrationContext, SsrHydrationController } from './SsrHydrationRuntime'
 import type { SsrRequestResolution, SsrResolutionController } from './SsrRequestResolution'
+import type { Middleware } from './middleware/SsrMiddlewareTypes'
 
 export type SsrHeaderValue = string | readonly string[] | undefined
 /** Immutable transport facts captured at the request boundary. */
@@ -46,7 +47,8 @@ export interface SsrPublicConfigRequest {
 
 export interface SsrResponseState {
   statusCode: number
-  headers: Record<string, string>
+  /** Header values retain multiplicity for fields such as Set-Cookie. */
+  headers: Record<string, string | string[]>
   redirect?: {
     location: string
     statusCode?: 301 | 302 | 303 | 307 | 308
@@ -162,6 +164,8 @@ export interface SsrApplicationDefinition<
    * an application's existing behaviour exactly when adopting the definition.
    */
   scrollBehavior?: RouterScrollBehavior
+  /** Application-wide middleware, in declaration order. */
+  middleware?: readonly Middleware<TPublicConfig>[]
   /** Application default render mode. Route `meta.render` may override it. */
   defaultRender?: import('./SsrConfigTypes').SsrRenderMode
   /**
@@ -201,6 +205,8 @@ export interface SsrCreatedApplication<
   resolution: SsrResolutionController
   /** Core managed-head collector for this application instance. */
   managedHead: import('./SsrManagedHead').ManagedHeadController
+  /** @internal Core-owned route middleware lifecycle for this app/request. */
+  middleware: import('./middleware/SsrMiddlewareRuntime').SsrMiddlewareExecutionController | null
 }
 
 export interface SsrRenderResult<TApplicationState = unknown, TPublicConfig = unknown> {
