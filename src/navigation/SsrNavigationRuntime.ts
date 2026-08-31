@@ -51,7 +51,7 @@ export const createSsrNavigationRuntime = (options: {
 }): SsrNavigationRuntime => {
   const subscribers = new Set<SsrNavigationSubscriber>()
   const boundaries = new Map<number, Set<SsrNavigationBoundarySubscriber>>()
-  const navigationIds = new WeakMap<RouteLocationNormalized, number>()
+  const navigationIds = new WeakMap<object, number>()
   let boundaryCount = 0
   let sequence = 0
   let active: ActiveNavigation | undefined
@@ -180,15 +180,27 @@ export const createSsrNavigationRuntime = (options: {
     if (mapped !== undefined) return mapped
     if (!active) return undefined
 
-    // Vue Router normally preserves the normalized route object between
-    // guards and terminal hooks. Treat that identity as a fast path rather
-    // than a correctness requirement: adapters and error normalization may
-    // provide an equivalent route object instead.
-    if (active.transaction.to.fullPath === to.fullPath) {
+    // Vue Router may terminate a redirect as duplicated before running the
+    // redirect target through beforeEach when that target is already current.
+    // In that case the terminal route has no navigationIds entry and active
+    // still points at the pre-redirect target. Redirect ancestry is the
+    // ownership proof that lets this terminal event close the same logical
+    // transaction without weakening stale-generation checks.
+    const redirectOrigin = to.redirectedFrom
+    const redirectOriginId = redirectOrigin
+      ? navigationIds.get(redirectOrigin)
+      : undefined
+    if (
+      redirectOrigin?.fullPath === active.origin.fullPath &&
+      redirectOriginId === active.transaction.id
+    ) {
       if (options.diagnostics) {
         console.warn(
-          `[vue-ssr-lite] navigation #${active.transaction.id} recovered a missing ${hook} transaction mapping.`,
-          { to: to.fullPath }
+          `[vue-ssr-lite] navigation #${active.transaction.id} recovered terminal ownership from ${hook} redirect ancestry.`,
+          {
+            to: to.fullPath,
+            redirectedFrom: redirectOrigin.fullPath,
+          }
         )
       }
       return active.transaction.id
