@@ -53,7 +53,7 @@ const SERVER_RUNTIME_EXPORTS = [
   'useSsrRequestContext',
 ]
 
-const VITE_RUNTIME_EXPORTS = ['vueSsrLite']
+const VITE_RUNTIME_EXPORTS = ['importSsrViteModule', 'vueSsrLite']
 
 const OBSOLETE_RUNTIME_EXPORTS = [
   'useSsrDomain',
