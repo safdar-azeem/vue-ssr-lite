@@ -393,9 +393,15 @@ external full-document navigation.
 
 Middleware receives the current app/router, target and previous route, normalized
 cookies, domain, authoritative origin, public config, environment flag, and an
-abort signal. Global middleware configured in `server.ts` is statically projected
-into the browser definition, so its complete dependency graph must be universal
-and browser-safe.
+abort signal. Middleware that may run during SSR is statically projected into the
+browser definition, so its complete dependency graph must remain universal and
+browser-safe.
+
+When Core can statically prove that an application declares `render: 'spa'`, its
+middleware can only execute in the browser (SPA route branches cannot opt back
+into SSR). Core still projects the exact middleware binding and protects the
+configuration from mutation, but leaves that middleware's ordinary browser
+dependency graph to Vite. No separate client-middleware API is needed.
 
 Middleware should primarily handle navigation decisions such as authentication,
 authorization, workspace resolution, redirects, and small route prerequisites.
@@ -839,11 +845,13 @@ components
 
 `defineApplication()` may mention routes and SEO in `app.ts`. The compiler projects a client graph from `main`, `App.vue`, and the routes module. It does not import the complete server configuration into browser bundles.
 
-Six configuration fields are also universal: `extensions`, `middleware`, `router`,
-`scrollBehavior`, `createInitialState`, and `cleanup`. Core statically projects only
-those fields and their proven browser-safe dependencies. This boundary keeps SEO,
-sitemap, robots, endpoints, Node APIs, secrets, and other server-only imports out of
-the browser bundle.
+Six configuration fields are also projected into the browser: `extensions`,
+`middleware`, `router`, `scrollBehavior`, `createInitialState`, and `cleanup`. Core
+normally requires their dependencies to be universal and browser-safe. The only
+environment-specific exception is middleware on a statically proven default-SPA
+application, which never executes on the server and therefore uses its normal Vite
+browser dependency graph. This boundary keeps SEO, sitemap, robots, endpoints,
+Node APIs, secrets, and other server-only imports out of the browser bundle.
 
 Use static inline expressions, direct imports from browser-safe modules, or dedicated
 `const` bindings whose dependencies are also static. A config stored in a `const` and
@@ -898,11 +906,13 @@ const analytics = defineExtension({
 ```
 
 Register extensions on `defineServer()` or `defineApplication()`, not in `main.ts`.
-Universal fields (`extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, `cleanup`)
-follow the static projection contract above. Prefer defining an extension inline or
-in a dedicated `const`; `defineServer(factory())` and mutation-capable reference
-indirection are rejected because the server and browser definitions could silently
-diverge.
+Projected fields (`extensions`, `middleware`, `router`, `scrollBehavior`,
+`createInitialState`, `cleanup`) follow the static projection contract above.
+Prefer defining an extension inline or in a dedicated `const`;
+`defineServer(factory())` and mutation-capable reference indirection are rejected
+because the server and browser definitions could silently diverge. The default-SPA
+middleware dependency exception changes only environment-equivalence validation;
+it does not weaken these static identity and mutation checks.
 
 # Common Problems
 
