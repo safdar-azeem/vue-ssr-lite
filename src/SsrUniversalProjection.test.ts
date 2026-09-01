@@ -1,13 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vue from '@vitejs/plugin-vue'
 import { transformSync } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
+import { build as viteBuild } from 'vite'
 import {
   assertNoImportedUniversalConfigMutation,
   assertUniversalProjectionCoverage,
   projectUniversalRuntimeSource,
+  sourceDeclaresSpaOnlyApplication,
   type SsrUniversalRuntimeProjection,
 } from './SsrUniversalProjection'
 import { loadSsrConfigFile, extractSsrViteEntries, generateSsrClientModule } from './SsrConfigCompileRuntime'
@@ -1679,6 +1682,7 @@ describe('universal projection compile coverage', () => {
 
   afterEach(async () => {
     delete (globalThis as Record<string, unknown>).__VUE_SSR_LITE_MUTATOR_EVALUATED__
+    delete (globalThis as Record<string, unknown>).__VUE_SSR_LITE_BROWSER_AUTH_EVALUATED__
     if (root) await rm(root, { recursive: true, force: true })
     root = ''
   })
@@ -1692,6 +1696,146 @@ describe('universal projection compile coverage', () => {
       '<!doctype html><html><body><div id="app"></div></body></html>\n'
     )
   }
+
+  it('lets a statically SPA-only application use normal browser middleware dependencies', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-spa-browser-middleware-'))
+    await writeShell()
+    await mkdir(join(root, 'src/erp'), { recursive: true })
+    await mkdir(join(root, 'src/storefront'), { recursive: true })
+    await writeFile(
+      join(root, 'src/browser-auth.ts'),
+      `typeof window === 'undefined' && (() => { throw new Error('BROWSER_ONLY_AUTH_EVALUATED_IN_NODE') })()\nexport const browserAuthBehavior = 'BROWSER_AUTH_MIDDLEWARE_BEHAVIOR'\n`
+    )
+    await writeFile(
+      join(root, 'src/auth.ts'),
+      `import { browserAuthBehavior } from './browser-auth'\nexport const authMiddleware = () => browserAuthBehavior\n`
+    )
+    await writeFile(join(root, 'src/erp/main.ts'), 'export default () => {}\n')
+    await writeFile(join(root, 'src/erp/App.vue'), '<template><div>ERP</div></template>\n')
+    await writeFile(
+      join(root, 'src/erp/app.ts'),
+      `
+import { defineApplication } from ${JSON.stringify(defineConfigPath)}
+import { authMiddleware } from '../auth'
+export default defineApplication({
+  name: 'erp',
+  render: 'spa',
+  host: 'erp.test',
+  app: { main: './main.ts', root: './App.vue' },
+  middleware: [authMiddleware],
+})
+`
+    )
+    await writeFile(join(root, 'src/storefront/main.ts'), 'export default () => {}\n')
+    await writeFile(
+      join(root, 'src/storefront/App.vue'),
+      '<template><div>Storefront</div></template>\n'
+    )
+    await writeFile(
+      join(root, 'src/storefront/app.ts'),
+      `
+import { defineApplication } from ${JSON.stringify(defineConfigPath)}
+export default defineApplication({
+  name: 'storefront',
+  render: 'ssr',
+  host: 'storefront.test',
+  app: { main: './main.ts', root: './App.vue' },
+})
+`
+    )
+    await writeFile(
+      join(root, 'server.ts'),
+      `
+import { defineServer } from ${JSON.stringify(defineConfigPath)}
+import erp from './src/erp/app'
+import storefront from './src/storefront/app'
+export default defineServer({ applications: [erp, storefront] })
+`
+    )
+
+    await expect(
+      sourceDeclaresSpaOnlyApplication(
+        await readFile(join(root, 'src/erp/app.ts'), 'utf8'),
+        join(root, 'src/erp/app.ts')
+      )
+    ).resolves.toBe(true)
+    const config = await loadSsrConfigFile(root)
+    const erp = extractSsrViteEntries(config, { root }).applications.find(
+      (application) => application.id === 'erp'
+    )!
+    const client = generateSsrClientModule(root, erp)
+    expect(client).toContain('authMiddleware')
+    expect(client).toContain('/src/auth')
+
+    const clientEntry = join(root, 'src/generated-client.ts')
+    await writeFile(clientEntry, client)
+    const viteResult = await viteBuild({
+      root,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [vue()],
+      resolve: {
+        alias: {
+          'vue-ssr-lite/client': join(libraryRoot, 'src/client.ts'),
+          vue: join(libraryRoot, 'node_modules/vue'),
+          'vue-router': join(libraryRoot, 'node_modules/vue-router'),
+        },
+      },
+      build: {
+        write: false,
+        rollupOptions: { input: clientEntry },
+      },
+    })
+    const outputItems = Array.isArray(viteResult)
+      ? viteResult.flatMap((result) => result.output)
+      : viteResult.output
+    const output = outputItems
+      .map((item) => (item.type === 'chunk' ? item.code : ''))
+      .join('\n')
+    expect(output).toContain('BROWSER_ONLY_AUTH_EVALUATED_IN_NODE')
+    expect(output).toContain('BROWSER_AUTH_MIDDLEWARE_BEHAVIOR')
+    expect(output).not.toContain('const browserMiddleware = () => true')
+  })
+
+  it('keeps SSR middleware dependency projection fail-closed', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-ssr-universal-middleware-'))
+    await writeShell()
+    await writeFile(
+      join(root, 'src/auth.ts'),
+      `typeof window === 'undefined' && (() => { throw new Error('BROWSER_ONLY_AUTH_EVALUATED_IN_NODE') })()\nexport const authMiddleware = () => true\n`
+    )
+    await writeFile(
+      join(root, 'server.ts'),
+      `
+import { defineServer } from ${JSON.stringify(defineConfigPath)}
+import { authMiddleware } from './src/auth'
+export default defineServer({ render: 'ssr', middleware: [authMiddleware] })
+`
+    )
+
+    await expect(loadSsrConfigFile(root)).rejects.toThrow(/top-level side effect/)
+  })
+
+  it('does not accept a mutated SPA render declaration as browser-only proof', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-mutated-spa-middleware-'))
+    await writeShell()
+    await writeFile(
+      join(root, 'src/auth.ts'),
+      `typeof window === 'undefined' && (() => { throw new Error('BROWSER_ONLY_AUTH_EVALUATED_IN_NODE') })()\nexport const authMiddleware = () => true\n`
+    )
+    await writeFile(
+      join(root, 'server.ts'),
+      `
+import { defineServer } from ${JSON.stringify(defineConfigPath)}
+import { authMiddleware } from './src/auth'
+const config = defineServer({ render: 'spa', middleware: [authMiddleware] })
+config.render = 'ssr'
+export default config
+`
+    )
+
+    await expect(loadSsrConfigFile(root)).rejects.toThrow(/configuration object/)
+  })
 
   it('loads a function-export server.ts into the generated client', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-projection-fn-'))
