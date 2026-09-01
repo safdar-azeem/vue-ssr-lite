@@ -17,6 +17,7 @@ import {
   isDefineApplicationModuleSource,
   projectUniversalRuntimeSource,
   resolveApplicationRoutesImportBindings,
+  sourceDeclaresSpaOnlyApplication,
   sourceDeclaresServerConfigRoutes,
   assertUniversalProjectionCoverage,
   type SsrUniversalRuntimeProjection,
@@ -378,7 +379,15 @@ export const discoverApplicationSourceFiles = async (
         `Application "${application.name}" must import a dedicated routes module so the client graph does not import ${file}.`
       )
     }
-    const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
+    const browserOnlyMiddleware =
+      application.render === 'spa' &&
+      (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver))
+    const projection = await projectUniversalRuntimeSource(
+      source,
+      file,
+      moduleResolver,
+      { browserOnlyMiddleware }
+    )
     assertUniversalProjectionCoverage(application, projection, file)
     if (projection) projections.set(application.name, projection)
   }
@@ -860,23 +869,46 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     const relativePath = relative(root, file)
     return !relativePath.startsWith('..') && !isAbsolute(relativePath)
   }
+  const browserMiddlewareModules = new Set(
+    [...(graph.browserMiddlewareModules ?? [])].map((file) =>
+      file.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
+    )
+  )
+  const serverConfigModules = new Set(
+    [...(graph.serverConfigModules ?? [])].map((file) =>
+      file.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
+    )
+  )
   const reachableConfigModules = [
     ...new Set([
       ...graph.imports.keys(),
       ...[...graph.imports.values()].flat(),
     ]),
-  ].filter(isProjectFile)
+  ].filter(isProjectFile).filter((file) => {
+    const normalized = file.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
+    return !browserMiddlewareModules.has(normalized) || serverConfigModules.has(normalized)
+  })
   const preEvaluationProjections = new Map<string, SsrUniversalRuntimeProjection>()
   const preEvaluationApplicationFiles = new Set<string>()
   for (const file of [absoluteConfig, ...reachableConfigModules]) {
     const source = file === absoluteConfig ? configSource : await readFile(file, 'utf8')
+    let applicationModule = false
     if (
       file !== absoluteConfig &&
       (await isDefineApplicationModuleSource(source, file, moduleResolver))
     ) {
       preEvaluationApplicationFiles.add(file)
+      applicationModule = true
     }
-    const projection = await projectUniversalRuntimeSource(source, file, moduleResolver)
+    const browserOnlyMiddleware =
+      (file === absoluteConfig || applicationModule) &&
+      (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver))
+    const projection = await projectUniversalRuntimeSource(
+      source,
+      file,
+      moduleResolver,
+      { browserOnlyMiddleware }
+    )
     if (projection) {
       preEvaluationProjections.set(file, projection)
     }
@@ -904,7 +936,7 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     protectedUniversalIdentities
   )
   const discovered = await discoverApplicationSourceFiles(root, absoluteConfig, graph)
-  const singleApplicationProjection = discovered.files.size
+  let singleApplicationProjection = discovered.files.size
     ? undefined
     : preEvaluationProjections.get(absoluteConfig)
   const loaded = (await evaluateBundledConfigModule(root, code)) as {
@@ -939,9 +971,27 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
         )
     }
   } else {
-    const projection = singleApplicationProjection
-    assertUniversalProjectionCoverage(config, projection, absoluteConfig)
-    if (projection) discovered.projections.set(SSR_DEFAULT_APPLICATION_ID, projection)
+    if (
+      config.render !== 'spa' &&
+      (await sourceDeclaresSpaOnlyApplication(configSource, absoluteConfig, moduleResolver))
+    ) {
+      singleApplicationProjection = await projectUniversalRuntimeSource(
+        configSource,
+        absoluteConfig,
+        moduleResolver
+      )
+    }
+    assertUniversalProjectionCoverage(
+      config,
+      singleApplicationProjection,
+      absoluteConfig
+    )
+    if (singleApplicationProjection) {
+      discovered.projections.set(
+        SSR_DEFAULT_APPLICATION_ID,
+        singleApplicationProjection
+      )
+    }
   }
   await assertConventionFiles(root, config, discovered.files)
   const normalized = normalizeSsrConfig(config, {
