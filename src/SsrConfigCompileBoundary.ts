@@ -6,8 +6,10 @@ import type { Plugin } from 'esbuild'
 import type { ApplicationConfig } from './SsrConfigTypes'
 import {
   isDefineApplicationModuleSource,
+  resolveApplicationMiddlewareImportBindings,
   resolveApplicationRoutesImportBindings,
   resolveApplicationRoutesImportSpecifiers,
+  sourceDeclaresSpaOnlyApplication,
   type SsrApplicationRoutesImportBinding,
 } from './SsrUniversalProjection'
 
@@ -27,6 +29,10 @@ export const SSR_CONFIG_UNIVERSAL_NAMESPACE = 'vue-ssr-lite-config-universal'
 export const SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE =
   'vue-ssr-lite-config-application-routes'
 
+/** Browser-only middleware modules owned by the client bundler. */
+export const SSR_CONFIG_BROWSER_MIDDLEWARE_NAMESPACE =
+  'vue-ssr-lite-config-browser-middleware'
+
 export interface SsrConfigModuleGraph {
   imports: Map<string, string[]>
   universalImporters: Set<string>
@@ -34,6 +40,12 @@ export interface SsrConfigModuleGraph {
   applicationRoutesModules?: Set<string>
   /** Route export names required by each synthetic application-routes module. */
   applicationRoutesExports?: Map<string, Set<string>>
+  /** Middleware export names required by each synthetic browser-middleware module. */
+  browserMiddlewareExports?: Map<string, Set<string>>
+  /** Local middleware modules omitted from the Node config-discovery walk. */
+  browserMiddlewareModules?: Set<string>
+  /** Local modules also reached through a server-executed config edge. */
+  serverConfigModules?: Set<string>
   /** Every esbuild resolution edge, including aliases and external packages. */
   resolutions?: SsrConfigModuleResolution[]
 }
@@ -57,6 +69,9 @@ export const createSsrConfigModuleGraph = (): SsrConfigModuleGraph => ({
   universalImporters: new Set(),
   applicationRoutesModules: new Set(),
   applicationRoutesExports: new Map(),
+  browserMiddlewareExports: new Map(),
+  browserMiddlewareModules: new Set(),
+  serverConfigModules: new Set(),
   resolutions: [],
 })
 
@@ -233,6 +248,33 @@ const readApplicationRoutesBindings = (
   return pending
 }
 
+const middlewareBindingCache = new WeakMap<
+  SsrConfigModuleGraph,
+  Map<string, Promise<SsrApplicationRoutesImportBinding[]>>
+>()
+
+const readApplicationMiddlewareBindings = (
+  graph: SsrConfigModuleGraph,
+  filePath: string
+): Promise<SsrApplicationRoutesImportBinding[]> => {
+  const cache = middlewareBindingCache.get(graph) ??
+    new Map<string, Promise<SsrApplicationRoutesImportBinding[]>>()
+  middlewareBindingCache.set(graph, cache)
+  const existing = cache.get(filePath)
+  if (existing) return existing
+  const pending = (async () => {
+    if (!isScriptModule(filePath)) return []
+    const source = await readFile(filePath, 'utf8')
+    if (!await sourceDeclaresSpaOnlyApplication(source, filePath)) return []
+    // Once SPA-only status is proven, extraction failures must fail the
+    // config build rather than falling through to Node evaluation of an
+    // unknown browser dependency.
+    return await resolveApplicationMiddlewareImportBindings(source, filePath)
+  })()
+  cache.set(filePath, pending)
+  return pending
+}
+
 const stubApplicationRoutesModule = (
   graph: SsrConfigModuleGraph,
   importer: string,
@@ -276,6 +318,52 @@ const applicationRoutesStub = (
   ].join('\n')
 }
 
+const stubApplicationBrowserMiddlewareModule = (
+  graph: SsrConfigModuleGraph,
+  importer: string,
+  specifier: string,
+  resolvedPath: string,
+  external: boolean,
+  importedBindings: readonly string[]
+) => {
+  const key = external ? `external:${resolvedPath}` : normalizeResolutionPath(resolvedPath)
+  recordResolution(graph, importer, specifier, resolvedPath, external)
+  // Keep the edge in both graph indexes for authoritative client resolution,
+  // but mark local middleware modules so config-discovery audits skip their
+  // browser-owned dependency closure.
+  if (!external) {
+    const normalized = normalizeResolutionPath(resolvedPath)
+    recordImport(graph, importer, normalized)
+    graph.browserMiddlewareModules ??= new Set()
+    graph.browserMiddlewareModules.add(normalized)
+  }
+  graph.browserMiddlewareExports ??= new Map()
+  const exports = graph.browserMiddlewareExports.get(key) ?? new Set<string>()
+  for (const imported of importedBindings) exports.add(imported)
+  graph.browserMiddlewareExports.set(key, exports)
+  return {
+    path: key,
+    namespace: SSR_CONFIG_BROWSER_MIDDLEWARE_NAMESPACE,
+    external: false,
+  }
+}
+
+const applicationBrowserMiddlewareStub = (
+  graph: SsrConfigModuleGraph,
+  filePath: string
+): string => {
+  const imported = graph.browserMiddlewareExports?.get(filePath) ?? new Set<string>()
+  const named = [...imported]
+    .filter((name) => name !== 'default' && name !== '*' && IDENTIFIER_NAME.test(name))
+    .map((name) => `export { browserMiddleware as ${name} };`)
+  return [
+    'const browserMiddleware = () => true;',
+    'export default browserMiddleware;',
+    ...named,
+    '',
+  ].join('\n')
+}
+
 export const createSsrConfigBoundaryPlugin = (
   graph: SsrConfigModuleGraph
 ): Plugin => ({
@@ -285,7 +373,8 @@ export const createSsrConfigBoundaryPlugin = (
       if (args.pluginData?.vueSsrLiteConfigBoundary) return undefined
       if (
         args.namespace === SSR_CONFIG_UNIVERSAL_NAMESPACE ||
-        args.namespace === SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE
+        args.namespace === SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE ||
+        args.namespace === SSR_CONFIG_BROWSER_MIDDLEWARE_NAMESPACE
       ) {
         return { path: args.path, namespace: args.namespace }
       }
@@ -331,6 +420,39 @@ export const createSsrConfigBoundaryPlugin = (
             external: false,
           }
         }
+        const middlewareBindings = await readApplicationMiddlewareBindings(graph, args.importer)
+        const matchingMiddleware = middlewareBindings.filter(
+          (binding) => binding.specifier === args.path
+        )
+        if (matchingMiddleware.length) {
+          const resolved = await build.resolve(args.path, {
+            kind: args.kind,
+            importer: args.importer,
+            namespace: args.namespace,
+            resolveDir: args.resolveDir,
+            pluginData: { vueSsrLiteConfigBoundary: true },
+          })
+          const fallback =
+            args.path.startsWith('.') || args.path.startsWith('/') || isAbsolute(args.path)
+              ? await resolveExistingModule(
+                  resolve(args.resolveDir || dirname(args.importer), args.path)
+                )
+              : undefined
+          const resolvedPath =
+            resolved.path && !resolved.errors.length ? resolved.path : fallback
+          const localSpecifier =
+            args.path.startsWith('.') || args.path.startsWith('/') || isAbsolute(args.path)
+          return stubApplicationBrowserMiddlewareModule(
+            graph,
+            args.importer,
+            args.path,
+            resolvedPath ?? (localSpecifier
+              ? resolve(args.resolveDir || dirname(args.importer), args.path)
+              : args.path),
+            resolvedPath ? Boolean(resolved.external) : !localSpecifier,
+            matchingMiddleware.map((binding) => binding.imported)
+          )
+        }
       }
       if (isUniversalSpecifier(args.path)) {
         if (args.importer) graph.universalImporters.add(args.importer)
@@ -369,7 +491,10 @@ export const createSsrConfigBoundaryPlugin = (
         }
       }
       if (resolved.path && !resolved.external) {
-        recordImport(graph, args.importer, resolved.path)
+        const normalized = normalizeResolutionPath(resolved.path)
+        recordImport(graph, args.importer, normalized)
+        graph.serverConfigModules ??= new Set()
+        graph.serverConfigModules.add(normalized)
       }
       return resolved
     })
@@ -384,6 +509,13 @@ export const createSsrConfigBoundaryPlugin = (
       { filter: /.*/, namespace: SSR_CONFIG_APPLICATION_ROUTES_NAMESPACE },
       (args) => ({
         contents: applicationRoutesStub(graph, args.path),
+        loader: 'js',
+      })
+    )
+    build.onLoad(
+      { filter: /.*/, namespace: SSR_CONFIG_BROWSER_MIDDLEWARE_NAMESPACE },
+      (args) => ({
+        contents: applicationBrowserMiddlewareStub(graph, args.path),
         loader: 'js',
       })
     )
