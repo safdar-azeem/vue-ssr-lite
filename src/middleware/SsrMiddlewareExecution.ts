@@ -73,8 +73,11 @@ export const executeMiddlewareChain = async (options: {
       signal: options.signal,
       redirect: createMiddlewareRedirectResult,
     }
+    // Router guards execute outside component setup. Run every middleware in
+    // the owning app context so application-scoped composables/plugins can use
+    // inject() consistently in both SSR and browser navigation.
     const classified = classifyMiddlewareResult(
-      await entry.middleware(middlewareContext),
+      await options.app.runWithContext(() => entry.middleware(middlewareContext)),
       middlewareLabel(entry, index),
       options.to.fullPath
     )
