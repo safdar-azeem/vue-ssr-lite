@@ -18,6 +18,6 @@ export interface AppContext {
 /**
  * Installs application plugins and route guards. Core awaits this initializer
  * before installing Vue Router, so the first browser navigation cannot race
- * asynchronous authentication or permission setup.
+ * asynchronous application setup.
  */
 export type AppInitializer = (context: AppContext) => void | Promise<void>
