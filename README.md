@@ -330,15 +330,9 @@ Use `defineMiddleware()` for small universal navigation checks and route data:
 ```ts
 import { defineMiddleware } from 'vue-ssr-lite'
 
-export const authMiddleware = defineMiddleware(async (context) => {
-  const session = context.cookies.get('session')
-  if (!session) {
-    return {
-      path: '/login',
-      query: { redirect: context.to.fullPath },
-    }
-  }
-  return { props: { userName: 'john' } }
+export const requestMiddleware = defineMiddleware(async (context) => {
+  const variant = context.cookies.get('variant')
+  return variant ? { props: { variant } } : true
 })
 ```
 
@@ -357,7 +351,7 @@ Route middleware uses direct function references:
 {
   path: '/dashboard',
   component: DashboardPage,
-  meta: { middleware: [authMiddleware] },
+  meta: { middleware: [requestMiddleware] },
 }
 ```
 
@@ -369,13 +363,13 @@ re-entering the branch runs it again.
 
 ```text
 /about → /dashboard
-authMiddleware runs
+requestMiddleware runs
 
 /dashboard → /dashboard/nested
-authMiddleware does not rerun
+requestMiddleware does not rerun
 
 /dashboard/nested → /about → /dashboard/nested
-authMiddleware runs again
+requestMiddleware runs again
 ```
 
 The same function runs once per target navigation. Middleware may be synchronous
