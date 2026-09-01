@@ -347,8 +347,8 @@ export const createSsrApplication = async <
     extensionRuntime.setup()
     // Vue Router starts its initial browser navigation from `install()`. Keep
     // that installation behind the (possibly async) application initializer so
-    // consumer auth/permission guards are registered before any route-level
-    // guard can observe incomplete session state.
+    // Consumer middleware is registered before any route-level guard can
+    // observe incomplete application setup.
     if (router) app.use(router)
     hydration.onDispose(() => {
       extensionRuntime.dispose()
