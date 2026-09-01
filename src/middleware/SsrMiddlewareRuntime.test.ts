@@ -12,6 +12,29 @@ import { defineMiddleware } from './defineMiddleware'
 const RouterRoot = defineComponent({ setup: () => () => h(RouterView) })
 
 describe('universal middleware SSR runtime', () => {
+  it('executes middleware in the owning Vue application injection context', async () => {
+    const injectionKey = Symbol('middleware-plugin')
+    let observed: string | undefined
+    const middleware = defineMiddleware(() => {
+      observed = inject(injectionKey)
+    })
+
+    await renderSsrApplication(
+      createTestApplication({
+        id: 'middleware-injection-context',
+        root: RouterRoot,
+        routes: [{ path: '/', component: defineComponent({ render: () => h('main') }) }],
+        middleware: [middleware],
+        install({ app }) {
+          app.provide(injectionKey, 'installed')
+        },
+      }),
+      createTestRenderRequest('middleware.test')
+    )
+
+    expect(observed).toBe('installed')
+  })
+
   it('executes global, parent, and child middleware for a direct nested SSR target', async () => {
     const order: string[] = []
     const global = defineMiddleware(async () => {
