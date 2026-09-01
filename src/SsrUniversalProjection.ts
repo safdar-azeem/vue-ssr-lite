@@ -25,6 +25,15 @@ export interface SsrUniversalRuntimeProjection {
   fields: Partial<Record<SsrUniversalRuntimeField, string>>
 }
 
+export interface SsrUniversalProjectionOptions {
+  /**
+   * A default-SPA application's middleware can only execute in the browser.
+   * Keep projecting its exact binding, but let Vite own its normal browser
+   * dependency graph instead of requiring browser/Node export equivalence.
+   */
+  browserOnlyMiddleware?: boolean
+}
+
 export interface SsrUniversalResolvedModule {
   identity: string
   path?: string
@@ -2309,13 +2318,15 @@ const assertBrowserSafeImportedDependencies = async (
 }
 
 const fieldValueNodes = (
-  object: EstreeNode
+  object: EstreeNode,
+  excludedFields: ReadonlySet<SsrUniversalRuntimeField> = new Set()
 ): EstreeNode[] => {
   const nodes: EstreeNode[] = []
   for (const property of asNodes(object.properties)) {
     if (property.type !== 'Property') continue
     const name = propertyName(property)
     if (!name || !isUniversalField(name)) continue
+    if (excludedFields.has(name)) continue
     const value = asNode(property.value)
     if (value) nodes.push(value)
   }
@@ -2700,6 +2711,102 @@ export const resolveApplicationRoutesImportSpecifiers = async (
 ]
 
 /**
+ * Import specifiers that feed `defineApplication({ middleware })` (or an
+ * equivalent application-factory object). The Node config evaluator can
+ * replace these modules with inert placeholders when the application is a
+ * statically declared SPA; the generated browser client still imports the
+ * original module through normal Vite resolution.
+ */
+export const resolveApplicationMiddlewareImportBindings = async (
+  source: string,
+  filePath: string
+): Promise<SsrApplicationRoutesImportBinding[]> => {
+  const transformed = transformSync(source, {
+    loader: loaderForFile(filePath),
+    format: 'esm',
+    target: 'esnext',
+    sourcemap: false,
+    legalComments: 'none',
+  }).code
+  const parseAst = await loadParseAst()
+  const program = parseAst(transformed) as EstreeNode
+  const bindings = collectModuleBindings(program)
+  const helpers = collectConfigHelpers(program, filePath)
+  const application = unwrapApplicationRoutesObject(
+    findDefaultExport(program),
+    bindings,
+    helpers
+  )
+  if (!application) return []
+  const values = asNodes(application.object.properties)
+    .filter((property) => property.type === 'Property' && propertyName(property) === 'middleware')
+    .map((property) => asNode(property.value))
+    .filter((value): value is EstreeNode => Boolean(value))
+  const found: SsrApplicationRoutesImportBinding[] = []
+  const seenBindings = new Set<string>()
+  const seenNodes = new Set<string>()
+  const visit = (value: EstreeNode | undefined) => {
+    const node = unwrapExpression(value)
+    if (!node) return
+    const nodeKey = `${node.type}:${node.start}`
+    if (seenNodes.has(nodeKey)) return
+    seenNodes.add(nodeKey)
+    if (node.type === 'ArrayExpression') {
+      for (const element of asNodes(node.elements)) visit(element)
+      return
+    }
+    if (node.type === 'SpreadElement') {
+      visit(asNode(node.argument))
+      return
+    }
+    if (node.type === 'Identifier') {
+      const declared = bindings.get(node.name as string)
+      if (
+        declared?.kind === 'declaration' &&
+        declared.node.type === 'VariableDeclarator'
+      ) {
+        visit(asNode(declared.node.init))
+        return
+      }
+    }
+    const binding = bindingFromRoutesValue(node, bindings)
+    if (binding) {
+      const key = `${binding.specifier}\0${binding.imported}`
+      if (!seenBindings.has(key)) {
+        seenBindings.add(key)
+        found.push(binding)
+      }
+      return
+    }
+    // Middleware is often wrapped in a local function/const before being
+    // placed in the array. Follow only its free module bindings so a browser
+    // dependency is still stubbed without evaluating that module in Node.
+    const free = new Set<string>()
+    walkFreeIdentifiers(node, new Set(), free)
+    for (const name of free) {
+      const declared = bindings.get(name)
+      if (!declared) continue
+      if (declared.kind === 'import') {
+        const target = importBindingTarget(declared)
+        if (!target) continue
+        const key = `${target.specifier}\0${target.imported}`
+        if (seenBindings.has(key)) continue
+        seenBindings.add(key)
+        found.push(target)
+      } else if (
+        declared.node.type === 'VariableDeclarator'
+      ) {
+        visit(asNode(declared.node.init))
+      } else if (declared.node.type === 'FunctionDeclaration') {
+        visit(declared.node)
+      }
+    }
+  }
+  for (const value of values) visit(value)
+  return found
+}
+
+/**
  * True when `server.ts` statically declares `routes` on the exported
  * `defineServer()` / config object. Used to reject the removed single-app API
  * before the config bundler follows route-graph imports.
@@ -2725,10 +2832,42 @@ export const sourceDeclaresServerConfigRoutes = async (
   return Boolean(unwrapped && objectDeclaresRoutes(unwrapped.object))
 }
 
-export const projectUniversalRuntimeSource = async (
+/**
+ * Prove from source that this config describes a default-SPA application.
+ * Core separately rejects SPA route branches that attempt to opt back into
+ * SSR, so middleware in this application can never run on the server.
+ */
+export const sourceDeclaresSpaOnlyApplication = async (
   source: string,
   filePath: string,
   moduleResolver?: SsrUniversalModuleResolver
+): Promise<boolean> => {
+  const transformed = transformSync(source, {
+    loader: loaderForFile(filePath),
+    format: 'esm',
+    target: 'esnext',
+    sourcemap: false,
+    legalComments: 'none',
+  }).code
+  const parseAst = await loadParseAst()
+  const program = parseAst(transformed) as EstreeNode
+  const bindings = collectModuleBindings(program)
+  const helpers = collectConfigHelpers(program, filePath, moduleResolver)
+  const defaultExport = findDefaultExport(program)
+  if (!defaultExport) return false
+  const unwrapped = unwrapConfigObject(defaultExport, bindings, helpers)
+  if (!unwrapped) return false
+  const render = unwrapExpression(
+    findObjectLiteralValue(unwrapped.object, 'render')
+  )
+  return render?.type === 'Literal' && render.value === 'spa'
+}
+
+export const projectUniversalRuntimeSource = async (
+  source: string,
+  filePath: string,
+  moduleResolver?: SsrUniversalModuleResolver,
+  options: SsrUniversalProjectionOptions = {}
 ): Promise<SsrUniversalRuntimeProjection | undefined> => {
   const transformed = transformSync(source, {
     loader: loaderForFile(filePath),
@@ -2748,23 +2887,42 @@ export const projectUniversalRuntimeSource = async (
   const fields = extractUniversalFields(unwrapped.object, transformed)
   if (!Object.keys(fields).length) return undefined
   assertStaticConfigObjectShape(unwrapped.object, filePath)
+  const allFieldNodes = fieldValueNodes(unwrapped.object)
   const needed = collectNeededBindings(
-    fieldValueNodes(unwrapped.object),
+    allFieldNodes,
     unwrapped.extra,
     bindings,
     filePath
   )
-  assertNoServerRuntimeGlobals(fieldValueNodes(unwrapped.object), needed, filePath)
+  const browserOnlyFields = new Set<SsrUniversalRuntimeField>()
+  if (options.browserOnlyMiddleware) browserOnlyFields.add('middleware')
+  const serverExecutableFieldNodes = fieldValueNodes(
+    unwrapped.object,
+    browserOnlyFields
+  )
+  const serverExecutableBindings = collectNeededBindings(
+    serverExecutableFieldNodes,
+    unwrapped.extra,
+    bindings,
+    filePath
+  )
+  assertNoServerRuntimeGlobals(
+    serverExecutableFieldNodes,
+    serverExecutableBindings,
+    filePath
+  )
   assertNoNodeBuiltinDynamicImports(
     [
-      ...fieldValueNodes(unwrapped.object),
-      ...needed.filter((binding) => binding.kind !== 'import').map((binding) => binding.node),
+      ...serverExecutableFieldNodes,
+      ...serverExecutableBindings
+        .filter((binding) => binding.kind !== 'import')
+        .map((binding) => binding.node),
     ],
     filePath
   )
   const dependencies = await assertBrowserSafeImportedDependencies(
-    fieldValueNodes(unwrapped.object),
-    needed,
+    serverExecutableFieldNodes,
+    serverExecutableBindings,
     filePath,
     moduleResolver
   )
@@ -2774,7 +2932,7 @@ export const projectUniversalRuntimeSource = async (
     trackedDeclarators.add(binding.node)
     trackedNames.add(binding.name)
   }
-  const projectedRoots = new Set<EstreeNode>(fieldValueNodes(unwrapped.object))
+  const projectedRoots = new Set<EstreeNode>(allFieldNodes)
   for (const binding of needed) {
     if (binding.kind === 'import') continue
     if (binding.node.type === 'VariableDeclarator') {
