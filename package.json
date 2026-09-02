@@ -9,7 +9,10 @@
   "types": "./dist/index.d.ts",
   "sideEffects": false,
   "author": "safdar-azeem",
-  "repository": "https://github.com/safdar-azeem/vue-ssr-lite",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/safdar-azeem/vue-ssr-lite.git"
+  },
   "homepage": "https://github.com/safdar-azeem/vue-ssr-lite#readme",
   "bugs": "https://github.com/safdar-azeem/vue-ssr-lite/issues",
   "files": [
@@ -18,7 +21,7 @@
     "LICENSE"
   ],
   "bin": {
-    "vue-ssr-lite": "./dist/cli.mjs"
+    "vue-ssr-lite": "dist/cli.mjs"
   },
   "exports": {
     ".": {
