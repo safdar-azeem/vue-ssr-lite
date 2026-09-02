@@ -1,6 +1,7 @@
 import HomePage from './pages/HomePage.vue'
 import AboutPage from './pages/AboutPage.vue'
 import PostPage from './pages/PostPage.vue'
+import ProductsPage from './pages/ProductsPage.vue'
 
 export default [
   {
@@ -29,6 +30,16 @@ export default [
     meta: {
       seo: {
         title: 'Post',
+      },
+    },
+  },
+  {
+    path: '/products',
+    component: ProductsPage,
+    meta: {
+      seo: {
+        title: 'Products',
+        description: 'Products fetched from a public API during SSR.',
       },
     },
   },
