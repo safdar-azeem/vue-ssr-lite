@@ -16,6 +16,7 @@ Small, fast, and simple.
 - `/sitemap.xml` and `/robots.txt`
 - Request-aware route CSS and module preloads
 - Canonical URLs, Open Graph, Twitter Cards, and JSON-LD
+- Standard Vue data fetching with native `fetch()`, GraphQL, or your preferred API client
 
 # Installation
 
@@ -120,6 +121,24 @@ npm run dev
 Your Vue application is now SSR. You are ready to go.
 
 If you need extra configuration or other features, continue below.
+
+# Data Fetching
+
+Use native `await fetch()`, GraphQL/Apollo, Axios, or your existing API client.
+
+```vue
+<script setup lang="ts">
+const response = await fetch('https://dummyjson.com/products?limit=6')
+
+const data = (await response.json()) as ProductsResponse
+</script>
+
+<template>
+  <article v-for="product in data?.products" :key="product.id">
+    <h2>{{ product.title }}</h2>
+  </article>
+</template>
+```
 
 # Application Shell
 
