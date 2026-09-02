@@ -19,3 +19,24 @@ export default defineServer({
   server: { port: 4211 },
 })
 ```
+
+## SSR Data Fetching
+
+The `/products` route fetches product data from the public [DummyJSON products API](https://dummyjson.com/products).
+
+When `/products` is requested directly, the `fetch()` request runs from the
+page's async setup while Vue is server-rendering. The response therefore
+contains the product titles and details in the server-generated HTML before
+hydration.
+
+The same `ProductsPage.vue` component also works during normal Vue Router
+navigation in the browser, where it runs as normal Vue application code. It
+uses native `fetch()` directly; no local API server, proxy, database, or
+vue-ssr-lite-specific data-fetching abstraction is required.
+
+`App.vue` wraps the route outlet in native Vue `<Suspense>` so async setup has
+a browser-side fallback during navigation. The boundary does not fetch data.
+
+DummyJSON is an external demonstration service, so its availability is outside
+vue-ssr-lite's control. The page renders a small friendly error state when the
+request fails or returns a non-2xx response.
