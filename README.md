@@ -2,40 +2,34 @@
 
 A lightweight SSR runtime for **Vue 3**.
 
-`vue-ssr-lite` adds SSR, hydration, SEO, sitemaps, robots.txt, public runtime configuration, and production server tooling without requiring a full framework.
+Add server rendering, hydration, middleware, SEO, hybrid routes, multi-app hosting, caching, and production server features to your existing Vue application — without adopting a full framework or changing your architecture.
+
+Small, fast, and simple.
 
 ## Features
 
-- Vue 3 + Vite SSR
-- Automatic browser hydration
-- Request-aware route CSS and module preloads
-- Vue Router support
-- Built-in SEO and head management
-- Route SEO with `meta.seo`
-- Route-level SSR/SPA with `meta.render`
-- Universal global and route middleware
-- Reactive page SEO with `useSeo()`
-- Canonical URLs, Open Graph, Twitter cards, and JSON-LD
-- HTTP status handling
-- Explicit `/sitemap.xml` and `/robots.txt`
-- Public server-to-client configuration
-- Request-isolated Vue plugins such as Pinia
+- Hybrid SSR/SPA routes
 - Multiple SSR and SPA applications on one port
 - Domain, subdomain, and custom-domain routing
-- Optional SSR response caching
-- Custom server endpoints
-- Production CLI
-- Advanced extension API
+- Global middleware and route-level middleware
+- Built-in SEO and head management
+- `/sitemap.xml` and `/robots.txt`
+- Request-aware route CSS and module preloads
+- Canonical URLs, Open Graph, Twitter Cards, and JSON-LD
 
 # Installation
 
 ```bash
 npm install vue-ssr-lite vue-router
+# or
+yarn add vue-ssr-lite vue-router
+# or
+pnpm add vue-ssr-lite vue-router
 ```
 
-Requires Node `^20.19.0 || >=22.12.0` and an existing Vue 3 + Vite
-application. Vue, Vue Router, and Vite remain host-owned peer dependencies; the
-package does not install a private framework runtime.
+## Example Applications
+
+See [`examples/`](./examples) for small, practical examples showing recommended `vue-ssr-lite` patterns and architecture.
 
 # Minimal Setup
 
@@ -753,13 +747,13 @@ vue-ssr-lite start
 --hmr-port <port>
 ```
 
-| Variable                | Description              |
-| ----------------------- | ------------------------ |
-| `PORT`                  | Server port              |
-| `HOST`                  | Server bind host         |
+| Variable                | Description                           |
+| ----------------------- | ------------------------------------- |
+| `PORT`                  | Server port                           |
+| `HOST`                  | Server bind host                      |
 | `PUBLIC_URL`            | Optional fixed public origin override |
-| `VUE_SSR_LITE_HMR_PORT` | Development HMR port     |
-| `NODE_ENV`              | Runtime environment      |
+| `VUE_SSR_LITE_HMR_PORT` | Development HMR port                  |
+| `NODE_ENV`              | Runtime environment                   |
 
 # API Reference
 
@@ -783,21 +777,21 @@ import {
 import type { AppContext } from 'vue-ssr-lite'
 ```
 
-| API                 | Purpose                                            |
-| ------------------- | -------------------------------------------------- |
-| `defineServer`      | Configure the server/runtime                       |
-| `defineApplication` | Register an explicit application                   |
-| `useSeo`            | Set reactive SEO/head data                         |
-| `usePublicConfig`   | Read browser-safe server config                    |
-| `useOrigin`         | Read the authoritative public origin               |
-| `useDomain`         | Read the selected normalized application domain    |
-| `setHttpStatus`     | Set the current HTTP/page status                   |
-| `redirectTo`        | Set a validated server-rendered-request redirect   |
-| `defineExtension`   | Create an advanced runtime extension               |
-| `defineMiddleware`  | Create typed universal route middleware            |
+| API                 | Purpose                                             |
+| ------------------- | --------------------------------------------------- |
+| `defineServer`      | Configure the server/runtime                        |
+| `defineApplication` | Register an explicit application                    |
+| `useSeo`            | Set reactive SEO/head data                          |
+| `usePublicConfig`   | Read browser-safe server config                     |
+| `useOrigin`         | Read the authoritative public origin                |
+| `useDomain`         | Read the selected normalized application domain     |
+| `setHttpStatus`     | Set the current HTTP/page status                    |
+| `redirectTo`        | Set a validated server-rendered-request redirect    |
+| `defineExtension`   | Create an advanced runtime extension                |
+| `defineMiddleware`  | Create typed universal route middleware             |
 | `RouteSuspense`     | Add a delayed fallback around a changing route area |
 | `LoadingIndicator`  | Show an optional delayed global navigation bar      |
-| `AppContext`        | Type for the `main.ts` initializer                 |
+| `AppContext`        | Type for the `main.ts` initializer                  |
 
 ## `vue-ssr-lite/vite`
 
