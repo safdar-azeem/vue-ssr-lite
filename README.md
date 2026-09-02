@@ -118,9 +118,7 @@ Keep a standard Vite `index.html` at the project root.
 npm run dev
 ```
 
-Your Vue application is now SSR. You are ready to go.
-
-If you need extra configuration or other features, continue below.
+Your Vue application is now SSR. You are ready to go. If you need extra configuration or other features, continue below.
 
 # Data Fetching
 
