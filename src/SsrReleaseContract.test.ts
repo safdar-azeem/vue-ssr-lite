@@ -13,7 +13,12 @@ interface PackageManifest {
   module?: string
   types?: string
   sideEffects?: boolean
-  repository?: string
+  repository?:
+    | string
+    | {
+        type: string
+        url: string
+      }
   homepage?: string
   bugs?: string
   files?: string[]
@@ -48,9 +53,10 @@ describe('repository release contract', () => {
     expect(manifest.name).toBe('vue-ssr-lite')
     expect(manifest.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)
     expect(manifest.license).toBe('MIT')
-    expect(manifest.repository).toBe(
-      'https://github.com/safdar-azeem/vue-ssr-lite'
-    )
+    expect(manifest.repository).toEqual({
+      type: 'git',
+      url: 'git+https://github.com/safdar-azeem/vue-ssr-lite.git',
+    })
     expect(manifest.homepage).toBe(
       'https://github.com/safdar-azeem/vue-ssr-lite#readme'
     )
@@ -64,7 +70,7 @@ describe('repository release contract', () => {
     expect(manifest.sideEffects).toBe(false)
     expect(manifest.files).toEqual(['dist', 'README.md', 'LICENSE'])
     expect(manifest.bin).toEqual({
-      'vue-ssr-lite': './dist/cli.mjs',
+      'vue-ssr-lite': 'dist/cli.mjs',
     })
     expect(manifest.exports).toEqual({
       '.': {
