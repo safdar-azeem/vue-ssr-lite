@@ -14,3 +14,31 @@ nav {
   gap: 16px;
   margin-bottom: 32px;
 }
+
+.products-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.product-card {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #ddd;
+}
+
+.product-card img {
+  object-fit: cover;
+}
+
+.product-card h2 {
+  margin-top: 0;
+}
+
+.product-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
