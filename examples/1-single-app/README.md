@@ -34,8 +34,9 @@ navigation in the browser, where it runs as normal Vue application code. It
 uses native `fetch()` directly; no local API server, proxy, database, or
 vue-ssr-lite-specific data-fetching abstraction is required.
 
-`App.vue` wraps the route outlet in native Vue `<Suspense>` so async setup has
-a browser-side fallback during navigation. The boundary does not fetch data.
+`App.vue` uses the enhanced `RouterView`, which coordinates navigation with
+native Vue `<Suspense>` so async setup has the same browser-side fallback. The
+route outlet does not fetch data itself.
 
 DummyJSON is an external demonstration service, so its availability is outside
 vue-ssr-lite's control. The page renders a small friendly error state when the
