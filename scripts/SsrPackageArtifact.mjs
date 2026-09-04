@@ -138,7 +138,7 @@ import * as server from 'vue-ssr-lite/server'
 import * as vite from 'vue-ssr-lite/vite'
 
 const expected = [
-  [root, ['defineServer', 'defineApplication', 'defineMiddleware', 'RouteSuspense', 'LoadingIndicator', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
+  [root, ['defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
   [client, ['hydrateSsrApplication', 'mountSpaApplication']],
   [server, ['defineSitemap', 'createSsrManagedServer', 'createSsrMemoryResponseCache']],
   [vite, ['vueSsrLite']],
@@ -158,7 +158,7 @@ export { root, client, server, vite }
   defineServer,
   defineApplication,
   defineMiddleware,
-  RouteSuspense,
+  RouterView,
   LoadingIndicator,
   useSeo,
   usePublicConfig,
@@ -188,7 +188,7 @@ void [
   defineServer,
   defineApplication,
   defineMiddleware,
-  RouteSuspense,
+  RouterView,
   LoadingIndicator,
   useSeo,
   usePublicConfig,
