@@ -52,13 +52,19 @@ const listener = () => {
 
 const boundary = (depth: number) => {
   const starts: number[] = []
+  const accepts: number[] = []
   const settles: number[] = []
   const subscriber: SsrNavigationBoundarySubscriber = {
     depth,
     start: ({ id }) => starts.push(id),
+    accept: ({ id }) => {
+      accepts.push(id)
+      return false
+    },
+    abort: () => false,
     settle: (id) => settles.push(id),
   }
-  return { starts, settles, subscriber }
+  return { starts, accepts, settles, subscriber }
 }
 
 const deferred = () => {
@@ -277,6 +283,95 @@ describe('SsrNavigationRuntime', () => {
     await router.push('/about')
 
     expect(order).toEqual(['start', 'afterEach', 'settle'])
+    runtime.dispose()
+  })
+
+  it('keeps the navigation active until the selected page boundary resolves', async () => {
+    const { router, runtime } = await createHarness()
+    const events = listener()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = ({ id }) => {
+      routeBoundary.accepts.push(id)
+      return true
+    }
+    runtime.subscribe(events.subscriber)
+    runtime.registerBoundary(routeBoundary.subscriber)
+
+    await router.push('/about')
+    await nextTick()
+
+    expect(routeBoundary.accepts).toEqual([1])
+    expect(events.settles).toEqual([])
+    runtime.pageReady(1, routeBoundary.subscriber)
+    expect(events.settles).toEqual([1])
+    expect(routeBoundary.settles).toEqual([1])
+    runtime.dispose()
+  })
+
+  it('resolves scroll ownership only after the exact destination page is ready', async () => {
+    const { router, runtime } = await createHarness()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = ({ id }) => {
+      routeBoundary.accepts.push(id)
+      return true
+    }
+    runtime.registerBoundary(routeBoundary.subscriber)
+
+    await router.push('/about')
+    const acceptedRoute = router.currentRoute.value
+    let readinessSettled = false
+    const readiness = runtime.whenPageReady(acceptedRoute).then((ready) => {
+      readinessSettled = true
+      return ready
+    })
+    await Promise.resolve()
+    expect(readinessSettled).toBe(false)
+    expect(runtime.isPageCurrent(acceptedRoute)).toBe(true)
+
+    runtime.pageReady(1, routeBoundary.subscriber)
+    await expect(readiness).resolves.toBe(true)
+    runtime.dispose()
+  })
+
+  it('revokes page and scroll ownership when a destination is superseded', async () => {
+    const { router, runtime } = await createHarness()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = ({ id }) => {
+      routeBoundary.accepts.push(id)
+      return true
+    }
+    runtime.registerBoundary(routeBoundary.subscriber)
+
+    await router.push('/slow')
+    const staleRoute = router.currentRoute.value
+    const staleReadiness = runtime.whenPageReady(staleRoute)
+    await router.push('/about')
+
+    await expect(staleReadiness).resolves.toBe(false)
+    expect(runtime.isPageCurrent(staleRoute)).toBe(false)
+    runtime.pageReady(2, routeBoundary.subscriber)
+    runtime.dispose()
+  })
+
+  it('ignores stale page readiness after a newer navigation takes ownership', async () => {
+    const { router, runtime } = await createHarness()
+    const events = listener()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = ({ id }) => {
+      routeBoundary.accepts.push(id)
+      return true
+    }
+    runtime.subscribe(events.subscriber)
+    runtime.registerBoundary(routeBoundary.subscriber)
+
+    await router.push('/slow')
+    await router.push('/about')
+    runtime.pageReady(1, routeBoundary.subscriber)
+
+    expect(events.starts).toEqual([1, 2])
+    expect(events.settles).toEqual([1])
+    runtime.pageReady(2, routeBoundary.subscriber)
+    expect(events.settles).toEqual([1, 2])
     runtime.dispose()
   })
 
