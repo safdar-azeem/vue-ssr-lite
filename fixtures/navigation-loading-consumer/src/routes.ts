@@ -4,6 +4,7 @@ import DashboardPage from './DashboardPage.vue'
 import DashboardNestedPage from './DashboardNestedPage.vue'
 import HomePage from './HomePage.vue'
 import LoginPage from './LoginPage.vue'
+import ProductsPage from './ProductsPage.vue'
 import SettingsPage from './SettingsPage.vue'
 import { authMiddleware } from './middleware/authMiddleware'
 import { cancellationMiddleware } from './middleware/cancellationMiddleware'
@@ -11,6 +12,7 @@ import { cancellationMiddleware } from './middleware/cancellationMiddleware'
 export const routes = [
   { path: '/', component: HomePage },
   { path: '/about', component: AboutPage },
+  { path: '/products', component: ProductsPage },
   { path: '/settings', component: SettingsPage },
   {
     path: '/cancelled',
