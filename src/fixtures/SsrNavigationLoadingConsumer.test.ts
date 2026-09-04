@@ -745,7 +745,6 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(assigned).not.toHaveBeenCalled()
     expect(replaced).not.toHaveBeenCalled()
 
-    const about = dom.window.document.querySelector('.about-page')
     const click = new dom.window.MouseEvent('click', {
       bubbles: true,
       cancelable: true,
@@ -758,7 +757,7 @@ describe('linked-package real SFC navigation loading consumer', () => {
       () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
       'The route-area fallback did not appear.'
     )
-    expect(dom.window.document.querySelector('.about-page')).toBe(about)
+    expect(dom.window.document.querySelector('.about-page')).toBeNull()
     expect(dom.window.document.querySelector('.persistent-header')).toBe(
       header
     )
