@@ -449,14 +449,23 @@ pending state and the delay is not restarted when navigation hands off to an
 async page. Nested outlets select the closest enhanced view whose matched route
 record is changing.
 
+Internally, router acceptance and page readiness are separate milestones. A
+successful router transaction stays loading until the selected outlet's current
+Suspense generation resolves. Cancellation and errors finish without waiting
+for rejected destination work, and a superseded page generation cannot finish
+the newer navigation's loader. Readiness is acknowledged by the destination
+generation after it is actually mounted or updated inside its Suspense branch;
+it is not inferred from the absence of a `pending` event. Application wrappers
+such as out-in transitions may therefore delay mounting without ending the
+navigation clock early.
+
 The fallback is the route area's normal rendered state while loading. The
 component adds no layout element or fallback CSS: a skeleton can be full-page,
 card-sized, centered, or any other shape entirely through application code.
-The previously accepted route is retained through Vue render lifecycle while a
-navigation can still cancel, without leaving an interactive copy in the
-document. That retention is transition-scoped: once native Suspense resolves,
-the inactive route is destroyed and is not reused as an implicit KeepAlive
-cache entry on a later navigation.
+While middleware or guards can still cancel, a fully resolved current page may
+be retained outside the document so cancellation can restore the same component
+instance. That retention ends at the router decision; unresolved destinations
+are never retained by it, and it does not become an implicit page cache.
 
 The fallback is optional and entirely application-owned. Quick navigations that
 finish before the delay do not flash it.
@@ -478,6 +487,10 @@ Vue Router's normal component-reuse behavior remains intact:
   </template>
 </RouterView>
 ```
+
+The scoped `Component` includes the enhanced page Suspense boundary. An
+application-owned `KeepAlive` therefore remains outside page readiness and is
+the only mechanism that keeps accepted pages cached across later navigations.
 
 For a simple global bar, use the optional CSS-animated indicator alone or
 together with a route fallback:
@@ -508,8 +521,16 @@ mounted, so keep a small static shell fallback in `index.html` for initial boot:
 </style>
 ```
 
-After mount, `RouterView` and `LoadingIndicator` own subsequent browser
-navigation feedback.
+After mount, `RouterView` and `LoadingIndicator` use the same subsequent browser
+navigation clock. The indicator remains active after `afterEach` while the
+accepted destination still has unresolved lazy components, async `setup()`, or
+top-level `await` work.
+
+Vue Router's default and application-defined `scrollBehavior` run after that
+accepted page generation is ready, so saved positions and hash targets can
+refer to async page content. If a later navigation supersedes the page while an
+asynchronous custom scroll behavior is still running, its eventual position is
+discarded instead of being applied to the newer page.
 
 # SEO
 
