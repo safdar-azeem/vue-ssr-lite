@@ -13,6 +13,10 @@ import PageSkeleton from './PageSkeleton.vue'
       <header class="persistent-header">
         <RouterLink class="home-link" to="/">Home</RouterLink>
         <RouterLink class="about-link" to="/about">About</RouterLink>
+        <RouterLink class="products-link" to="/products">Products</RouterLink>
+        <RouterLink class="product-details-link" to="/products#details">
+          Product Details
+        </RouterLink>
         <RouterLink class="dashboard-link" to="/dashboard">Dashboard</RouterLink>
         <RouterLink class="settings-link" to="/settings">Settings</RouterLink>
         <RouterLink class="cancelled-link" to="/cancelled">Cancelled</RouterLink>
