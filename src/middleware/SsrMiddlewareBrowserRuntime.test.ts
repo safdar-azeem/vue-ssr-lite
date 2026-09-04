@@ -21,7 +21,7 @@ import {
   mountSpaApplication,
 } from '../SsrBrowserRuntime'
 import { LoadingIndicator } from '../navigation/LoadingIndicator'
-import { RouteSuspense } from '../navigation/RouteSuspense'
+import { RouterView as SsrRouterView } from '../navigation/RouterView'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import { getSsrStateElementId } from '../SsrSerialization'
 import {
@@ -143,10 +143,9 @@ describe('browser middleware navigation', () => {
             'main',
             { class: 'route-content' },
             h(
-              RouteSuspense,
+              SsrRouterView,
               { delay: 10 },
               {
-                default: () => h(RouterView),
                 fallback: () =>
                   h('div', { class: 'page-loader' }, 'Loading page'),
               }
@@ -254,7 +253,7 @@ describe('browser middleware navigation', () => {
     expect(assign).not.toHaveBeenCalled()
     expect(replace).not.toHaveBeenCalled()
     expect(window.history.state.current).not.toBe('/dashboard')
-    expect(document.querySelector('.home-page')).toBe(home)
+    expect(document.querySelector('.home-page')).toBeNull()
     expect(document.querySelector('.persistent-header')).toBe(header)
     expect(document.querySelector('.persistent-sidebar')).toBe(sidebar)
     expect(document.querySelector('.route-content .page-loader')).not.toBeNull()
@@ -756,10 +755,9 @@ describe('browser middleware navigation', () => {
         h('div', [
           h(LoadingIndicator, { delay: 0 }),
           h(
-            RouteSuspense,
+            SsrRouterView,
             { delay: 0 },
             {
-              default: () => h(RouterView),
               fallback: () => h('div', { class: 'page-loader' }, 'Loading page'),
             }
           ),
@@ -800,7 +798,7 @@ describe('browser middleware navigation', () => {
     await waitForVisualLoading()
     expect(mount.querySelector('.page-loader')).not.toBeNull()
     expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
-    expect(mount.textContent).toContain('About')
+    expect(mount.textContent).not.toContain('About')
 
     gate.resolve()
     await navigation
@@ -829,10 +827,9 @@ describe('browser middleware navigation', () => {
     const Root = defineComponent({
       setup: () => () =>
         h(
-          RouteSuspense,
+          SsrRouterView,
           { delay: 0 },
           {
-            default: () => h(RouterView),
             fallback: () => h('div', { class: 'page-loader' }, 'Loading page'),
           }
         ),
@@ -906,10 +903,9 @@ describe('browser middleware navigation', () => {
             { default: () => 'Dashboard' }
           ),
           h(
-            RouteSuspense,
+            SsrRouterView,
             { delay: 0 },
             {
-              default: () => h(RouterView),
               fallback: () =>
                 h('div', { class: 'page-loader' }, 'Loading page'),
             }
@@ -1019,10 +1015,9 @@ describe('browser middleware navigation', () => {
     const Root = defineComponent({
       setup: () => () =>
         h(
-          RouteSuspense,
+          SsrRouterView,
           { delay: 0 },
           {
-            default: () => h(RouterView),
             fallback: () => h('div', { class: 'page-loader' }, 'Loading page'),
           }
         ),
