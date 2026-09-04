@@ -4,6 +4,7 @@ import {
   createRouter,
   createWebHistory,
   type Router,
+  type RouterScrollBehavior,
 } from 'vue-router'
 import {
   createExtensionRuntime,
@@ -147,6 +148,7 @@ export const createSsrApplication = async <
     typeof definition.routes === 'function'
       ? definition.routes()
       : definition.routes
+  let navigationRuntime: SsrNavigationRuntime | undefined
   let router: Router | null = null
   if (definition.router || routes) {
     // Do not touch Vue Router at all for router-less applications. This is
@@ -167,6 +169,32 @@ export const createSsrApplication = async <
               return { left: 0, top: 0 }
             }),
         })
+
+    if (!options.server && router.options.scrollBehavior) {
+      const scrollBehavior = router.options.scrollBehavior
+      const pageOwnedScrollBehavior: RouterScrollBehavior = async (
+        to,
+        from,
+        savedPosition
+      ) => {
+        const runtime = navigationRuntime
+        if (runtime && !(await runtime.whenPageReady(to))) return false
+
+        try {
+          const position = await scrollBehavior(to, from, savedPosition)
+          // A consumer scroll promise may outlive the page that requested it.
+          // Returning false keeps Vue Router from applying that stale result.
+          if (runtime && !runtime.isPageCurrent(to)) return false
+          return position
+        } catch (error) {
+          // Retired scroll work has no authority over the current navigation,
+          // including authority to surface a late router error for that page.
+          if (runtime && !runtime.isPageCurrent(to)) return false
+          throw error
+        }
+      }
+      router.options.scrollBehavior = pageOwnedScrollBehavior
+    }
   }
 
   const initialState =
@@ -275,17 +303,15 @@ export const createSsrApplication = async <
       })
     : undefined
   let middlewareInstallation: SsrMiddlewareInstallation | undefined
-  let navigationRuntime: SsrNavigationRuntime | undefined
-
   try {
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
     if (router) {
       // Install the observer before middleware so its transaction surrounds
-      // guards and route resolution. Successful navigation settles only after
-      // Vue's next DOM update tick; middleware still owns cancellation and its
-      // AbortSignal lifecycle.
+      // guards and route resolution. Successful navigation hands its loading
+      // clock to the selected RouterView until native page Suspense resolves;
+      // middleware still owns cancellation and its AbortSignal lifecycle.
       navigationRuntime = createSsrNavigationRuntime({
         router,
         server: options.server,
