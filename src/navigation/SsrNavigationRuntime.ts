@@ -43,7 +43,32 @@ interface ActiveNavigation {
   transaction: SsrNavigationTransaction
   /** First target in this router-owned redirect chain. */
   origin: RouteLocationNormalized
+  readiness: PageReadiness
   boundaries: Set<SsrNavigationBoundarySubscriber>
+  pendingBoundaries: Set<SsrNavigationBoundarySubscriber>
+  routerAccepted: boolean
+  terminalOutcome: NavigationOutcome
+}
+
+interface PageReadiness {
+  readonly promise: Promise<boolean>
+  resolve(ready: boolean): void
+}
+
+const createPageReadiness = (): PageReadiness => {
+  let settled = false
+  let resolvePromise!: (ready: boolean) => void
+  const promise = new Promise<boolean>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve(ready) {
+      if (settled) return
+      settled = true
+      resolvePromise(ready)
+    },
+  }
 }
 
 export const createSsrNavigationRuntime = (options: {
@@ -54,6 +79,7 @@ export const createSsrNavigationRuntime = (options: {
   const subscribers = new Set<SsrNavigationSubscriber>()
   const boundaries = new Map<number, Set<SsrNavigationBoundarySubscriber>>()
   const navigationIds = new WeakMap<object, number>()
+  const pageReadiness = new WeakMap<object, PageReadiness>()
   let boundaryCount = 0
   let sequence = 0
   let active: ActiveNavigation | undefined
@@ -91,6 +117,10 @@ export const createSsrNavigationRuntime = (options: {
     if (active?.transaction.id !== transactionId) return
     const current = active
     active = undefined
+    current.readiness.resolve(
+      outcome === 'success' &&
+        options.router.currentRoute.value === current.transaction.to
+    )
     trace(current.transaction, 'SETTLE', outcome)
     for (const subscriber of subscribers) {
       subscriber.settle(transactionId)
@@ -100,16 +130,66 @@ export const createSsrNavigationRuntime = (options: {
     }
   }
 
-  const settleAfterDomUpdate = (transactionId: number) => {
-    void nextTick(() => settle(transactionId, 'success'))
+  const accept = (transactionId: number) => {
+    if (active?.transaction.id !== transactionId || active.routerAccepted) {
+      return
+    }
+    const current = active
+    current.routerAccepted = true
+    current.terminalOutcome = 'success'
+    current.pendingBoundaries = new Set()
+    for (const boundary of current.boundaries) {
+      if (boundary.accept(current.transaction)) {
+        current.pendingBoundaries.add(boundary)
+      }
+    }
+    if (!current.pendingBoundaries.size) {
+      void nextTick(() => settle(transactionId, 'success'))
+    }
+  }
+
+  const abort = (
+    transactionId: number,
+    outcome: Extract<NavigationOutcome, 'cancelled' | 'error'>
+  ) => {
+    if (active?.transaction.id !== transactionId) return
+    const current = active
+    const pendingBoundaries = new Set<SsrNavigationBoundarySubscriber>()
+    for (const boundary of current.boundaries) {
+      if (boundary.abort(transactionId)) pendingBoundaries.add(boundary)
+    }
+    if (!pendingBoundaries.size) {
+      settle(transactionId, outcome)
+      return
+    }
+
+    // The rejected target has no page ownership. A previously committed page
+    // may nevertheless still be resolving (for example Products -> guarded
+    // route -> cancellation). Keep the same visual clock attached to that
+    // current page without waiting on work from the rejected destination.
+    current.routerAccepted = true
+    current.terminalOutcome = outcome
+    current.pendingBoundaries = pendingBoundaries
   }
 
   const replaceActive = (transaction: SsrNavigationTransaction) => {
     const nextBoundaries = selectBoundaries(transaction.changedDepth)
     const previous = active
-    active = { transaction, origin: transaction.to, boundaries: nextBoundaries }
+    const readiness = createPageReadiness()
+    active = {
+      transaction,
+      origin: transaction.to,
+      readiness,
+      boundaries: nextBoundaries,
+      pendingBoundaries: new Set(),
+      routerAccepted: false,
+      terminalOutcome: 'success',
+    }
 
-    if (previous) trace(previous.transaction, 'SUPERSEDED')
+    if (previous) {
+      previous.readiness.resolve(false)
+      trace(previous.transaction, 'SUPERSEDED')
+    }
     trace(transaction, 'START')
     for (const subscriber of subscribers) subscriber.start(transaction)
     for (const boundary of nextBoundaries) boundary.start(transaction)
@@ -138,7 +218,11 @@ export const createSsrNavigationRuntime = (options: {
     active = {
       transaction,
       origin: current.origin,
+      readiness: current.readiness,
       boundaries: nextBoundaries,
+      pendingBoundaries: new Set(),
+      routerAccepted: false,
+      terminalOutcome: 'success',
     }
     trace(transaction, 'REDIRECT')
 
@@ -167,12 +251,23 @@ export const createSsrNavigationRuntime = (options: {
     for (const boundary of nextBoundaries) {
       if (!previousBoundaries.has(boundary)) {
         boundary.start(current.transaction)
+        if (current.routerAccepted) {
+          if (boundary.accept(current.transaction)) {
+            current.pendingBoundaries.add(boundary)
+          }
+        }
       }
     }
     for (const boundary of previousBoundaries) {
       if (!nextBoundaries.has(boundary)) {
+        current.pendingBoundaries.delete(boundary)
         boundary.settle(current.transaction.id)
       }
+    }
+    if (current.routerAccepted && !current.pendingBoundaries.size) {
+      void nextTick(() =>
+        settle(current.transaction.id, current.terminalOutcome)
+      )
     }
   }
 
@@ -250,6 +345,7 @@ export const createSsrNavigationRuntime = (options: {
           replaceActive(transaction)
         }
         navigationIds.set(to, transaction.id)
+        pageReadiness.set(to, active!.readiness)
         return true
       })
 
@@ -261,8 +357,8 @@ export const createSsrNavigationRuntime = (options: {
         }
         const transactionId = resolveTerminalTransaction(to, 'afterEach')
         if (transactionId === undefined) return
-        if (failure) settle(transactionId, 'cancelled')
-        else settleAfterDomUpdate(transactionId)
+        if (failure) abort(transactionId, 'cancelled')
+        else accept(transactionId)
       })
 
   const removeError = options.server
@@ -272,7 +368,7 @@ export const createSsrNavigationRuntime = (options: {
           initialNavigationPending = false
         }
         const transactionId = resolveTerminalTransaction(to, 'onError')
-        if (transactionId !== undefined) settle(transactionId, 'error')
+        if (transactionId !== undefined) abort(transactionId, 'error')
       })
 
   return {
@@ -301,6 +397,28 @@ export const createSsrNavigationRuntime = (options: {
         if (!registered.size) boundaries.delete(subscriber.depth)
         refreshActiveBoundaries()
       }
+    },
+    pageReady(transactionId, boundary) {
+      if (
+        active?.transaction.id !== transactionId ||
+        !active.routerAccepted ||
+        !active.pendingBoundaries.delete(boundary)
+      ) {
+        return
+      }
+      if (!active.pendingBoundaries.size) {
+        settle(transactionId, active.terminalOutcome)
+      }
+    },
+    async whenPageReady(route) {
+      const readiness = pageReadiness.get(route)
+      if (!readiness) return options.router.currentRoute.value === route
+      return (
+        (await readiness.promise) && options.router.currentRoute.value === route
+      )
+    },
+    isPageCurrent(route) {
+      return options.router.currentRoute.value === route
     },
     dispose() {
       if (disposed) return
