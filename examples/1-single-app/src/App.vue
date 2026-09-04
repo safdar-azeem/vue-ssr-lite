@@ -1,5 +1,5 @@
 <script setup>
-import { RouteSuspense } from 'vue-ssr-lite'
+import { RouterView } from 'vue-ssr-lite'
 </script>
 
 <template>
@@ -11,12 +11,10 @@ import { RouteSuspense } from 'vue-ssr-lite'
       <RouterLink to="/products">Products</RouterLink>
     </nav>
 
-    <RouteSuspense>
-      <RouterView />
-
+    <RouterView>
       <template #fallback>
         <p>Loading page…</p>
       </template>
-    </RouteSuspense>
+    </RouterView>
   </div>
 </template>
