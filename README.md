@@ -103,6 +103,10 @@ export default ({ app }: AppContext) => {
 
 ```vue
 <!-- src/App.vue -->
+<script setup lang="ts">
+import { RouterView } from 'vue-ssr-lite'
+</script>
+
 <template>
   <RouterView />
 </template>
@@ -415,11 +419,12 @@ navigation check is async, it automatically participates in navigation loading.
 
 # Navigation Loading
 
-Wrap a route outlet to give that part of the page a custom delayed fallback:
+Use the enhanced route outlet to give that part of the page a custom delayed
+fallback:
 
 ```vue
 <script setup lang="ts">
-import { RouteSuspense } from 'vue-ssr-lite'
+import { RouterView } from 'vue-ssr-lite'
 </script>
 
 <template>
@@ -427,38 +432,59 @@ import { RouteSuspense } from 'vue-ssr-lite'
     <Sidebar />
     <Header />
 
-    <RouteSuspense :delay="120">
-      <RouterView />
-
+    <RouterView :delay="120">
       <template #fallback>
         <PageSkeleton />
       </template>
-    </RouteSuspense>
+    </RouterView>
   </AppLayout>
 </template>
 ```
 
-`RouteSuspense` follows Vue Router automatically, including async middleware,
-redirects, cancellation, other guards, and route component resolution. There
-is no manual pending state. The current page remains mounted while navigation
-is pending, and successful navigation loading settles after Vue has had a DOM
-update tick to commit the accepted route. Only the wrapped route area exposes
-the fallback, so persistent layout such as the sidebar and header stays in
-place. Nested boundaries automatically select the closest outlet whose matched
-route record is changing. Native Vue `<Suspense>` remains responsible for
-arbitrary component-level async `setup()` and data dependencies.
+`RouterView` delegates route matching and component reuse to Vue Router and
+async component readiness to native Vue `<Suspense>`. It follows async
+middleware, redirects, cancellation, other guards, lazy components, async
+`setup()`, and top-level `await` as one loading lifecycle. There is no manual
+pending state and the delay is not restarted when navigation hands off to an
+async page. Nested outlets select the closest enhanced view whose matched route
+record is changing.
 
-The boundary containers use layout-transparent `display: contents` while
-inactive and become a positioned loading surface only while a supplied
-fallback covers the route area.
+The fallback is the route area's normal rendered state while loading. The
+component adds no layout element or fallback CSS: a skeleton can be full-page,
+card-sized, centered, or any other shape entirely through application code.
+The previously accepted route is retained through Vue render lifecycle while a
+navigation can still cancel, without leaving an interactive copy in the
+document. That retention is transition-scoped: once native Suspense resolves,
+the inactive route is destroyed and is not reused as an implicit KeepAlive
+cache entry on a later navigation.
 
 The fallback is optional and entirely application-owned. Quick navigations that
-finish before the delay do not flash it. For a simple global bar, use the optional
-CSS-animated indicator alone or together with a route fallback:
+finish before the delay do not flash it.
+
+The native scoped-slot shape is also available for application-owned
+`KeepAlive` or transition composition. `RouterView` does not add a route key, so
+Vue Router's normal component-reuse behavior remains intact:
+
+```vue
+<RouterView>
+  <template #default="{ Component }">
+    <KeepAlive>
+      <component :is="Component" />
+    </KeepAlive>
+  </template>
+
+  <template #fallback>
+    <PageSkeleton />
+  </template>
+</RouterView>
+```
+
+For a simple global bar, use the optional CSS-animated indicator alone or
+together with a route fallback:
 
 ```vue
 <script setup lang="ts">
-import { LoadingIndicator } from 'vue-ssr-lite'
+import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 </script>
 
 <template>
@@ -482,7 +508,7 @@ mounted, so keep a small static shell fallback in `index.html` for initial boot:
 </style>
 ```
 
-After mount, `RouteSuspense` and `LoadingIndicator` own subsequent browser
+After mount, `RouterView` and `LoadingIndicator` own subsequent browser
 navigation feedback.
 
 # SEO
@@ -788,7 +814,7 @@ import {
   setHttpStatus,
   defineExtension,
   defineMiddleware,
-  RouteSuspense,
+  RouterView,
   LoadingIndicator,
 } from 'vue-ssr-lite'
 import type { AppContext } from 'vue-ssr-lite'
@@ -806,7 +832,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | `redirectTo`        | Set a validated server-rendered-request redirect    |
 | `defineExtension`   | Create an advanced runtime extension                |
 | `defineMiddleware`  | Create typed universal route middleware             |
-| `RouteSuspense`     | Add a delayed fallback around a changing route area |
+| `RouterView`        | Render routes with an optional delayed fallback     |
 | `LoadingIndicator`  | Show an optional delayed global navigation bar      |
 | `AppContext`        | Type for the `main.ts` initializer                  |
 
