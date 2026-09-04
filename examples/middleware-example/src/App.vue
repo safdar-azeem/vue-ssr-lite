@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
+import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 </script>
 
 <template>
@@ -29,9 +29,7 @@ import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
       </header>
 
       <main>
-        <RouteSuspense>
-          <RouterView />
-
+        <RouterView>
           <template #fallback>
             <div class="page-skeleton">
               <span class="skeleton-line skeleton-line-short" />
@@ -40,7 +38,7 @@ import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
               <strong>Loading route middleware…</strong>
             </div>
           </template>
-        </RouteSuspense>
+        </RouterView>
       </main>
     </section>
   </div>
