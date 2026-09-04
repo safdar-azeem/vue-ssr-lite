@@ -157,7 +157,7 @@ export const hydrateSsrApplication = async (
 
     // The initial START_LOCATION navigation is intentionally outside browser
     // loading UI. Server markup remains visible until this hydration mount;
-    // RouteSuspense and LoadingIndicator observe subsequent navigations only.
+    // RouterView and LoadingIndicator observe subsequent navigations only.
     created.app.mount(options.mountSelector ?? '#app')
     created.managedHead.hydrate(document.head)
     stateElement.remove()
