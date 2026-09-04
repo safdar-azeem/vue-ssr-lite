@@ -3,6 +3,7 @@ import {
   Fragment,
   KeepAlive,
   Suspense,
+  cloneVNode,
   computed,
   defineComponent,
   h,
@@ -10,14 +11,16 @@ import {
   isVNode,
   nextTick,
   onBeforeUnmount,
+  onMounted,
+  onUpdated,
   provide,
   shallowReactive,
   shallowRef,
   unref,
   watch,
-  type Component,
   type PropType,
   type ShallowRef,
+  type Slot,
   type VNode,
   type VNodeChild,
 } from 'vue'
@@ -35,8 +38,7 @@ import type {
   SsrNavigationTransaction,
 } from './SsrNavigationTypes'
 
-const NAVIGATION_GATE_NAME = 'RouterViewNavigationGate'
-const ROUTE_BRANCH_NAME = 'RouterViewRouteBranch'
+const PAGE_PRESENTER_NAME = 'RouterViewPagePresenter'
 
 const asSingleVNode = (content: VNodeChild | VNodeChild[]): VNode => {
   const children = Array.isArray(content) ? content : [content]
@@ -44,23 +46,6 @@ const asSingleVNode = (content: VNodeChild | VNodeChild[]): VNode => {
   if (children.length === 1 && isVNode(children[0])) return children[0]
   return h(Fragment, null, children)
 }
-
-const NavigationGate = defineComponent({
-  name: NAVIGATION_GATE_NAME,
-  props: {
-    pending: {
-      type: Promise as PropType<Promise<void>>,
-      required: true,
-    },
-  },
-  async setup(props, { slots }) {
-    await props.pending
-    // The gate remains the pending branch root until it resolves. Mounting the
-    // routed slot from its render effect lets async setup descendants register
-    // before Vue decrements the gate's own Suspense dependency.
-    return () => asSingleVNode(slots.default?.() ?? h(Comment))
-  },
-})
 
 const routeViewAtDepth = (
   route: RouteLocationNormalizedLoaded,
@@ -76,63 +61,22 @@ const routeViewAtDepth = (
 
 interface RouteOwnership {
   readonly key: symbol
-  readonly gate: Promise<void> | undefined
-  readonly name: string
-  readonly component: Component
   readonly route: RouteLocationNormalizedLoaded
-  readonly routeRef: ShallowRef<RouteLocationNormalizedLoaded>
   readonly routeView: ShallowRef<ReturnType<typeof routeViewAtDepth>>
   source: RouteLocationNormalizedLoaded
   depth: number
 }
 
-let routeBranchSequence = 0
-
-const createRouteBranch = (name: string): Component =>
-  defineComponent({
-    name,
-    props: {
-      ownership: {
-        type: Object as PropType<RouteOwnership>,
-        required: true,
-      },
-    },
-    setup(props, { slots }) {
-      // Capture the ownership object once. Parent patches cannot retarget a
-      // retained component to another branch's route context.
-      const ownership = props.ownership
-      provide(routeLocationKey, ownership.route)
-      provide(routerViewLocationKey, ownership.routeRef)
-      provide(
-        matchedRouteKey,
-        computed(() => ownership.routeView.value.matchedRoute)
-      )
-      provide(
-        viewDepthKey,
-        computed(() => ownership.routeView.value.depth + 1)
-      )
-
-      return () => asSingleVNode(slots.default?.() ?? h(Comment))
-    },
-  })
-
 const createRouteOwnership = (
-  key: symbol,
   route: RouteLocationNormalizedLoaded,
-  depth: number,
-  gate?: Promise<void>
+  depth: number
 ): RouteOwnership => {
   const ownedRoute = shallowReactive({
     ...route,
   }) as RouteLocationNormalizedLoaded
-  const name = `${ROUTE_BRANCH_NAME}${++routeBranchSequence}`
   return {
-    key,
-    gate,
-    name,
-    component: createRouteBranch(name),
+    key: Symbol('route page generation'),
     route: ownedRoute,
-    routeRef: shallowRef(ownedRoute),
     routeView: shallowRef(routeViewAtDepth(route, depth)),
     source: route,
     depth,
@@ -151,56 +95,173 @@ const updateRouteOwnership = (
   ownership.routeView.value = routeViewAtDepth(route, depth)
 }
 
+/**
+ * A stable provider prevents a retired async page from observing a newer
+ * route. Reused, already-resolved pages intentionally retain the same
+ * ownership object so Vue Router's normal update semantics remain intact.
+ */
+const RouteProvider = defineComponent({
+  name: 'RouterViewRouteProvider',
+  props: {
+    ownership: {
+      type: Object as PropType<RouteOwnership>,
+      required: true,
+    },
+    component: Object as PropType<VNode>,
+    ready: Function as PropType<() => void>,
+  },
+  setup(props) {
+    const route = {} as RouteLocationNormalizedLoaded
+    for (const key in props.ownership.route) {
+      Object.defineProperty(route, key, {
+        enumerable: true,
+        get: () =>
+          props.ownership.route[key as keyof RouteLocationNormalizedLoaded],
+      })
+    }
+    provide(routeLocationKey, shallowReactive(route))
+    provide(
+      routerViewLocationKey,
+      computed(() => props.ownership.route)
+    )
+    provide(
+      matchedRouteKey,
+      computed(() => props.ownership.routeView.value.matchedRoute)
+    )
+    provide(
+      viewDepthKey,
+      computed(() => props.ownership.routeView.value.depth + 1)
+    )
+    // Mounted/updated hooks inside a pending Suspense branch are deferred until
+    // that branch is actually committed. This is the positive readiness signal
+    // for new pages and for safely reused, already-resolved pages alike.
+    onMounted(() => props.ready?.())
+    onUpdated(() => props.ready?.())
+    return () => (props.component ? cloneVNode(props.component) : h(Comment))
+  },
+})
+
 interface RouteIdentity {
   readonly type: VNode['type']
   readonly key: VNode['key']
-}
-
-interface LoadingCycle {
-  readonly id: number
-  readonly startedAt: number
-  readonly branchKey: symbol
-  readonly pending: Promise<void>
-  readonly resolve: () => void
-  readonly ownership: RouteOwnership
-  navigationPending: boolean
-}
-
-const createGate = () => {
-  let resolve!: () => void
-  const pending = new Promise<void>((accept) => {
-    resolve = accept
-  })
-  return { pending, resolve }
-}
-
-const createLoadingCycle = (
-  transaction: SsrNavigationTransaction,
-  depth: number,
-  startedAt = transaction.startedAt
-): LoadingCycle => {
-  const gate = createGate()
-  const branchKey = Symbol('route loading branch')
-  return {
-    id: transaction.id,
-    startedAt,
-    branchKey,
-    pending: gate.pending,
-    resolve: gate.resolve,
-    ownership: createRouteOwnership(
-      branchKey,
-      transaction.to as RouteLocationNormalizedLoaded,
-      depth,
-      gate.pending
-    ),
-    navigationPending: true,
-  }
 }
 
 const sameRouteIdentity = (
   left: RouteIdentity | undefined,
   right: RouteIdentity
 ) => left?.type === right.type && left.key === right.key
+
+interface PageSnapshot {
+  readonly component: VNode | undefined
+  readonly route: RouteLocationNormalizedLoaded
+  readonly ownership: RouteOwnership
+  readonly pageKey: symbol
+  readonly transactionId: number | undefined
+  readonly timeout: number
+  readonly routeSlot: Slot | undefined
+  readonly fallbackSlot: Slot | undefined
+  readonly pending: () => void
+  readonly resolved: () => void
+  readonly ready: () => void
+}
+
+/**
+ * This component and its Suspense type remain stable across navigations.
+ * Route generation lives in RouteProvider's key, allowing Vue to invalidate a
+ * stale pending branch without tearing down a never-resolved boundary.
+ */
+const PagePresenter = defineComponent({
+  name: PAGE_PRESENTER_NAME,
+  props: {
+    snapshot: {
+      type: Object as PropType<PageSnapshot>,
+      required: true,
+    },
+  },
+  setup(props) {
+    let pending = false
+    let hasResolvedOnce = false
+    let suspenseKey = 0
+    let previousPageKey: symbol | undefined
+    return () => {
+      const snapshot = props.snapshot
+      if (
+        pending &&
+        hasResolvedOnce &&
+        previousPageKey !== undefined &&
+        previousPageKey !== snapshot.pageKey
+      ) {
+        // Once a boundary has resolved it is safe to replace that boundary
+        // generation during rapid navigation. Before its first resolution we
+        // keep the exact boundary alive so a suspensible parent cannot be
+        // stranded by an unresolved child disappearing beneath it.
+        suspenseKey += 1
+        pending = false
+      }
+      previousPageKey = snapshot.pageKey
+      const page = h(
+        Suspense,
+        {
+          key: suspenseKey,
+          timeout: snapshot.timeout,
+          suspensible: true,
+          onPending: () => {
+            if (props.snapshot.ownership !== snapshot.ownership) return
+            pending = true
+            snapshot.pending()
+          },
+          onResolve: () => {
+            if (props.snapshot.ownership !== snapshot.ownership) return
+            pending = false
+            hasResolvedOnce = true
+            snapshot.resolved()
+          },
+        },
+        {
+          default: () =>
+            h(RouteProvider, {
+              key: snapshot.pageKey,
+              ownership: snapshot.ownership,
+              component: snapshot.component,
+              ready: snapshot.ready,
+            }),
+          fallback: () =>
+            asSingleVNode(snapshot.fallbackSlot?.() ?? h(Comment)),
+        }
+      )
+
+      // Give application-owned KeepAlive and transition wrappers the enhanced
+      // page boundary as their Component. The framework does not cache those
+      // pages; any long-lived cache is therefore explicitly application-owned.
+      const content = snapshot.routeSlot
+        ? snapshot.routeSlot({ Component: page, route: snapshot.route })
+        : page
+
+      return asSingleVNode(content)
+    }
+  },
+})
+
+const RouterPendingFallback = defineComponent({
+  name: 'RouterViewRouterPendingFallback',
+  setup(_props, { slots }) {
+    return () => asSingleVNode(slots.default?.() ?? h(Comment))
+  },
+})
+
+interface LoadingCycle {
+  readonly id: number
+  readonly startedAt: number
+  phase: 'routerPending' | 'pagePending'
+  showRouterFallback: boolean
+}
+
+interface OwnershipCandidate {
+  readonly identity: RouteIdentity
+  readonly ownership: RouteOwnership
+  readonly pageKey: symbol
+  readonly transactionId: number | undefined
+}
 
 export const RouterView = defineComponent({
   name: 'RouterView',
@@ -221,113 +282,172 @@ export const RouterView = defineComponent({
     const runtime = inject(SSR_NAVIGATION_RUNTIME, null)
     const injectedDepth = inject(viewDepthKey, 0)
     const loading = shallowRef<LoadingCycle>()
-    const retainedRouteBranch = shallowRef('')
+    const retainAcceptedPresenter = shallowRef(false)
     let unregister: () => void = () => undefined
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined
+    let boundaryDepth = unref(injectedDepth)
     let activeIdentity: RouteIdentity | undefined
-    let activeBranchKey = Symbol('accepted route branch')
     let activeOwnership: RouteOwnership | undefined
-    let candidateIdentity: RouteIdentity | undefined
-    let candidateBranchKey = Symbol('candidate route branch')
-    let candidateOwnership: RouteOwnership | undefined
+    let activePageKey: symbol | undefined
+    let candidate: OwnershipCandidate | undefined
+    let latestOwnership: RouteOwnership | undefined
+    let latestPageKey: symbol | undefined
+    const pageKeys = new Map<
+      VNode['type'],
+      Map<VNode['key'], symbol>
+    >()
     let suspensePending = false
-    let pendingStartedAt = 0
-    let renderVersion = 0
-    let pendingRenderVersion = 0
-    let resolvedRenderVersion = 0
     let unmounted = false
-    const retiredCycles = new Set<LoadingCycle>()
 
-    const releaseAfterPatch = (cycle: LoadingCycle) => {
-      retiredCycles.add(cycle)
+    const clearFallbackTimer = () => {
+      if (fallbackTimer === undefined) return
+      clearTimeout(fallbackTimer)
+      fallbackTimer = undefined
+    }
+
+    const releaseRetentionAfterPatch = (transactionId?: number) => {
       void nextTick(() => {
-        retiredCycles.delete(cycle)
-        cycle.resolve()
+        if (
+          unmounted ||
+          loading.value?.showRouterFallback ||
+          (transactionId !== undefined && loading.value?.id !== transactionId)
+        ) {
+          return
+        }
+        retainAcceptedPresenter.value = false
       })
     }
 
-    const finish = (cycle: LoadingCycle, version: number) => {
-      const current = loading.value
+    const showRouterFallback = (cycle: LoadingCycle) => {
       if (
         unmounted ||
-        resolvedRenderVersion !== version ||
-        current?.id !== cycle.id ||
-        current.branchKey !== cycle.branchKey ||
-        current.navigationPending
+        suspensePending ||
+        loading.value !== cycle ||
+        cycle.phase !== 'routerPending'
       ) {
         return
       }
-      loading.value = undefined
-      cycle.resolve()
+      loading.value = { ...cycle, showRouterFallback: true }
+    }
+
+    const scheduleRouterFallback = (cycle: LoadingCycle) => {
+      if (!slots.fallback || suspensePending || cycle.showRouterFallback) return
+      clearFallbackTimer()
+      retainAcceptedPresenter.value = true
+
+      // KeepAlive can only retain the already-mounted, fully-resolved
+      // presenter after one patch has marked it as retainable. The next patch
+      // deactivates that presenter and displays the router-phase fallback.
+      void nextTick(() => {
+        if (
+          unmounted ||
+          loading.value !== cycle ||
+          cycle.phase !== 'routerPending' ||
+          suspensePending
+        ) {
+          return
+        }
+        const remaining = Math.max(
+          0,
+          props.delay - (Date.now() - cycle.startedAt)
+        )
+        if (remaining === 0) {
+          showRouterFallback(cycle)
+          return
+        }
+        fallbackTimer = setTimeout(() => {
+          fallbackTimer = undefined
+          showRouterFallback(cycle)
+        }, remaining)
+      })
     }
 
     const start = (transaction: SsrNavigationTransaction) => {
-      candidateIdentity = undefined
-      candidateOwnership = undefined
+      clearFallbackTimer()
+      // Keep the current unresolved page branch intact while the next router
+      // decision runs. It remains the router's current route until that next
+      // navigation is accepted, cancelled, or redirected.
+      if (!suspensePending) candidate = undefined
       const previous = loading.value
-      let startedAt = transaction.startedAt
-      if (previous) {
-        startedAt = previous.startedAt
-      } else if (suspensePending && pendingStartedAt) {
-        startedAt = pendingStartedAt
+      const cycle: LoadingCycle = {
+        id: transaction.id,
+        startedAt: previous?.startedAt ?? transaction.startedAt,
+        phase: 'routerPending',
+        showRouterFallback: previous?.showRouterFallback ?? false,
+      }
+      loading.value = cycle
+
+      if (cycle.showRouterFallback) {
+        retainAcceptedPresenter.value = true
+      } else if (!suspensePending) {
+        scheduleRouterFallback(cycle)
+      }
+    }
+
+    const accept = (transaction: SsrNavigationTransaction) => {
+      const cycle = loading.value
+      if (!cycle || cycle.id !== transaction.id) return false
+      clearFallbackTimer()
+      candidate = undefined
+      loading.value = {
+        ...cycle,
+        phase: 'pagePending',
+        showRouterFallback: false,
+      }
+      releaseRetentionAfterPatch(transaction.id)
+      return true
+    }
+
+    const abort = (transactionId: number) => {
+      const cycle = loading.value
+      if (!cycle || cycle.id !== transactionId) return false
+      clearFallbackTimer()
+
+      if (suspensePending) {
+        // The rejected target was never rendered, but the router's already-
+        // current page may still be resolving from an earlier commit. Transfer
+        // only the loading clock; route/page ownership remains unchanged.
+        if (candidate) candidate = { ...candidate, transactionId }
+        loading.value = {
+          ...cycle,
+          phase: 'pagePending',
+          showRouterFallback: false,
+        }
+        releaseRetentionAfterPatch(transactionId)
+        return true
       }
 
-      // A Suspense branch is never retargeted to another navigation. Replacing
-      // the root key lets Vue invalidate the old pendingId and safely unmount
-      // that generation before its framework-owned gate is released.
-      loading.value = createLoadingCycle(
-        transaction,
-        unref(injectedDepth),
-        startedAt
-      )
-      if (previous) releaseAfterPatch(previous)
+      candidate = undefined
+      loading.value = undefined
+      releaseRetentionAfterPatch()
+      return false
     }
 
     const settle = (transactionId: number) => {
-      const cycle = loading.value
-      if (!cycle || cycle.id !== transactionId) return
-      cycle.navigationPending = false
-      loading.value = { ...cycle }
-
-      // First patch the accepted route into the still-mounted gate's slot.
-      // Resolving the gate then mounts that slot from the gate's own render
-      // effect, so routed async setup joins this exact Suspense generation.
-      void nextTick(cycle.resolve)
+      if (loading.value?.id !== transactionId) return
+      clearFallbackTimer()
+      loading.value = undefined
+      releaseRetentionAfterPatch()
     }
 
-    const retarget = (transaction: SsrNavigationTransaction) => {
-      const cycle = loading.value
-      if (
-        !cycle ||
-        cycle.id !== transaction.id ||
-        !cycle.navigationPending
-      ) {
-        return
-      }
-      updateRouteOwnership(
-        cycle.ownership,
-        transaction.to as RouteLocationNormalizedLoaded,
-        unref(injectedDepth)
-      )
-      loading.value = { ...cycle }
-    }
-
-    const subscriberForDepth = (
-      depth: number
-    ): SsrNavigationBoundarySubscriber => ({
-      depth,
+    const subscriber: SsrNavigationBoundarySubscriber = {
+      get depth() {
+        return boundaryDepth
+      },
       start,
-      retarget,
+      retarget: () => undefined,
+      accept,
+      abort,
       settle,
-    })
+    }
 
-    // Without a fallback there is no navigation presentation to coordinate.
-    // Native Suspense still handles routed async setup below.
-    if (runtime && slots.fallback) {
+    if (runtime) {
       watch(
         () => unref(injectedDepth),
         (depth) => {
           unregister()
-          unregister = runtime.registerBoundary(subscriberForDepth(depth))
+          boundaryDepth = depth
+          unregister = runtime.registerBoundary(subscriber)
         },
         { immediate: true }
       )
@@ -335,65 +455,63 @@ export const RouterView = defineComponent({
 
     onBeforeUnmount(() => {
       unmounted = true
+      clearFallbackTimer()
       unregister()
-      loading.value?.resolve()
-      for (const cycle of retiredCycles) cycle.resolve()
-      retiredCycles.clear()
     })
 
-    interface RenderSnapshot {
-      readonly version: number
-      readonly identity: RouteIdentity
-      readonly branchKey: symbol
-      readonly ownership: RouteOwnership
-      readonly loadingId: number | undefined
+    const stablePageKeyFor = (identity: RouteIdentity) => {
+      let keys = pageKeys.get(identity.type)
+      if (!keys) {
+        keys = new Map()
+        pageKeys.set(identity.type, keys)
+      }
+      let key = keys.get(identity.key)
+      if (!key) {
+        key = Symbol('route page identity')
+        keys.set(identity.key, key)
+      }
+      return key
     }
 
-    const onPending = (snapshot: RenderSnapshot) => {
-      if (unmounted || snapshot.version < pendingRenderVersion) return
-      suspensePending = true
-      pendingRenderVersion = snapshot.version
-      if (!pendingStartedAt) pendingStartedAt = Date.now()
-    }
-
-    const onResolve = (snapshot: RenderSnapshot) => {
-      // Suspense callbacks use the render generation that created their
-      // branch. An older resolution may finish its own Vue work, but it must
-      // not promote or settle the branch rendered by a newer navigation.
-      if (unmounted || snapshot.version < pendingRenderVersion) return
-      suspensePending = false
-      pendingStartedAt = 0
-      pendingRenderVersion = snapshot.version
-      resolvedRenderVersion = snapshot.version
-      activeIdentity = snapshot.identity
-      activeBranchKey = snapshot.branchKey
-      activeOwnership = snapshot.ownership
-      // Only the branch which has fully resolved may be retained. Pending
-      // generations never receive KeepAlive flags, so superseding one performs
-      // a real unmount and Vue's stale pendingId guard remains authoritative.
-      retainedRouteBranch.value = snapshot.ownership.name
-      candidateIdentity = undefined
-      candidateOwnership = undefined
-
-      const cycle = loading.value
+    const ownershipFor = (
+      identity: RouteIdentity,
+      route: RouteLocationNormalizedLoaded,
+      depth: number,
+      transactionId: number | undefined
+    ) => {
       if (
-        cycle &&
-        !cycle.navigationPending &&
-        cycle.id === snapshot.loadingId
+        !suspensePending &&
+        activeOwnership &&
+        sameRouteIdentity(activeIdentity, identity)
       ) {
-        void nextTick(() => finish(cycle, snapshot.version))
+        updateRouteOwnership(activeOwnership, route, depth)
+        return {
+          identity,
+          ownership: activeOwnership,
+          pageKey: activePageKey ?? stablePageKeyFor(identity),
+          transactionId,
+        }
       }
-    }
-
-    const branchKeyFor = (identity: RouteIdentity) => {
-      if (!activeIdentity || sameRouteIdentity(activeIdentity, identity)) {
-        return activeBranchKey
+      if (
+        candidate &&
+        (candidate.transactionId === transactionId ||
+          (suspensePending && transactionId === undefined)) &&
+        sameRouteIdentity(candidate.identity, identity)
+      ) {
+        // Vue Router can expose another normalized wrapper for subsequent
+        // renders of the same accepted transaction. Updating within that one
+        // transaction is safe; a new navigation clears the candidate first.
+        updateRouteOwnership(candidate.ownership, route, depth)
+        return candidate
       }
-      if (!sameRouteIdentity(candidateIdentity, identity)) {
-        candidateIdentity = identity
-        candidateBranchKey = Symbol('candidate route branch')
-      }
-      return candidateBranchKey
+      const ownership = createRouteOwnership(route, depth)
+      const stablePageKey = stablePageKeyFor(identity)
+      const pageKey =
+        suspensePending && latestPageKey === stablePageKey
+          ? Symbol('route page fork')
+          : stablePageKey
+      candidate = { identity, ownership, pageKey, transactionId }
+      return candidate
     }
 
     return () =>
@@ -412,134 +530,88 @@ export const RouterView = defineComponent({
             Component: VNode | undefined
             route: RouteLocationNormalizedLoaded
           }) => {
-            const routeContent = slots.default
-              ? asSingleVNode(slots.default({ Component, route }))
-              : Component ?? h(Comment)
             const routeView = routeViewAtDepth(route, unref(injectedDepth))
             const identity: RouteIdentity = {
-              type: routeContent.type,
-              key: routeContent.key,
+              type: Component?.type ?? Comment,
+              key: Component?.key ?? null,
             }
             const cycle = loading.value
-            let branchKey: symbol
-            let ownership: RouteOwnership
-            if (!cycle) {
-              branchKey = branchKeyFor(identity)
-              if (branchKey === activeBranchKey) {
-                activeOwnership ??= createRouteOwnership(
-                  branchKey,
-                  route,
-                  routeView.depth
-                )
-                updateRouteOwnership(
-                  activeOwnership,
-                  route,
-                  routeView.depth
-                )
-                ownership = activeOwnership
-              } else {
-                const candidate =
-                  candidateOwnership?.key === branchKey
-                    ? candidateOwnership
-                    : createRouteOwnership(
-                        branchKey,
-                        route,
-                        routeView.depth
-                      )
-                candidateOwnership = candidate
-                updateRouteOwnership(
-                  candidate,
-                  route,
-                  routeView.depth
-                )
-                ownership = candidate
-              }
-            } else if (
-              !cycle.navigationPending &&
-              sameRouteIdentity(activeIdentity, identity)
-            ) {
-              branchKey = activeBranchKey
-              activeOwnership ??= createRouteOwnership(
-                branchKey,
-                route,
-                routeView.depth
-              )
-              updateRouteOwnership(
-                activeOwnership,
-                route,
-                routeView.depth
-              )
-              ownership = activeOwnership
-            } else {
-              branchKey = cycle.branchKey
-              if (!cycle.navigationPending) {
-                updateRouteOwnership(
-                  cycle.ownership,
-                  route,
-                  routeView.depth
-                )
-              }
-              ownership = cycle.ownership
-            }
-            const content = ownership.gate
-              ? h(
-                  NavigationGate,
-                  { pending: ownership.gate },
-                  { default: () => routeContent }
-                )
-              : routeContent
+            const transactionId =
+              cycle?.phase === 'pagePending' ? cycle.id : undefined
+            const selected = ownershipFor(
+              identity,
+              route,
+              routeView.depth,
+              transactionId
+            )
+            const { ownership, pageKey } = selected
+            latestOwnership = ownership
+            latestPageKey = pageKey
             const timeout = cycle
               ? Math.max(
                   0,
                   props.delay - (Date.now() - cycle.startedAt)
                 )
               : props.delay
-
-            const snapshot: RenderSnapshot = {
-              version: ++renderVersion,
-              identity,
-              branchKey,
+            const snapshot: PageSnapshot = {
+              component: Component,
+              route,
               ownership,
-              loadingId: cycle?.id,
-            }
-            if (suspensePending) pendingRenderVersion = snapshot.version
+              pageKey,
+              transactionId,
+              timeout: slots.fallback ? timeout : -1,
+              routeSlot: slots.default,
+              fallbackSlot: slots.fallback,
+              pending: () => {
+                if (latestOwnership !== ownership) return
+                suspensePending = true
+              },
+              resolved: () => {
+                if (latestOwnership !== ownership) return
+                suspensePending = false
+                activeIdentity = identity
+                activeOwnership = ownership
+                activePageKey = pageKey
+                candidate = undefined
 
-            const boundary = h(
-              Suspense,
+                const current = loading.value
+                if (current?.phase === 'routerPending') {
+                  scheduleRouterFallback(current)
+                }
+              },
+              ready: () => {
+                if (
+                  unmounted ||
+                  transactionId === undefined ||
+                  latestOwnership !== ownership ||
+                  loading.value?.id !== transactionId ||
+                  loading.value.phase !== 'pagePending'
+                ) {
+                  return
+                }
+                runtime?.pageReady(transactionId, subscriber)
+              },
+            }
+            const presenter = h(PagePresenter, { snapshot })
+
+            if (!runtime || !slots.fallback) return presenter
+            return h(
+              KeepAlive,
               {
-                timeout: slots.fallback ? timeout : -1,
-                onPending: () => onPending(snapshot),
-                onResolve: () => onResolve(snapshot),
+                max: 1,
+                include: retainAcceptedPresenter.value
+                  ? [PAGE_PRESENTER_NAME]
+                  : [],
               },
               {
                 default: () =>
-                  h(
-                    ownership.component,
-                    {
-                      key: ownership.key,
-                      ownership,
-                    },
-                    () => content
-                  ),
-                fallback: () =>
-                  asSingleVNode(slots.fallback?.() ?? h(Comment)),
+                  cycle?.showRouterFallback
+                    ? h(RouterPendingFallback, null, {
+                        default: slots.fallback,
+                      })
+                    : presenter,
               }
             )
-
-            // Retain only the last resolved branch while this Suspense may
-            // replace it with a fallback. Updating include after resolution
-            // releases the inactive branch without ever caching unresolved
-            // async setup or a navigation gate.
-            return slots.fallback
-              ? h(
-                  KeepAlive,
-                  {
-                    max: 2,
-                    include: retainedRouteBranch.value,
-                  },
-                  () => boundary
-                )
-              : boundary
           },
         }
       )
