@@ -1,17 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  KeepAlive,
   defineComponent,
   h,
   nextTick,
   onUnmounted,
+  ref,
   type App,
+  type VNode,
 } from 'vue'
 import {
   createRouter,
   RouterLink,
   RouterView,
   START_LOCATION,
+  useRoute,
   type RouteRecordRaw,
   type Router,
 } from 'vue-router'
@@ -825,14 +829,17 @@ describe('browser middleware navigation', () => {
     })
     const Root = defineComponent({
       setup: () => () =>
-        h(
-          SsrRouterView,
-          { delay: 0 },
-          {
-            fallback: () =>
-              h('div', { class: 'page-loader' }, 'Loading page'),
-          }
-        ),
+        h('div', [
+          h(LoadingIndicator, { delay: 0 }),
+          h(
+            SsrRouterView,
+            { delay: 0 },
+            {
+              fallback: () =>
+                h('div', { class: 'page-loader' }, 'Loading page'),
+            }
+          ),
+        ]),
     })
     const controller = new AbortController()
     const created = await createSsrApplication(
@@ -876,27 +883,33 @@ describe('browser middleware navigation', () => {
     await waitForVisualLoading()
     expect(pageGates).toHaveLength(1)
     expect(mount.querySelector('.page-loader')).not.toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
 
     await created.router!.push('/about')
     await waitForSuccessfulNavigationUi()
     await nextTick()
     expect(mount.querySelector('.about-page')).not.toBeNull()
     expect(mount.querySelector('.products-page')).toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
 
     pageGates[0]!.resolve()
     await Promise.resolve()
     await nextTick()
     expect(mount.querySelector('.about-page')).not.toBeNull()
     expect(mount.querySelector('.products-page')).toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
 
     await created.router!.push('/products')
     await waitForVisualLoading()
     expect(pageGates).toHaveLength(2)
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
     pageGates[1]!.resolve()
     await waitForSuccessfulNavigationUi()
     await nextTick()
+    await nextTick()
     expect(pageGates).toHaveLength(2)
     expect(mount.querySelector('.products-page')).not.toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
 
     await created.router!.push('/')
     await waitForSuccessfulNavigationUi()
@@ -905,6 +918,533 @@ describe('browser middleware navigation', () => {
     expect(mount.querySelector('.products-page')).toBeNull()
     expect(errors).toEqual([])
     expect(consoleErrors).toEqual([])
+  })
+
+  it('preserves application-owned KeepAlive pages across async navigation', async () => {
+    const productGate = deferred()
+    let homeSetups = 0
+    let productSetups = 0
+    const Home = defineComponent({
+      setup() {
+        homeSetups += 1
+        return () => h('main', { class: 'home-page' }, 'Home')
+      },
+    })
+    const Products = defineComponent({
+      async setup() {
+        productSetups += 1
+        await productGate.promise
+        return () => h('main', { class: 'products-page' }, 'Products')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h(
+          SsrRouterView,
+          { delay: 0 },
+          {
+            default: ({ Component }: { Component: VNode }) =>
+              h(KeepAlive, null, { default: () => Component }),
+            fallback: () =>
+              h('div', { class: 'page-loader' }, 'Loading page'),
+          }
+        ),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'application-owned-keep-alive-navigation',
+        root: Root,
+        routes: [
+          { path: '/', component: Home },
+          { path: '/products', component: Products },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+    const home = mount.querySelector('.home-page')
+
+    await created.router!.push('/products')
+    await waitForVisualLoading()
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+    productGate.resolve()
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(mount.querySelector('.products-page')).not.toBeNull()
+
+    await created.router!.push('/')
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(mount.querySelector('.home-page')).toBe(home)
+    expect(homeSetups).toBe(1)
+
+    await created.router!.push('/products')
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(mount.querySelector('.products-page')).not.toBeNull()
+    expect(productSetups).toBe(1)
+  })
+
+  it('waits for application composition to mount and resolve the accepted page generation', async () => {
+    const mountIncoming = ref(false)
+    const productGate = deferred()
+    let productSetups = 0
+    const Home = defineComponent({
+      setup: () => () => h('main', { class: 'home-page' }, 'Home'),
+    })
+    const Products = defineComponent({
+      async setup() {
+        productSetups += 1
+        await productGate.promise
+        return () => h('main', { class: 'products-page' }, 'Products')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h('div', [
+          h(LoadingIndicator, { delay: 0 }),
+          h(
+            SsrRouterView,
+            { delay: 0 },
+            {
+              // An out-in transition can similarly withhold its incoming
+              // branch. Model that contract directly so readiness cannot rely
+              // on a Suspense event failing to appear within one tick.
+              default: ({
+                Component,
+                route,
+              }: {
+                Component: VNode
+                route: { path: string }
+              }) =>
+                route.path === '/products' && !mountIncoming.value
+                  ? null
+                  : Component,
+              fallback: () =>
+                h('div', { class: 'page-loader' }, 'Loading page'),
+            }
+          ),
+        ]),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'transition-delayed-page-readiness',
+        root: Root,
+        routes: [
+          { path: '/', component: Home },
+          { path: '/products', component: Products },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/products')
+    await nextTick()
+    await nextTick()
+
+    expect(mount.querySelector('.products-page')).toBeNull()
+    expect(productSetups).toBe(0)
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
+
+    mountIncoming.value = true
+    await waitForVisualLoading()
+    expect(productSetups).toBe(1)
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
+
+    productGate.resolve()
+    await vi.waitFor(() =>
+      expect(mount.querySelector('.products-page')).not.toBeNull()
+    )
+    await vi.waitFor(() =>
+      expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
+    )
+  })
+
+  it('delays default hash scrolling until the async destination page is ready', async () => {
+    const productGate = deferred()
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const Products = defineComponent({
+      async setup() {
+        await productGate.promise
+        return () =>
+          h('main', { class: 'products-page' }, [
+            h('div', { id: 'details' }, 'Details'),
+          ])
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h(SsrRouterView, { delay: 0 }, {
+          fallback: () => h('div', { class: 'page-loader' }, 'Loading page'),
+        }),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'page-owned-default-hash-scroll',
+        root: Root,
+        routes: [
+          { path: '/', component: Page },
+          { path: '/products', component: Products },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    await nextTick()
+    await Promise.resolve()
+    scrollTo.mockClear()
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/products#details')
+    await waitForVisualLoading()
+    expect(document.getElementById('details')).toBeNull()
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    productGate.resolve()
+    await waitForSuccessfulNavigationUi()
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    expect(document.getElementById('details')).not.toBeNull()
+  })
+
+  it('discards a custom scroll result after its page generation is superseded', async () => {
+    const productScrollStarted = deferred()
+    const productScrollResult = deferred()
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const Root = defineComponent({
+      setup: () => () => h(SsrRouterView),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'stale-custom-scroll-generation',
+        root: Root,
+        routes: [
+          { path: '/', component: Page },
+          { path: '/products', component: Page },
+          { path: '/about', component: Page },
+        ],
+        async scrollBehavior(to) {
+          if (to.path === '/products') {
+            productScrollStarted.resolve()
+            await productScrollResult.promise
+            return { top: 111 }
+          }
+          return { top: 222 }
+        },
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    await nextTick()
+    await Promise.resolve()
+    scrollTo.mockClear()
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/products')
+    await productScrollStarted.promise
+    await created.router!.push('/about')
+    await vi.waitFor(() =>
+      expect(
+        scrollTo.mock.calls.some((call) => JSON.stringify(call).includes('222'))
+      ).toBe(true)
+    )
+
+    productScrollResult.resolve()
+    await Promise.resolve()
+    await nextTick()
+    expect(
+      scrollTo.mock.calls.some((call) => JSON.stringify(call).includes('111'))
+    ).toBe(false)
+  })
+
+  it('keeps Vue Router reuse semantics for params and query changes', async () => {
+    let setups = 0
+    const ReusedPage = defineComponent({
+      setup() {
+        setups += 1
+        const route = useRoute()
+        return () =>
+          h('main', { class: 'reused-page' }, route.fullPath)
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h(
+          SsrRouterView,
+          { delay: 0 },
+          {
+            fallback: () =>
+              h('div', { class: 'page-loader' }, 'Loading page'),
+          }
+        ),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'route-component-reuse-navigation',
+        root: Root,
+        routes: [{ path: '/items/:id', component: ReusedPage }],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/items/one?view=full',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    await created.router!.push('/items/one?view=full')
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+    const page = mount.querySelector('.reused-page')
+
+    await created.router!.push('/items/two?view=compact')
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+
+    expect(mount.querySelector('.reused-page')).toBe(page)
+    expect(page?.textContent).toBe('/items/two?view=compact')
+    expect(setups).toBe(1)
+    expect(mount.querySelector('.page-loader')).toBeNull()
+  })
+
+  it('returns a cancelled router phase to an already-pending current page', async () => {
+    const productGate = deferred()
+    const cancellationGate = deferred()
+    const cancel = defineMiddleware(async () => {
+      await cancellationGate.promise
+      return false
+    })
+    const Products = defineComponent({
+      async setup() {
+        await productGate.promise
+        return () => h('main', { class: 'products-page' }, 'Products')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h('div', [
+          h(LoadingIndicator, { delay: 0 }),
+          h(
+            SsrRouterView,
+            { delay: 0 },
+            {
+              fallback: () =>
+                h('div', { class: 'page-loader' }, 'Loading page'),
+            }
+          ),
+        ]),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'cancelled-navigation-over-pending-page',
+        root: Root,
+        routes: [
+          { path: '/', component: Page },
+          { path: '/products', component: Products },
+          {
+            path: '/blocked',
+            component: Page,
+            meta: { middleware: [cancel] },
+          },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/products')
+    await waitForVisualLoading()
+    const cancelled = created.router!.push('/blocked')
+    await waitForVisualLoading()
+    cancellationGate.resolve()
+    await cancelled
+    await nextTick()
+
+    expect(created.router!.currentRoute.value.path).toBe('/products')
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
+
+    productGate.resolve()
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    await nextTick()
+    expect(mount.querySelector('.products-page')).not.toBeNull()
+    expect(mount.querySelector('.page-loader')).toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
+  })
+
+  it('keeps one loading clock when middleware redirects to an async page', async () => {
+    const productGate = deferred()
+    const redirect = defineMiddleware(() => '/products')
+    const Products = defineComponent({
+      async setup() {
+        await productGate.promise
+        return () => h('main', { class: 'products-page' }, 'Products')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h('div', [
+          h(LoadingIndicator, { delay: 0 }),
+          h(
+            SsrRouterView,
+            { delay: 0 },
+            {
+              fallback: () =>
+                h('div', { class: 'page-loader' }, 'Loading page'),
+            }
+          ),
+        ]),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'redirect-to-async-page-navigation',
+        root: Root,
+        routes: [
+          { path: '/', component: Page },
+          {
+            path: '/private',
+            component: Page,
+            meta: { middleware: [redirect] },
+          },
+          { path: '/products', component: Products },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/private')
+    await waitForVisualLoading()
+    expect(created.router!.currentRoute.value.path).toBe('/products')
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
+
+    productGate.resolve()
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    await nextTick()
+    expect(mount.querySelector('.products-page')).not.toBeNull()
+    expect(mount.querySelector('.page-loader')).toBeNull()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
   })
 
   it('removes loading UI after cancellation without recreating the current page', async () => {
