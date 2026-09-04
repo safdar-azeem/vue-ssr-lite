@@ -40,6 +40,13 @@ import type {
 
 const PAGE_PRESENTER_NAME = 'RouterViewPagePresenter'
 
+// Nested outlets receive the provider's route snapshot, not currentRoute's
+// object. Preserve the canonical generation without matching by URL (which
+// could mistake a late render from an earlier visit for the current visit).
+const routeSources = new WeakMap<object, RouteLocationNormalizedLoaded>()
+const sourceRouteFor = (route: RouteLocationNormalizedLoaded) =>
+  routeSources.get(route) ?? route
+
 const asSingleVNode = (content: VNodeChild | VNodeChild[]): VNode => {
   const children = Array.isArray(content) ? content : [content]
   if (children.length === 0) return h(Comment)
@@ -74,11 +81,13 @@ const createRouteOwnership = (
   const ownedRoute = shallowReactive({
     ...route,
   }) as RouteLocationNormalizedLoaded
+  const source = sourceRouteFor(route)
+  routeSources.set(ownedRoute, source)
   return {
     key: Symbol('route page generation'),
     route: ownedRoute,
     routeView: shallowRef(routeViewAtDepth(route, depth)),
-    source: route,
+    source,
     depth,
   }
 }
@@ -88,8 +97,10 @@ const updateRouteOwnership = (
   route: RouteLocationNormalizedLoaded,
   depth: number
 ) => {
-  if (ownership.source === route && ownership.depth === depth) return
-  ownership.source = route
+  const source = sourceRouteFor(route)
+  if (ownership.source === source && ownership.depth === depth) return
+  ownership.source = source
+  routeSources.set(ownership.route, source)
   ownership.depth = depth
   Object.assign(ownership.route, route)
   ownership.routeView.value = routeViewAtDepth(route, depth)
@@ -545,6 +556,7 @@ export const RouterView = defineComponent({
               transactionId
             )
             const { ownership, pageKey } = selected
+            const sourceRoute = sourceRouteFor(route)
             latestOwnership = ownership
             latestPageKey = pageKey
             const timeout = cycle
@@ -580,10 +592,12 @@ export const RouterView = defineComponent({
                 }
               },
               ready: () => {
+                if (unmounted || latestOwnership !== ownership) return
+                // The accepted page can resolve during a different router
+                // attempt, or during bootstrap with no loading transaction.
+                runtime?.pageRendered(sourceRoute, subscriber)
                 if (
-                  unmounted ||
                   transactionId === undefined ||
-                  latestOwnership !== ownership ||
                   loading.value?.id !== transactionId ||
                   loading.value.phase !== 'pagePending'
                 ) {
