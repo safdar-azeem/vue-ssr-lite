@@ -807,6 +807,106 @@ describe('browser middleware navigation', () => {
     expect(mount.textContent).toContain('Dashboard')
   })
 
+  it('keeps superseded async setup generations out of the active route', async () => {
+    const Home = defineComponent({
+      setup: () => () => h('main', { class: 'home-page' }, 'Home'),
+    })
+    const About = defineComponent({
+      setup: () => () => h('main', { class: 'about-page' }, 'About'),
+    })
+    const pageGates: ReturnType<typeof deferred>[] = []
+    const Products = defineComponent({
+      async setup() {
+        const gate = deferred()
+        pageGates.push(gate)
+        await gate.promise
+        return () => h('main', { class: 'products-page' }, 'Products')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () =>
+        h(
+          SsrRouterView,
+          { delay: 0 },
+          {
+            fallback: () =>
+              h('div', { class: 'page-loader' }, 'Loading page'),
+          }
+        ),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'async-setup-navigation-generation',
+        root: Root,
+        routes: [
+          { path: '/', component: Home },
+          { path: '/about', component: About },
+          { path: '/products', component: Products },
+        ],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    const errors: unknown[] = []
+    const consoleErrors: unknown[][] = []
+    created.app.config.errorHandler = (error) => errors.push(error)
+    vi.spyOn(console, 'error').mockImplementation((...values) => {
+      consoleErrors.push(values)
+    })
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await created.router!.push('/products')
+    await waitForVisualLoading()
+    expect(pageGates).toHaveLength(1)
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+
+    await created.router!.push('/about')
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(mount.querySelector('.about-page')).not.toBeNull()
+    expect(mount.querySelector('.products-page')).toBeNull()
+
+    pageGates[0]!.resolve()
+    await Promise.resolve()
+    await nextTick()
+    expect(mount.querySelector('.about-page')).not.toBeNull()
+    expect(mount.querySelector('.products-page')).toBeNull()
+
+    await created.router!.push('/products')
+    await waitForVisualLoading()
+    expect(pageGates).toHaveLength(2)
+    pageGates[1]!.resolve()
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(pageGates).toHaveLength(2)
+    expect(mount.querySelector('.products-page')).not.toBeNull()
+
+    await created.router!.push('/')
+    await waitForSuccessfulNavigationUi()
+    await nextTick()
+    expect(mount.querySelector('.home-page')).not.toBeNull()
+    expect(mount.querySelector('.products-page')).toBeNull()
+    expect(errors).toEqual([])
+    expect(consoleErrors).toEqual([])
+  })
+
   it('removes loading UI after cancellation without recreating the current page', async () => {
     const gate = deferred()
     const cancel = defineMiddleware(async () => {
