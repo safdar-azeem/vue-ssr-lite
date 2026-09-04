@@ -19,7 +19,7 @@ const sleep = (ms: number, signal: AbortSignal) =>
   })
 
 export const authMiddleware = defineMiddleware(async (context) => {
-  // Deliberately slow so RouteSuspense and LoadingIndicator are easy to see.
+  // Deliberately slow so RouterView and LoadingIndicator are easy to see.
   // Real navigation checks should normally finish as quickly as possible.
   await sleep(2000, context.signal)
   console.log('run for 2 seconds')
