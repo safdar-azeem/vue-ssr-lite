@@ -1098,6 +1098,115 @@ describe('browser middleware navigation', () => {
     )
   })
 
+  it('waits for the initial SPA async page before scrolling without starting the navigation indicator', async () => {
+    window.history.replaceState({}, '', '/products#details')
+    const productGate = deferred()
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    let setupStarted = false
+    const Products = defineComponent({
+      async setup() {
+        setupStarted = true
+        await productGate.promise
+        return () => h('main', { id: 'details' }, 'Product details')
+      },
+    })
+    const Root = defineComponent({
+      setup: () => () => h('div', [
+        h(LoadingIndicator, { delay: 0 }),
+        h(SsrRouterView, { delay: 0 }, {
+          fallback: () => h('div', { class: 'page-loader' }, 'Loading page'),
+        }),
+      ]),
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'initial-spa-page-owned-hash-scroll',
+        root: Root,
+        routes: [{ path: '/products', component: Products }],
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/products#details',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    await waitForVisualLoading()
+    expect(setupStarted).toBe(false)
+    expect(scrollTo).not.toHaveBeenCalled()
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+
+    await waitForVisualLoading()
+    expect(setupStarted).toBe(true)
+    expect(document.getElementById('details')).toBeNull()
+    expect(scrollTo).not.toHaveBeenCalled()
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
+
+    productGate.resolve()
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    expect(document.getElementById('details')?.textContent).toBe('Product details')
+    expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
+    expect(mount.querySelector('.page-loader')).toBeNull()
+  })
+
+  it('releases initial scrolling after a plain RouterView root with an exposed instance mounts', async () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const Root = defineComponent({
+      setup(_props, { expose }) {
+        // Script-setup roots also expose a different public instance. Root
+        // detection must not depend on comparing that instance with `this`.
+        expose({})
+        return () => h(RouterView)
+      },
+    })
+    const controller = new AbortController()
+    const created = await createSsrApplication(
+      createTestApplication({
+        id: 'initial-plain-outlet-scroll',
+        root: Root,
+        routes: [{ path: '/', component: Page }],
+        scrollBehavior: () => ({ top: 73 }),
+      }),
+      {
+        server: false,
+        spa: true,
+        request: createTestRenderRequest('localhost', {
+          url: 'http://localhost/',
+          protocol: 'http',
+          signal: controller.signal,
+        }),
+      }
+    )
+    await created.router!.isReady()
+    await waitForVisualLoading()
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    const mount = document.createElement('div')
+    document.body.append(mount)
+    created.app.mount(mount)
+    dispose = () => {
+      created.app.unmount()
+      controller.abort()
+      created.hydration.dispose()
+      mount.remove()
+    }
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    expect(mount.querySelector('main')).not.toBeNull()
+  })
+
   it('delays default hash scrolling until the async destination page is ready', async () => {
     const productGate = deferred()
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
@@ -1140,8 +1249,7 @@ describe('browser middleware navigation', () => {
     const mount = document.createElement('div')
     document.body.append(mount)
     created.app.mount(mount)
-    await nextTick()
-    await Promise.resolve()
+    await waitForVisualLoading()
     scrollTo.mockClear()
     dispose = () => {
       created.app.unmount()
@@ -1201,8 +1309,7 @@ describe('browser middleware navigation', () => {
     const mount = document.createElement('div')
     document.body.append(mount)
     created.app.mount(mount)
-    await nextTick()
-    await Promise.resolve()
+    await waitForVisualLoading()
     scrollTo.mockClear()
     dispose = () => {
       created.app.unmount()
@@ -1289,17 +1396,25 @@ describe('browser middleware navigation', () => {
     expect(mount.querySelector('.page-loader')).toBeNull()
   })
 
-  it('returns a cancelled router phase to an already-pending current page', async () => {
+  it.each([
+    { outcome: 'cancel', nested: false },
+    { outcome: 'cancel', nested: true },
+    { outcome: 'error', nested: false },
+    { outcome: 'redirect-back', nested: false },
+  ])('preserves a pending page and its hash scroll after $outcome (nested: $nested)', async ({ outcome, nested }) => {
     const productGate = deferred()
     const cancellationGate = deferred()
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
     const cancel = defineMiddleware(async () => {
       await cancellationGate.promise
+      if (outcome === 'error') throw new Error('rejected attempt')
+      if (outcome === 'redirect-back') return '/products#details'
       return false
     })
     const Products = defineComponent({
       async setup() {
         await productGate.promise
-        return () => h('main', { class: 'products-page' }, 'Products')
+        return () => h('main', { class: 'products-page', id: 'details' }, 'Products')
       },
     })
     const Root = defineComponent({
@@ -1316,20 +1431,26 @@ describe('browser middleware navigation', () => {
           ),
         ]),
     })
+    const Layout = defineComponent({
+      setup: () => () => h(SsrRouterView, { delay: 0 }, {
+        fallback: () => h('div', { class: 'page-loader' }, 'Loading child page'),
+      }),
+    })
+    const pages: RouteRecordRaw[] = [
+      { path: nested ? '' : '/', component: Page },
+      { path: nested ? 'products' : '/products', component: Products },
+      {
+        path: nested ? 'blocked' : '/blocked',
+        component: Page,
+        meta: { middleware: [cancel] },
+      },
+    ]
     const controller = new AbortController()
     const created = await createSsrApplication(
       createTestApplication({
         id: 'cancelled-navigation-over-pending-page',
         root: Root,
-        routes: [
-          { path: '/', component: Page },
-          { path: '/products', component: Products },
-          {
-            path: '/blocked',
-            component: Page,
-            meta: { middleware: [cancel] },
-          },
-        ],
+        routes: nested ? [{ path: '/', component: Layout, children: pages }] : pages,
       }),
       {
         server: false,
@@ -1345,6 +1466,7 @@ describe('browser middleware navigation', () => {
     const mount = document.createElement('div')
     document.body.append(mount)
     created.app.mount(mount)
+    created.router!.onError(() => undefined)
     dispose = () => {
       created.app.unmount()
       controller.abort()
@@ -1352,15 +1474,20 @@ describe('browser middleware navigation', () => {
       mount.remove()
     }
 
-    await created.router!.push('/products')
     await waitForVisualLoading()
-    const cancelled = created.router!.push('/blocked')
+    scrollTo.mockClear()
+    await created.router!.push('/products#details')
+    await waitForVisualLoading()
+    expect(scrollTo).not.toHaveBeenCalled()
+    const cancelled = created.router!.push('/blocked').catch((error: unknown) => error)
     await waitForVisualLoading()
     cancellationGate.resolve()
-    await cancelled
+    const failure = await cancelled
+    if (outcome === 'error') expect(failure).toEqual(new Error('rejected attempt'))
     await nextTick()
 
-    expect(created.router!.currentRoute.value.path).toBe('/products')
+    expect(created.router!.currentRoute.value.fullPath).toBe('/products#details')
+    expect(scrollTo).not.toHaveBeenCalled()
     expect(mount.querySelector('.page-loader')).not.toBeNull()
     expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
 
@@ -1371,6 +1498,8 @@ describe('browser middleware navigation', () => {
     expect(mount.querySelector('.products-page')).not.toBeNull()
     expect(mount.querySelector('.page-loader')).toBeNull()
     expect(mount.querySelector('.vssl-loading-indicator')).toBeNull()
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    expect(document.getElementById('details')).not.toBeNull()
   })
 
   it('keeps one loading clock when middleware redirects to an async page', async () => {
