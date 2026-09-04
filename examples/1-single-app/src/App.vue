@@ -1,3 +1,7 @@
+<script setup>
+import { RouteSuspense } from 'vue-ssr-lite'
+</script>
+
 <template>
   <div class="shell">
     <nav>
@@ -7,14 +11,12 @@
       <RouterLink to="/products">Products</RouterLink>
     </nav>
 
-    <RouterView v-slot="{ Component }">
-      <Suspense>
-        <component :is="Component" />
+    <RouteSuspense>
+      <RouterView />
 
-        <template #fallback>
-          <p>Loading page…</p>
-        </template>
-      </Suspense>
-    </RouterView>
+      <template #fallback>
+        <p>Loading page…</p>
+      </template>
+    </RouteSuspense>
   </div>
 </template>
