@@ -333,6 +333,13 @@ export const createSsrApplication = async <
         if (ownsMiddlewareController) middlewareController?.dispose()
       })
       if (!options.server) {
+        // Bootstrap has no loading transaction, but scrolling still waits for
+        // a mounted app and any registered enhanced outlet's positive readiness.
+        app.mixin({
+          mounted() {
+            if (!this.$parent) navigationRuntime?.appMounted()
+          },
+        })
         app.onUnmount(() => {
           navigationRuntime?.dispose()
           if (ownsMiddlewareController) middlewareController?.dispose()
