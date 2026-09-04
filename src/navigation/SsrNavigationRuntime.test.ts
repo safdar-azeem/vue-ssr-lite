@@ -353,6 +353,156 @@ describe('SsrNavigationRuntime', () => {
     runtime.dispose()
   })
 
+  it.each(['cancel', 'error', 'redirect-back'] as const)(
+    'preserves pending accepted-page readiness after a router attempt ends in %s',
+    async (outcome) => {
+      const { router, runtime } = await createHarness()
+      const events = listener()
+      const routeBoundary = boundary(0)
+      routeBoundary.subscriber.accept = () => true
+      routeBoundary.subscriber.abort = () => true
+      runtime.subscribe(events.subscriber)
+      runtime.registerBoundary(routeBoundary.subscriber)
+      await router.push('/slow#details')
+      const acceptedRoute = router.currentRoute.value
+      let ready: boolean | undefined
+      const readiness = runtime.whenPageReady(acceptedRoute).then((value) => {
+        ready = value
+        return value
+      })
+      const entered = deferred()
+      const gate = deferred()
+      router.beforeEach(async (to) => {
+        if (to.path !== '/private') return
+        entered.resolve()
+        await gate.promise
+        if (outcome === 'error') throw new Error('rejected attempt')
+        if (outcome === 'redirect-back') return acceptedRoute.fullPath
+        return false
+      })
+      router.onError(() => undefined)
+      const attempt = router.push('/private').catch((error: unknown) => error)
+      await entered.promise
+      await Promise.resolve()
+      expect(ready).toBeUndefined()
+      expect(runtime.isPageCurrent(acceptedRoute)).toBe(true)
+
+      gate.resolve()
+      const failure = await attempt
+      if (outcome === 'error') {
+        expect(failure).toEqual(new Error('rejected attempt'))
+      }
+      expect(router.currentRoute.value).toBe(acceptedRoute)
+      expect(ready).toBeUndefined()
+
+      // Rendering belongs to the accepted route, not the rejected target's ID.
+      runtime.pageRendered(acceptedRoute, routeBoundary.subscriber)
+      await expect(readiness).resolves.toBe(true)
+      expect(events.settles).toEqual([1])
+      runtime.pageReady(2, routeBoundary.subscriber)
+      expect(events.settles).toEqual([1, 2])
+      runtime.dispose()
+    }
+  )
+
+  it('can finish the accepted page while a different router decision is still pending', async () => {
+    const { router, runtime } = await createHarness()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = () => true
+    runtime.registerBoundary(routeBoundary.subscriber)
+    await router.push('/slow#details')
+    const acceptedRoute = router.currentRoute.value
+    const readiness = runtime.whenPageReady(acceptedRoute)
+    const entered = deferred()
+    const gate = deferred()
+    router.beforeEach(async () => {
+      entered.resolve()
+      await gate.promise
+      return false
+    })
+
+    const attempt = router.push('/private')
+    await entered.promise
+    runtime.pageRendered(acceptedRoute, routeBoundary.subscriber)
+    await expect(readiness).resolves.toBe(true)
+    expect(runtime.isPageCurrent(acceptedRoute)).toBe(true)
+    gate.resolve()
+    await attempt
+    expect(runtime.isPageCurrent(acceptedRoute)).toBe(true)
+    runtime.dispose()
+  })
+
+  it('waits for positive initial page readiness without starting bootstrap loading UI', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/products', component: Page }],
+    })
+    const runtime = createSsrNavigationRuntime({ router, server: false })
+    const events = listener()
+    runtime.subscribe(events.subscriber)
+    await router.push('/products#details')
+    const route = router.currentRoute.value
+    let ready: boolean | undefined
+    const readiness = runtime.whenPageReady(route).then((value) => {
+      ready = value
+      return value
+    })
+    await nextTick()
+    expect(ready).toBeUndefined()
+
+    const routeBoundary = boundary(0)
+    runtime.registerBoundary(routeBoundary.subscriber)
+    runtime.appMounted()
+    await nextTick()
+    expect(ready).toBeUndefined()
+    expect(events.starts).toEqual([])
+    expect(routeBoundary.starts).toEqual([])
+    runtime.pageRendered(route, routeBoundary.subscriber)
+    await expect(readiness).resolves.toBe(true)
+    expect(events.settles).toEqual([])
+    runtime.dispose()
+  })
+
+  it('releases initial scroll readiness at root mount when no enhanced outlet exists', async () => {
+    const { router, runtime } = await createHarness()
+    let ready: boolean | undefined
+    const readiness = runtime
+      .whenPageReady(router.currentRoute.value)
+      .then((value) => {
+        ready = value
+        return value
+      })
+    await nextTick()
+    expect(ready).toBeUndefined()
+    runtime.appMounted()
+    await expect(readiness).resolves.toBe(true)
+    runtime.dispose()
+  })
+
+  it('ignores an earlier visit to the same URL and revokes scroll authority on disposal', async () => {
+    const { router, runtime } = await createHarness()
+    const routeBoundary = boundary(0)
+    routeBoundary.subscriber.accept = () => true
+    runtime.registerBoundary(routeBoundary.subscriber)
+    await router.push('/slow#details')
+    const retiredRoute = router.currentRoute.value
+    await router.push('/about')
+    await router.push('/slow#details')
+    const currentRoute = router.currentRoute.value
+    expect(currentRoute).not.toBe(retiredRoute)
+    let ready: boolean | undefined
+    const readiness = runtime.whenPageReady(currentRoute).then((value) => {
+      ready = value
+      return value
+    })
+    runtime.pageRendered(retiredRoute, routeBoundary.subscriber)
+    await nextTick()
+    expect(ready).toBeUndefined()
+    runtime.dispose()
+    await expect(readiness).resolves.toBe(false)
+    expect(runtime.isPageCurrent(currentRoute)).toBe(false)
+  })
+
   it('ignores stale page readiness after a newer navigation takes ownership', async () => {
     const { router, runtime } = await createHarness()
     const events = listener()
