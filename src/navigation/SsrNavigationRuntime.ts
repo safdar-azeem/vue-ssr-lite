@@ -43,7 +43,6 @@ interface ActiveNavigation {
   transaction: SsrNavigationTransaction
   /** First target in this router-owned redirect chain. */
   origin: RouteLocationNormalized
-  readiness: PageReadiness
   boundaries: Set<SsrNavigationBoundarySubscriber>
   pendingBoundaries: Set<SsrNavigationBoundarySubscriber>
   routerAccepted: boolean
@@ -53,6 +52,14 @@ interface ActiveNavigation {
 interface PageReadiness {
   readonly promise: Promise<boolean>
   resolve(ready: boolean): void
+}
+
+interface AcceptedPage {
+  readonly route: RouteLocationNormalizedLoaded
+  readonly changedDepth: number
+  readonly readiness: PageReadiness
+  boundaries: Set<SsrNavigationBoundarySubscriber>
+  pendingBoundaries: Set<SsrNavigationBoundarySubscriber>
 }
 
 const createPageReadiness = (): PageReadiness => {
@@ -83,6 +90,8 @@ export const createSsrNavigationRuntime = (options: {
   let boundaryCount = 0
   let sequence = 0
   let active: ActiveNavigation | undefined
+  let acceptedPage: AcceptedPage | undefined
+  let mounted = false
   let initialNavigationPending =
     options.router.currentRoute.value === START_LOCATION
   let disposed = false
@@ -95,6 +104,75 @@ export const createSsrNavigationRuntime = (options: {
       if (candidates?.size) return new Set(candidates)
     }
     return new Set()
+  }
+
+  const finishPageIfReady = (page: AcceptedPage) => {
+    if (
+      disposed ||
+      acceptedPage !== page ||
+      page.pendingBoundaries.size ||
+      // Initial router acceptance can precede app.mount(). Give enhanced
+      // outlets time to register; without one, the root mount is the checkpoint.
+      (!mounted && !page.boundaries.size)
+    ) {
+      return
+    }
+    page.readiness.resolve(true)
+  }
+
+  const acceptPage = (
+    route: RouteLocationNormalizedLoaded,
+    from: RouteLocationNormalizedLoaded
+  ) => {
+    if (acceptedPage?.route === route) return
+    // Router attempts own loading clocks, not the currently accepted page.
+    // Only an actual commit can retire its readiness and pending scroll work.
+    acceptedPage?.readiness.resolve(false)
+    const changedDepth = resolveFirstChangedRouteDepth(from, route)
+    const selected = selectBoundaries(changedDepth)
+    const page: AcceptedPage = {
+      route,
+      changedDepth,
+      readiness: createPageReadiness(),
+      boundaries: selected,
+      pendingBoundaries: new Set(selected),
+    }
+    acceptedPage = page
+    pageReadiness.set(route, page.readiness)
+    // Plain Vue Router outlets keep their normal post-patch scroll timing.
+    // Enhanced outlets require a positive report from their rendered branch.
+    void nextTick(() => finishPageIfReady(page))
+  }
+
+  const refreshPageBoundaries = () => {
+    if (!acceptedPage) return
+    const page = acceptedPage
+    const selected = selectBoundaries(page.changedDepth)
+    for (const boundary of selected) {
+      if (!page.boundaries.has(boundary)) page.pendingBoundaries.add(boundary)
+    }
+    for (const boundary of page.boundaries) {
+      if (!selected.has(boundary)) page.pendingBoundaries.delete(boundary)
+    }
+    page.boundaries = selected
+    // Registration changes during a patch must not transiently report ready.
+    void nextTick(() => finishPageIfReady(page))
+  }
+
+  const pageRendered = (
+    route: RouteLocationNormalizedLoaded,
+    boundary: SsrNavigationBoundarySubscriber
+  ) => {
+    const page = acceptedPage
+    if (
+      !page ||
+      page.route !== route ||
+      options.router.currentRoute.value !== route ||
+      !page.pendingBoundaries.delete(boundary)
+    ) {
+      return
+    }
+    finishPageIfReady(page)
   }
 
   const trace = (
@@ -117,10 +195,6 @@ export const createSsrNavigationRuntime = (options: {
     if (active?.transaction.id !== transactionId) return
     const current = active
     active = undefined
-    current.readiness.resolve(
-      outcome === 'success' &&
-        options.router.currentRoute.value === current.transaction.to
-    )
     trace(current.transaction, 'SETTLE', outcome)
     for (const subscriber of subscribers) {
       subscriber.settle(transactionId)
@@ -141,6 +215,8 @@ export const createSsrNavigationRuntime = (options: {
     for (const boundary of current.boundaries) {
       if (boundary.accept(current.transaction)) {
         current.pendingBoundaries.add(boundary)
+      } else if (acceptedPage?.route === current.transaction.to) {
+        pageRendered(acceptedPage.route, boundary)
       }
     }
     if (!current.pendingBoundaries.size) {
@@ -175,11 +251,9 @@ export const createSsrNavigationRuntime = (options: {
   const replaceActive = (transaction: SsrNavigationTransaction) => {
     const nextBoundaries = selectBoundaries(transaction.changedDepth)
     const previous = active
-    const readiness = createPageReadiness()
     active = {
       transaction,
       origin: transaction.to,
-      readiness,
       boundaries: nextBoundaries,
       pendingBoundaries: new Set(),
       routerAccepted: false,
@@ -187,7 +261,6 @@ export const createSsrNavigationRuntime = (options: {
     }
 
     if (previous) {
-      previous.readiness.resolve(false)
       trace(previous.transaction, 'SUPERSEDED')
     }
     trace(transaction, 'START')
@@ -218,7 +291,6 @@ export const createSsrNavigationRuntime = (options: {
     active = {
       transaction,
       origin: current.origin,
-      readiness: current.readiness,
       boundaries: nextBoundaries,
       pendingBoundaries: new Set(),
       routerAccepted: false,
@@ -254,6 +326,8 @@ export const createSsrNavigationRuntime = (options: {
         if (current.routerAccepted) {
           if (boundary.accept(current.transaction)) {
             current.pendingBoundaries.add(boundary)
+          } else if (acceptedPage?.route === current.transaction.to) {
+            pageRendered(acceptedPage.route, boundary)
           }
         }
       }
@@ -323,8 +397,8 @@ export const createSsrNavigationRuntime = (options: {
     : options.router.beforeEach((to, from) => {
         if (disposed) return true
         if (initialNavigationPending && from === START_LOCATION) return true
-        // With no mounted loading UI, the observer performs no route-depth
-        // work, reactive writes, timers, or DOM work.
+        // No loading transaction is needed without mounted loading UI. Page
+        // readiness is still tracked on acceptance, including initial mount.
         if (!subscribers.size && boundaryCount === 0) return true
 
         const changedDepth = resolveFirstChangedRouteDepth(from, to)
@@ -345,15 +419,18 @@ export const createSsrNavigationRuntime = (options: {
           replaceActive(transaction)
         }
         navigationIds.set(to, transaction.id)
-        pageReadiness.set(to, active!.readiness)
         return true
       })
 
   const removeAfter = options.server
     ? () => undefined
     : options.router.afterEach((to, from, failure) => {
+        if (disposed) return
         if (initialNavigationPending && from === START_LOCATION) {
           initialNavigationPending = false
+        }
+        if (!failure && options.router.currentRoute.value === to) {
+          acceptPage(options.router.currentRoute.value, from)
         }
         const transactionId = resolveTerminalTransaction(to, 'afterEach')
         if (transactionId === undefined) return
@@ -370,6 +447,12 @@ export const createSsrNavigationRuntime = (options: {
         const transactionId = resolveTerminalTransaction(to, 'onError')
         if (transactionId !== undefined) abort(transactionId, 'error')
       })
+
+  // A consumer router factory may have completed routing before installation.
+  // It still needs the same initial rendered-page checkpoint.
+  if (!options.server && options.router.currentRoute.value !== START_LOCATION) {
+    acceptPage(options.router.currentRoute.value, START_LOCATION)
+  }
 
   return {
     subscribe(subscriber) {
@@ -389,12 +472,14 @@ export const createSsrNavigationRuntime = (options: {
         registrations.add(subscriber)
         boundaryCount += 1
       }
+      refreshPageBoundaries()
       refreshActiveBoundaries()
       return () => {
         const registered = boundaries.get(subscriber.depth)
         if (!registered?.delete(subscriber)) return
         boundaryCount -= 1
         if (!registered.size) boundaries.delete(subscriber.depth)
+        refreshPageBoundaries()
         refreshActiveBoundaries()
       }
     },
@@ -406,19 +491,36 @@ export const createSsrNavigationRuntime = (options: {
       ) {
         return
       }
+      if (acceptedPage) {
+        pageRendered(acceptedPage.route, boundary)
+      }
       if (!active.pendingBoundaries.size) {
         settle(transactionId, active.terminalOutcome)
       }
     },
+    pageRendered,
+    appMounted() {
+      if (disposed) return
+      mounted = true
+      const page = acceptedPage
+      if (page) void nextTick(() => finishPageIfReady(page))
+    },
     async whenPageReady(route) {
       const readiness = pageReadiness.get(route)
-      if (!readiness) return options.router.currentRoute.value === route
+      if (disposed || !readiness) return false
       return (
-        (await readiness.promise) && options.router.currentRoute.value === route
+        (await readiness.promise) &&
+        !disposed &&
+        acceptedPage?.route === route &&
+        options.router.currentRoute.value === route
       )
     },
     isPageCurrent(route) {
-      return options.router.currentRoute.value === route
+      return (
+        !disposed &&
+        acceptedPage?.route === route &&
+        options.router.currentRoute.value === route
+      )
     },
     dispose() {
       if (disposed) return
@@ -427,6 +529,8 @@ export const createSsrNavigationRuntime = (options: {
       removeAfter()
       removeError()
       if (active) settle(active.transaction.id, 'dispose')
+      acceptedPage?.readiness.resolve(false)
+      acceptedPage = undefined
       subscribers.clear()
       boundaries.clear()
       boundaryCount = 0
