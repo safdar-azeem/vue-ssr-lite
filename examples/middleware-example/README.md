@@ -15,7 +15,7 @@ Middleware can be synchronous or asynchronous, and the same middleware behavior 
 
 ```vue
 <script setup lang="ts">
-import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
+import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 </script>
 
 <template>
@@ -27,21 +27,19 @@ import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
     <section>
       <header>Persistent header</header>
 
-      <RouteSuspense>
-        <RouterView />
-
+      <RouterView>
         <template #fallback>
           <div class="page-skeleton">Loading page…</div>
         </template>
-      </RouteSuspense>
+      </RouterView>
     </section>
   </div>
 </template>
 ```
 
-Open Dashboard to see the header and sidebar remain mounted while only the route body shows its fallback. The fallback covers navigation middleware, guards, route resolution, and the Vue DOM update that commits the accepted route. Native Vue `<Suspense>` remains responsible for arbitrary async component setup. `LoadingIndicator` simultaneously shows the optional thin global bar. Fast navigations finish before the default visual delay and do not flash either loader.
+Open Dashboard to see the header and sidebar remain mounted while only the route body shows its fallback. The loading lifecycle includes navigation middleware, guards, route resolution, and async component setup through native Vue `<Suspense>`. `LoadingIndicator` simultaneously shows the optional thin global bar. Fast navigations finish before the default visual delay and do not flash either loader.
 
-The static loader in `index.html` is for the initial SPA boot, before Vue can mount safely. `RouteSuspense` and `LoadingIndicator` own later Vue Router navigations. SSR requests still wait for middleware before rendering the final route and do not render browser loading fallback UI.
+The static loader in `index.html` is for the initial SPA boot, before Vue can mount safely. `RouterView` and `LoadingIndicator` own later Vue Router navigations. SSR requests still wait for middleware before rendering the final route and do not render browser loading fallback UI.
 
 ## Global middleware
 
