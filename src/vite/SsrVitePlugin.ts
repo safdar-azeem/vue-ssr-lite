@@ -316,15 +316,15 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         },
         optimizeDeps: {
           // Generated clients are virtual, so Vite's HTML scanner cannot see
-          // their Vue imports until the first browser request. Prebundle the
-          // stable framework boundary so SPA/SSR hydration does not race an
-          // optimizer restart on first load.
-          include: [
-            'vue',
-            'vue-router',
-            'vue-ssr-lite',
-            'vue-ssr-lite/client',
-          ],
+          // their Vue imports until the first browser request. Prebundle these
+          // peers so hydration does not race an optimizer restart on first load.
+          include: ['vue', 'vue-router'],
+          // The framework is already ESM. Serve it through Vite's normal module
+          // graph, which revalidates responses, including its shared chunks.
+          // Optimizer URLs depend on config/lockfile hashes, not package source:
+          // rebuilding the same version can otherwise retain old navigation
+          // code both in the optimizer cache and in an immutable browser cache.
+          exclude: ['vue-ssr-lite'],
         },
         ssr: {
           // Transform the framework in Vite's SSR graph so linked workspaces
