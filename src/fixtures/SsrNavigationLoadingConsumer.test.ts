@@ -74,6 +74,14 @@ const browserExecutable = [
   '/usr/bin/chromium-browser',
 ].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)))
 
+const requireBrowserExecutable = () => {
+  if (browserExecutable) return browserExecutable
+  throw new Error(
+    'The required real-browser navigation regression needs Chrome or Chromium. ' +
+      'Install a supported executable or set CHROME_PATH to its absolute path.'
+  )
+}
+
 interface CdpMessage {
   id?: number
   method?: string
@@ -278,6 +286,120 @@ const runChromiumNavigationRegression = async (
     await waitForExpression(
       `Boolean(document.querySelector('.about-page')) && ${noLoading}`,
       'Chromium About navigation did not settle.'
+    )
+    await evaluate(
+      `(() => {
+        window.__vsslProductResolvers = []
+        window.__VSSL_WAIT_FOR_PRODUCTS__ = () => new Promise(resolve => {
+          window.__vsslProductResolvers.push(resolve)
+        })
+      })()`
+    )
+    await click('.products-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton')) && ` +
+        `Boolean(document.querySelector('.vssl-loading-indicator'))`,
+      'Chromium async Products navigation did not keep both loaders active.'
+    )
+    await click('.about-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.about-page')) && ${noLoading}`,
+      'Chromium About did not supersede the unresolved Products page.'
+    )
+    await evaluate(`window.__vsslProductResolvers.shift()?.()`)
+    await waitForExpression(
+      `Boolean(document.querySelector('.about-page')) && ` +
+        `!document.querySelector('.products-page') && ${noLoading}`,
+      'Chromium rendered Products after its stale async setup resolved.'
+    )
+    await click('.products-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton')) && ` +
+        `Boolean(document.querySelector('.vssl-loading-indicator'))`,
+      'Chromium repeated Products navigation did not enter page loading.'
+    )
+    await evaluate(`window.__vsslProductResolvers.shift()?.()`)
+    await waitForExpression(
+      `Boolean(document.querySelector('.products-page')) && ${noLoading}`,
+      'Chromium repeated Products navigation did not resolve.'
+    )
+    await click('.home-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ${noLoading}`,
+      'Chromium did not navigate Home after Products resolved.'
+    )
+    await evaluate(
+      `(() => {
+        window.__vsslScrollCalls = []
+        window.scrollTo = (...args) => window.__vsslScrollCalls.push(args)
+      })()`
+    )
+    await click('.product-details-link')
+    await waitForExpression(
+      `location.hash === '#details' && ` +
+        `Boolean(document.querySelector('.page-skeleton'))`,
+      'Chromium hash Products navigation did not suspend.'
+    )
+    expect(await evaluate<number>(`window.__vsslScrollCalls.length`)).toBe(0)
+    await evaluate(`window.__vsslProductResolvers.shift()?.()`)
+    await waitForExpression(
+      `Boolean(document.querySelector('.products-page #details')) && ` +
+        `window.__vsslScrollCalls.length > 0 && ${noLoading}`,
+      'Chromium hash scrolling ran before the async Products page was ready.'
+    )
+    await click('.home-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ${noLoading}`,
+      'Chromium did not return Home after hash scrolling.'
+    )
+    await click('.products-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton'))`,
+      'Chromium Products navigation did not suspend before Back.'
+    )
+    await evaluate('history.back()')
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ${noLoading}`,
+      'Chromium Back did not supersede unresolved Products.'
+    )
+    await evaluate(`window.__vsslProductResolvers.shift()?.()`)
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ` +
+        `!document.querySelector('.products-page') && ${noLoading}`,
+      'Chromium Products reappeared after resolving behind Back.'
+    )
+    await click('.products-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton'))`,
+      'Chromium rapid Products navigation did not suspend.'
+    )
+    await click('.about-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.about-page'))`,
+      'Chromium rapid About navigation did not win.'
+    )
+    await click('.products-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.page-skeleton'))`,
+      'Chromium second rapid Products navigation did not suspend.'
+    )
+    await click('.home-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ${noLoading}`,
+      'Chromium latest rapid Home navigation did not win.'
+    )
+    await evaluate(
+      `window.__vsslProductResolvers.splice(0).forEach(resolve => resolve())`
+    )
+    await waitForExpression(
+      `Boolean(document.querySelector('.home-page')) && ` +
+        `!document.querySelector('.products-page') && ${noLoading}`,
+      'Chromium stale rapid Products branches changed the accepted page.'
+    )
+    await click('.about-link')
+    await waitForExpression(
+      `Boolean(document.querySelector('.about-page')) && ${noLoading}`,
+      'Chromium navigation was stuck after rapid async routes.'
     )
     await click('.dashboard-link')
     await waitForExpression(
@@ -564,6 +686,7 @@ const prepareLinkedConsumer = async () => {
 
 describe('linked-package real SFC navigation loading consumer', () => {
   it('SSR-renders, hydrates, and keeps navigation loading fully client-side', async () => {
+    const executable = requireBrowserExecutable()
     await prepareLinkedConsumer()
     await build({
       root: fixtureRoot,
@@ -631,10 +754,20 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(response.status).toBe(200)
     expect(html).toMatch(/<a[^>]+href="\/"[^>]*>Home<\/a>/)
     expect(html).toMatch(/<a[^>]+href="\/about"[^>]*>About<\/a>/)
+    expect(html).toMatch(/<a[^>]+href="\/products"[^>]*>Products<\/a>/)
     expect(html).toMatch(/<a[^>]+href="\/dashboard"[^>]*>Dashboard<\/a>/)
     expect(html).toContain('Home page')
     expect(html).not.toContain('page-skeleton')
     expect(html).not.toContain('vssl-loading-indicator')
+
+    const productsResponse = await fetch(`${origin}/products`, {
+      headers: { accept: 'text/html' },
+    })
+    const productsHtml = await productsResponse.text()
+    expect(productsResponse.status).toBe(200)
+    expect(productsHtml).toContain('Products page')
+    expect(productsHtml).toContain('Fixture Product')
+    expect(productsHtml).not.toContain('page-skeleton')
 
     const virtualConsole = new VirtualConsole()
     const jsdomErrors: unknown[] = []
@@ -1084,22 +1217,20 @@ describe('linked-package real SFC navigation loading consumer', () => {
       )
     }
 
-    expect(documentRequests).toEqual(['/'])
-    if (browserExecutable) {
-      // Undici's Node WebSocket requires Node's Event constructor. The JSDOM
-      // navigation phase is complete, so restore host globals before CDP.
-      restoreBrowserGlobals?.()
-      restoreBrowserGlobals = undefined
-      const requestOffset = documentRequests.length
-      const browserResult = await runChromiumNavigationRegression(
-        browserExecutable,
-        origin,
-        join(workspaceRoot, 'chromium-profile')
-      )
-      expect(documentRequests.slice(requestOffset)).toEqual(['/'])
-      expect(browserResult.documentRequests).toEqual([`${origin}/`])
-      expect(browserResult.browserMessages).toEqual([])
-    }
+    expect(documentRequests).toEqual(['/', '/products'])
+    // Undici's Node WebSocket requires Node's Event constructor. The JSDOM
+    // navigation phase is complete, so restore host globals before CDP.
+    restoreBrowserGlobals?.()
+    restoreBrowserGlobals = undefined
+    const requestOffset = documentRequests.length
+    const browserResult = await runChromiumNavigationRegression(
+      executable,
+      origin,
+      join(workspaceRoot, 'chromium-profile')
+    )
+    expect(documentRequests.slice(requestOffset)).toEqual(['/'])
+    expect(browserResult.documentRequests).toEqual([`${origin}/`])
+    expect(browserResult.browserMessages).toEqual([])
     expect(jsdomErrors).toEqual([])
 
     const relevantMessages = [...warnings, ...errors]
