@@ -303,7 +303,7 @@ useSeo({ status: 404 })
     `<script setup>
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { LoadingIndicator, RouteSuspense, usePublicConfig } from 'vue-ssr-lite'
+import { LoadingIndicator, RouterView, usePublicConfig } from 'vue-ssr-lite'
 
 const route = useRoute()
 const publicConfig = usePublicConfig()
@@ -323,12 +323,11 @@ onMounted(() => document.documentElement.setAttribute('data-hydrated', 'true'))
     <div id="public-config-revision">{{ publicConfig.revision }}</div>
     <RouterLink id="navigate-about" to="/about">about</RouterLink>
     <RouterLink id="navigate-dashboard" to="/dashboard">dashboard</RouterLink>
-    <RouteSuspense :delay="5">
-      <RouterView />
+    <RouterView :delay="5">
       <template #fallback>
         <div id="route-fallback">packed-loading</div>
       </template>
-    </RouteSuspense>
+    </RouterView>
   </main>
 </template>
 `,
@@ -648,7 +647,7 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       () =>
         Boolean(dom.window.document.querySelector('#route-fallback')) &&
         Boolean(dom.window.document.querySelector('.vssl-loading-indicator')),
-      'packed RouteSuspense and LoadingIndicator did not cover slow middleware.'
+      'packed RouterView and LoadingIndicator did not show slow middleware.'
     )
     await waitFor(
       () =>
