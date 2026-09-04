@@ -31,6 +31,9 @@ const harness = () => {
       }
     },
     registerBoundary: () => () => undefined,
+    pageReady: () => undefined,
+    whenPageReady: async () => true,
+    isPageCurrent: () => true,
     dispose: () => undefined,
   }
   return {
