@@ -4,6 +4,6 @@ import { routes } from './routes'
 export { routes }
 
 export default (_context: AppContext) => {
-  // RouterLink and RouterView intentionally rely on app.use(router)'s normal
-  // global registration. This fixture must exercise template resolution.
+  // RouterLink intentionally relies on app.use(router)'s normal global
+  // registration. App.vue imports the enhanced route outlet explicitly.
 }
