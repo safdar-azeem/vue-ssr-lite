@@ -10,7 +10,7 @@ import * as viteApi from './vite'
 
 const ROOT_RUNTIME_EXPORTS = [
   'LoadingIndicator',
-  'RouteSuspense',
+  'RouterView',
   'defineApplication',
   'defineExtension',
   'defineMiddleware',
@@ -56,6 +56,7 @@ const SERVER_RUNTIME_EXPORTS = [
 const VITE_RUNTIME_EXPORTS = ['importSsrViteModule', 'vueSsrLite']
 
 const OBSOLETE_RUNTIME_EXPORTS = [
+  'RouteSuspense',
   'useSsrDomain',
   'useSiteOrigin',
   'setResponseStatus',
