@@ -73,7 +73,7 @@ const runConfig = async (
     }
   )) as {
     resolve?: { dedupe?: string[] }
-    optimizeDeps?: { include?: string[] }
+    optimizeDeps?: { include?: string[]; exclude?: string[] }
     ssr?: {
       external?: string[]
       noExternal?: Array<string | RegExp>
@@ -86,6 +86,62 @@ const runConfig = async (
 }
 
 describe('SSR Vite package identity', () => {
+  it('serves a rebuilt runtime at the same package version after a dev restart', async () => {
+    await writeMinimalConfig()
+    root = await realpath(root)
+    await writeFile(join(root, 'package.json'), JSON.stringify({
+      name: 'same-version-runtime-consumer',
+      private: true,
+      type: 'module',
+    }))
+    const packageRoot = join(root, 'node_modules/vue-ssr-lite')
+    await mkdir(packageRoot, { recursive: true })
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'vue-ssr-lite',
+      version: '1.0.0-local',
+      type: 'module',
+      exports: { '.': './index.js', './client': './client.js' },
+    }))
+    await writeFile(join(packageRoot, 'client.js'), 'export const client = true')
+    await writeFile(join(root, 'src/probe.ts'),
+      `import { revision } from 'vue-ssr-lite'; export { revision }`)
+
+    const responses: Array<{ code: string; cacheControl: string | null }> = []
+    for (const revision of ['before-rebuild', 'after-rebuild']) {
+      await writeFile(join(packageRoot, 'index.js'),
+        `export const revision = ${JSON.stringify(revision)}`)
+      server = await createServer({
+        root,
+        configFile: false,
+        logLevel: 'silent',
+        plugins: [vueSsrLite({ root }), vue()],
+        server: { port: 0, host: '127.0.0.1', hmr: false },
+      })
+      await server.listen()
+      const origin = server.resolvedUrls!.local[0]!
+      const probe = await (await fetch(new URL('/src/probe.ts', origin))).text()
+      const runtimeUrl = probe.match(/from ["']([^"']+)["']/)?.[1]
+      expect(runtimeUrl).toBeDefined()
+      const response = await fetch(new URL(runtimeUrl!, origin))
+      expect(response.status, runtimeUrl).toBe(200)
+      responses.push({
+        code: await response.text(),
+        cacheControl: response.headers.get('cache-control'),
+      })
+      await server.close()
+      server = undefined
+    }
+
+    expect(responses[0]!.code).toContain('before-rebuild')
+    expect(responses[1]!.code).toContain('after-rebuild')
+    for (const response of responses) {
+      // Old browser copies must be revalidated even when the package version,
+      // lockfile, config, and dependency import URL have not changed.
+      expect(response.cacheControl).toContain('no-cache')
+      expect(response.cacheControl).not.toContain('immutable')
+    }
+  })
+
   it('resolves the runtime virtual id even when Vite path-resolves build.ssr', async () => {
     const pluginRoot = await writeMinimalConfig()
     const plugin = vueSsrLite({ root: pluginRoot })
@@ -126,12 +182,8 @@ describe('SSR Vite package identity', () => {
     expect(config.resolve?.dedupe).toContain('vue-router')
     expect(config.resolve?.dedupe).toContain('vue-ssr-lite')
     expect(config.resolve?.dedupe).not.toContain('@vue/server-renderer')
-    expect(config.optimizeDeps?.include).toEqual([
-      'vue',
-      'vue-router',
-      'vue-ssr-lite',
-      'vue-ssr-lite/client',
-    ])
+    expect(config.optimizeDeps?.include).toEqual(['vue', 'vue-router'])
+    expect(config.optimizeDeps?.exclude).toContain('vue-ssr-lite')
     expect(config.ssr?.external ?? []).not.toContain('vue-ssr-lite')
     expect(config.ssr?.noExternal).toContain('vue-ssr-lite')
   })
