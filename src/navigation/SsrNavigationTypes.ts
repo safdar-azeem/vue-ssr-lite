@@ -46,6 +46,13 @@ export interface SsrNavigationRuntime {
     transactionId: number,
     boundary: SsrNavigationBoundarySubscriber
   ): void
+  /** Positive rendered-page readiness, independent of any loading attempt. */
+  pageRendered(
+    route: RouteLocationNormalizedLoaded,
+    boundary: SsrNavigationBoundarySubscriber
+  ): void
+  /** Initial root mount checkpoint for applications without an enhanced outlet. */
+  appMounted(): void
   /** Wait for the exact accepted route generation's selected page boundary. */
   whenPageReady(route: RouteLocationNormalizedLoaded): Promise<boolean>
   /** Whether this exact accepted route generation still owns presentation. */
