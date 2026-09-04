@@ -1,2 +1,2 @@
 export { LoadingIndicator } from './LoadingIndicator'
-export { RouteSuspense } from './RouteSuspense'
+export { RouterView } from './RouterView'
