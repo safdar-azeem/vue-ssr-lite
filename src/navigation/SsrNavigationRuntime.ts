@@ -13,6 +13,8 @@ import type {
   SsrNavigationTransaction,
 } from './SsrNavigationTypes'
 
+type NavigationOutcome = 'success' | 'cancelled' | 'error' | 'dispose'
+
 export const SSR_NAVIGATION_RUNTIME: InjectionKey<SsrNavigationRuntime> =
   Symbol('vue-ssr-lite navigation runtime')
 
@@ -72,7 +74,7 @@ export const createSsrNavigationRuntime = (options: {
   const trace = (
     transaction: SsrNavigationTransaction,
     event: 'START' | 'REDIRECT' | 'SUPERSEDED' | 'SETTLE',
-    outcome?: 'success' | 'cancelled' | 'error' | 'dispose'
+    outcome?: NavigationOutcome
   ) => {
     if (!options.diagnostics) return
     const suffix = outcome ? ` ${outcome}` : ''
@@ -85,16 +87,17 @@ export const createSsrNavigationRuntime = (options: {
     )
   }
 
-  const settle = (
-    transactionId: number,
-    outcome: 'success' | 'cancelled' | 'error' | 'dispose'
-  ) => {
+  const settle = (transactionId: number, outcome: NavigationOutcome) => {
     if (active?.transaction.id !== transactionId) return
     const current = active
     active = undefined
     trace(current.transaction, 'SETTLE', outcome)
-    for (const subscriber of subscribers) subscriber.settle(transactionId)
-    for (const boundary of current.boundaries) boundary.settle(transactionId)
+    for (const subscriber of subscribers) {
+      subscriber.settle(transactionId)
+    }
+    for (const boundary of current.boundaries) {
+      boundary.settle(transactionId)
+    }
   }
 
   const settleAfterDomUpdate = (transactionId: number) => {
@@ -128,11 +131,9 @@ export const createSsrNavigationRuntime = (options: {
     to: RouteLocationNormalized,
     changedDepth: number
   ) => {
-    const transaction: SsrNavigationTransaction = {
-      ...current.transaction,
-      to,
-      changedDepth,
-    }
+    const transaction = current.transaction
+    transaction.to = to
+    transaction.changedDepth = changedDepth
     const nextBoundaries = selectBoundaries(changedDepth)
     active = {
       transaction,
@@ -141,13 +142,16 @@ export const createSsrNavigationRuntime = (options: {
     }
     trace(transaction, 'REDIRECT')
 
+    // Retarget continuing owners and start new ones before releasing old ones,
+    // preserving both branch ownership and the logical loading clock.
+    for (const boundary of nextBoundaries) {
+      if (current.boundaries.has(boundary)) boundary.retarget?.(transaction)
+      else boundary.start(transaction)
+    }
     for (const boundary of current.boundaries) {
       if (!nextBoundaries.has(boundary)) {
         boundary.settle(transaction.id)
       }
-    }
-    for (const boundary of nextBoundaries) {
-      if (!current.boundaries.has(boundary)) boundary.start(transaction)
     }
     return transaction
   }
@@ -160,14 +164,14 @@ export const createSsrNavigationRuntime = (options: {
       current.transaction.changedDepth
     )
     current.boundaries = nextBoundaries
-    for (const boundary of previousBoundaries) {
-      if (!nextBoundaries.has(boundary)) {
-        boundary.settle(current.transaction.id)
-      }
-    }
     for (const boundary of nextBoundaries) {
       if (!previousBoundaries.has(boundary)) {
         boundary.start(current.transaction)
+      }
+    }
+    for (const boundary of previousBoundaries) {
+      if (!nextBoundaries.has(boundary)) {
+        boundary.settle(current.transaction.id)
       }
     }
   }
