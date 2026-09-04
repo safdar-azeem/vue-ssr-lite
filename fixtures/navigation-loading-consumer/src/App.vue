@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LoadingIndicator, RouteSuspense } from 'vue-ssr-lite'
+import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 import PageSkeleton from './PageSkeleton.vue'
 </script>
 
@@ -19,13 +19,11 @@ import PageSkeleton from './PageSkeleton.vue'
       </header>
 
       <main class="route-content">
-        <RouteSuspense :delay="10">
-          <RouterView />
-
+        <RouterView :delay="10">
           <template #fallback>
             <PageSkeleton />
           </template>
-        </RouteSuspense>
+        </RouterView>
       </main>
     </section>
   </div>
