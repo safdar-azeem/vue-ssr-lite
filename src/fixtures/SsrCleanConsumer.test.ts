@@ -429,7 +429,9 @@ describe('zero-config clean consumer fixture', () => {
       loadRuntime: () => importEphemeralDevelopmentRuntime(devServer!),
     })
     await managedServer.listen()
-    expect(hasGeneratedClientEntry()).toBe(false)
+    // The cache was cold when Vite was created. Managed startup now prepares
+    // the guaranteed shell automatically, before the first HTTP navigation.
+    expect(hasGeneratedClientEntry()).toBe(true)
     const origin = `http://127.0.0.1:${managedServer.address().port}`
     const firstWave = await Promise.all(
       ['/', '/', '/lazy'].map(async (path) => {
