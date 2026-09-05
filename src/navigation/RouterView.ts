@@ -308,7 +308,12 @@ export const RouterView = defineComponent({
       Map<VNode['key'], symbol>
     >()
     let suspensePending = false
+    let pendingOwnership: RouteOwnership | undefined
     let unmounted = false
+    let retentionRevision = 0
+
+    const currentPageIsPending = () =>
+      suspensePending && pendingOwnership === latestOwnership
 
     const clearFallbackTimer = () => {
       if (fallbackTimer === undefined) return
@@ -316,12 +321,14 @@ export const RouterView = defineComponent({
       fallbackTimer = undefined
     }
 
-    const releaseRetentionAfterPatch = (transactionId?: number) => {
+    const releaseRetentionAfterPatch = () => {
+      const revision = ++retentionRevision
       void nextTick(() => {
         if (
           unmounted ||
+          revision !== retentionRevision ||
           loading.value?.showRouterFallback ||
-          (transactionId !== undefined && loading.value?.id !== transactionId)
+          loading.value?.phase === 'routerPending'
         ) {
           return
         }
@@ -332,7 +339,7 @@ export const RouterView = defineComponent({
     const showRouterFallback = (cycle: LoadingCycle) => {
       if (
         unmounted ||
-        suspensePending ||
+        currentPageIsPending() ||
         loading.value !== cycle ||
         cycle.phase !== 'routerPending'
       ) {
@@ -342,8 +349,15 @@ export const RouterView = defineComponent({
     }
 
     const scheduleRouterFallback = (cycle: LoadingCycle) => {
-      if (!slots.fallback || suspensePending || cycle.showRouterFallback) return
+      if (
+        !slots.fallback ||
+        currentPageIsPending() ||
+        cycle.showRouterFallback
+      ) {
+        return
+      }
       clearFallbackTimer()
+      const revision = ++retentionRevision
       retainAcceptedPresenter.value = true
 
       // KeepAlive can only retain the already-mounted, fully-resolved
@@ -352,9 +366,10 @@ export const RouterView = defineComponent({
       void nextTick(() => {
         if (
           unmounted ||
+          revision !== retentionRevision ||
           loading.value !== cycle ||
           cycle.phase !== 'routerPending' ||
-          suspensePending
+          currentPageIsPending()
         ) {
           return
         }
@@ -368,6 +383,7 @@ export const RouterView = defineComponent({
         }
         fallbackTimer = setTimeout(() => {
           fallbackTimer = undefined
+          if (revision !== retentionRevision) return
           showRouterFallback(cycle)
         }, remaining)
       })
@@ -378,7 +394,7 @@ export const RouterView = defineComponent({
       // Keep the current unresolved page branch intact while the next router
       // decision runs. It remains the router's current route until that next
       // navigation is accepted, cancelled, or redirected.
-      if (!suspensePending) candidate = undefined
+      if (!currentPageIsPending()) candidate = undefined
       const previous = loading.value
       const cycle: LoadingCycle = {
         id: transaction.id,
@@ -389,8 +405,9 @@ export const RouterView = defineComponent({
       loading.value = cycle
 
       if (cycle.showRouterFallback) {
+        retentionRevision += 1
         retainAcceptedPresenter.value = true
-      } else if (!suspensePending) {
+      } else if (!currentPageIsPending()) {
         scheduleRouterFallback(cycle)
       }
     }
@@ -405,7 +422,7 @@ export const RouterView = defineComponent({
         phase: 'pagePending',
         showRouterFallback: false,
       }
-      releaseRetentionAfterPatch(transaction.id)
+      releaseRetentionAfterPatch()
       return true
     }
 
@@ -414,7 +431,7 @@ export const RouterView = defineComponent({
       if (!cycle || cycle.id !== transactionId) return false
       clearFallbackTimer()
 
-      if (suspensePending) {
+      if (currentPageIsPending()) {
         // The rejected target was never rendered, but the router's already-
         // current page may still be resolving from an earlier commit. Transfer
         // only the loading clock; route/page ownership remains unchanged.
@@ -424,7 +441,7 @@ export const RouterView = defineComponent({
           phase: 'pagePending',
           showRouterFallback: false,
         }
-        releaseRetentionAfterPatch(transactionId)
+        releaseRetentionAfterPatch()
         return true
       }
 
@@ -565,6 +582,26 @@ export const RouterView = defineComponent({
                   props.delay - (Date.now() - cycle.startedAt)
                 )
               : props.delay
+            const markPresented = () => {
+              if (latestOwnership !== ownership) return false
+              // RouteProvider's mounted/updated hook is itself inside the
+              // committed Suspense branch. Promote local presentation before
+              // it can settle the runtime and trigger another render; otherwise
+              // a late onResolve guard can leave this outlet falsely pending and
+              // suppress the next navigation's router-phase fallback.
+              suspensePending = false
+              pendingOwnership = undefined
+              activeIdentity = identity
+              activeOwnership = ownership
+              activePageKey = pageKey
+              candidate = undefined
+
+              const current = loading.value
+              if (current?.phase === 'routerPending') {
+                scheduleRouterFallback(current)
+              }
+              return true
+            }
             const snapshot: PageSnapshot = {
               component: Component,
               route,
@@ -577,22 +614,13 @@ export const RouterView = defineComponent({
               pending: () => {
                 if (latestOwnership !== ownership) return
                 suspensePending = true
+                pendingOwnership = ownership
               },
               resolved: () => {
-                if (latestOwnership !== ownership) return
-                suspensePending = false
-                activeIdentity = identity
-                activeOwnership = ownership
-                activePageKey = pageKey
-                candidate = undefined
-
-                const current = loading.value
-                if (current?.phase === 'routerPending') {
-                  scheduleRouterFallback(current)
-                }
+                markPresented()
               },
               ready: () => {
-                if (unmounted || latestOwnership !== ownership) return
+                if (unmounted || !markPresented()) return
                 // The accepted page can resolve during a different router
                 // attempt, or during bootstrap with no loading transaction.
                 runtime?.pageRendered(sourceRoute, subscriber)
