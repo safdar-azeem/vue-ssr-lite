@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import {
   request as createHttpRequest,
@@ -33,6 +34,15 @@ import type { SsrResolvedProductionAsset } from './SsrAssetRuntime'
 let managed: SsrManagedServer | undefined
 let root = ''
 const pendingHtmlRequests = new Set<ClientRequest>()
+
+// Lifecycle scenarios replace individual Vite operations, but the managed
+// server also needs a watcher and environment inventory for revision tracking.
+const createLifecycleVite = (overrides: Record<string, unknown>): ViteDevServer => ({
+  config: { root, base: '/' },
+  watcher: new EventEmitter(),
+  environments: {},
+  ...overrides,
+}) as unknown as ViteDevServer
 
 const abortPendingHtmlRequests = () => {
   for (const request of pendingHtmlRequests) request.destroy()
@@ -236,7 +246,7 @@ describe('managed SSR server lifecycle', () => {
       resolveOptimizer = resolveWork
     })
     const closeVite = vi.fn(() => viteClose)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       environments: {
         client: {
@@ -248,7 +258,7 @@ describe('managed SSR server lifecycle', () => {
           },
         },
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -294,7 +304,7 @@ describe('managed SSR server lifecycle', () => {
     })
     const discovered: Record<string, { processing: Promise<void> }> = {}
     const closeVite = vi.fn(async () => undefined)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       environments: {
         client: {
@@ -304,7 +314,7 @@ describe('managed SSR server lifecycle', () => {
           },
         },
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -347,7 +357,7 @@ describe('managed SSR server lifecycle', () => {
       rejectOptimizer = rejectWork
     })
     const closeVite = vi.fn(async () => undefined)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       environments: {
         client: {
@@ -357,7 +367,7 @@ describe('managed SSR server lifecycle', () => {
           },
         },
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -387,7 +397,7 @@ describe('managed SSR server lifecycle', () => {
     )
     const optimizer = new Promise<never>(() => undefined)
     const closeVite = vi.fn(async () => undefined)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       environments: {
         client: {
@@ -399,7 +409,7 @@ describe('managed SSR server lifecycle', () => {
           },
         },
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -426,7 +436,7 @@ describe('managed SSR server lifecycle', () => {
     )
     const scan = new Promise<never>(() => undefined)
     const closeVite = vi.fn(async () => undefined)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       environments: {
         client: {
@@ -436,7 +446,7 @@ describe('managed SSR server lifecycle', () => {
           },
         },
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -533,11 +543,11 @@ describe('managed SSR server lifecycle', () => {
       },
     })
     const closeVite = vi.fn(async () => undefined)
-    const vite = {
+    const vite = createLifecycleVite({
       close: closeVite,
       middlewares: (_request: unknown, _response: unknown, next: () => void) => next(),
       transformIndexHtml: async (_url: string, html: string) => html,
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -657,9 +667,9 @@ describe('managed SSR server lifecycle', () => {
       join(root, 'index.html'),
       '<!doctype html><html><body><div id="app"></div></body></html>'
     )
-    const vite = {
+    const vite = createLifecycleVite({
       close: () => new Promise<never>(() => undefined),
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
@@ -680,7 +690,7 @@ describe('managed SSR server lifecycle', () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await writeFile(join(root, 'index.html'), '<html><body><div id="app"></div></body></html>')
     const transformedUrls: string[] = []
-    const vite = {
+    const vite = createLifecycleVite({
       close: vi.fn(async () => undefined),
       middlewares: (
         request: import('node:http').IncomingMessage,
@@ -694,7 +704,7 @@ describe('managed SSR server lifecycle', () => {
         transformedUrls.push(originalUrl)
         return html
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false, root, vite,
       loadRuntime: async () => ({ default: spaConfig() }),
@@ -716,7 +726,7 @@ describe('managed SSR server lifecycle', () => {
       '<!doctype html><html><body><div id="app"></div></body></html>'
     )
     const requestTimeoutMs = 12_345
-    const vite = {
+    const vite = createLifecycleVite({
       close: vi.fn(async () => undefined),
       middlewares: (
         _request: import('node:http').IncomingMessage,
@@ -725,7 +735,7 @@ describe('managed SSR server lifecycle', () => {
         response.writeHead(200, { 'content-type': 'text/javascript' })
         response.end('export default true')
       },
-    } as unknown as ViteDevServer
+    })
     managed = await createSsrManagedServer({
       production: false,
       root,
