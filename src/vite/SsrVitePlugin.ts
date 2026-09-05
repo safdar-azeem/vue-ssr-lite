@@ -77,6 +77,18 @@ const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
 const RESOLVED_HTML_PREFIX = `\0${SSR_HTML_VIRTUAL_PREFIX}`
 const DEFAULT_CLIENT_OUT_DIR = 'dist/client'
 
+const withoutFrameworkDependencyVersion = (requestUrl: string) => {
+  const queryIndex = requestUrl.indexOf('?')
+  if (queryIndex < 0) return requestUrl
+  const pathname = requestUrl.slice(0, queryIndex)
+  if (!pathname.includes('/node_modules/vue-ssr-lite/')) return requestUrl
+  const search = new URLSearchParams(requestUrl.slice(queryIndex + 1))
+  if (!search.has('v')) return requestUrl
+  search.delete('v')
+  const remaining = search.toString()
+  return remaining ? `${pathname}?${remaining}` : pathname
+}
+
 const existingFile = async (filePath: string): Promise<string | undefined> => {
   try {
     await access(filePath)
@@ -355,6 +367,18 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       resolveClientModule = config.createResolver()
     },
     configureServer(server) {
+      // Vite marks every `?v=` dependency response immutable, including an
+      // explicitly excluded package served from node_modules. The optimizer's
+      // version is based on dependency/config inputs and can survive rebuilding
+      // vue-ssr-lite at the same package version. Remove only that cache marker
+      // before Vite transforms framework files so normal ETag/no-cache
+      // revalidation observes the rebuilt runtime and all of its shared chunks.
+      server.middlewares.use((request, _response, next) => {
+        if (request.url) {
+          request.url = withoutFrameworkDependencyVersion(request.url)
+        }
+        next()
+      })
       void ensureEntries().then(() => {
         if (configPath) server.watcher.add(configPath)
       })
