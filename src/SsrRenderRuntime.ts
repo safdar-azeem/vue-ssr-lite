@@ -5,7 +5,7 @@ import {
 } from './SsrApplicationRuntime'
 import { createSsrResolutionController } from './SsrRequestResolution'
 import { createSsrMiddlewareExecutionController } from './middleware/SsrMiddlewareRuntime'
-import { collectSsrRenderDiagnostics } from './SsrDiagnosticsRuntime'
+import { collectSsrRenderDiagnostics, readSsrPhaseTimings } from './SsrDiagnosticsRuntime'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
 import { safeSsrLog } from './SsrObservability'
@@ -107,6 +107,7 @@ export const renderSsrApplication = async <
 ): Promise<SsrRenderResult<TApplicationState, TPublicConfig>> => {
   throwIfRequestAborted(request.signal)
   const startedAt = now()
+  const timings = readSsrPhaseTimings(request)
   const maxPasses = Math.max(1, Math.floor(options.maxResolutionPasses ?? 4))
   const deadlineMs = options.resolutionDeadlineMs ?? 0
   const diagnosticsEnabled =
@@ -177,6 +178,7 @@ export const renderSsrApplication = async <
       throwIfRequestAborted(request.signal)
       passes = pass + 1
       resolution.beginPass(pass)
+      const finishCreation = timings?.start('app/router creation')
       created = await createSsrApplication(definition, {
         server: true,
         request,
@@ -187,16 +189,19 @@ export const renderSsrApplication = async <
         resolution,
         middlewareController,
       })
+      finishCreation?.()
       throwIfRequestAborted(request.signal)
       if (pass === 0) contextReadyAt = now()
 
       if (created.router) {
+        const finishRoute = timings?.start('router navigation')
         const url = new URL(request.url)
         await created.router.push(`${url.pathname}${url.search}${url.hash}`)
         if (
           created.context.response.redirect ||
           middlewareController.navigationOutcome()
         ) {
+          finishRoute?.()
           routeReadyAt = now()
           renderedAt = routeReadyAt
           middlewareEarlyExit = true
@@ -204,6 +209,7 @@ export const renderSsrApplication = async <
           break
         }
         await created.router.isReady()
+        finishRoute?.()
         throwIfRequestAborted(request.signal)
         resolveResponseStatusForRoute(
           created.context.response,
@@ -216,7 +222,9 @@ export const renderSsrApplication = async <
         teleports?: Record<string, string>
         modules?: Set<string>
       } = {}
+      const finishVue = timings?.start('Vue render')
       html = await renderToString(created.app, ssrContext)
+      finishVue?.()
       resolution.completeReactivityObservation()
       throwIfRequestAborted(request.signal)
       teleports = { ...(ssrContext.teleports ?? {}) }
@@ -319,6 +327,7 @@ export const renderSsrApplication = async <
       )
     }
 
+    const finishSerialization = timings?.start('serialization')
     const hydrationState: SsrHydrationState<
       TApplicationState,
       TPublicConfig
@@ -337,6 +346,7 @@ export const renderSsrApplication = async <
         : snapshotSsrReconciliationState(created.hydration.collect()),
     }
     const stateBytes = byteLength(serializeSsrState(hydrationState))
+    finishSerialization?.()
     const totalAt = now()
 
     return {
