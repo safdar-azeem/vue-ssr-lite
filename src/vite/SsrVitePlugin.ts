@@ -9,6 +9,7 @@ import {
   generateSsrClientModule,
   generateSsrRuntimeModule,
   loadSsrConfigFile,
+  normalizeSsrConfig,
   resolveSsrConfigPath,
   SSR_CLIENT_VIRTUAL_PREFIX,
   SSR_HTML_VIRTUAL_PREFIX,
@@ -268,6 +269,20 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     return entries
   }
 
+  const loadDevelopmentAllowedHosts = async (): Promise<string[]> => {
+    const config = await loadSsrConfigFile(root, configPath)
+    const normalized = normalizeSsrConfig(config, { root, development: true })
+    // Match the configured development host namespace, including additional
+    // hosts and named wildcard suffixes. A routing catch-all is not permission
+    // to expose Vite's source files to arbitrary DNS names.
+    return [...new Set(Object.values(normalized.applications).flatMap(({ hosts }) =>
+      hosts.filter((host) => host !== '*').map((host) =>
+        host.startsWith('*.') ? host.slice(1) : host
+      )
+    ))].sort()
+  }
+  let developmentAllowedHosts: string[] = []
+
   const invalidateVirtualModules = (server: ViteDevServer) => {
     const runtimeModule = server.moduleGraph.getModuleById(RESOLVED_RUNTIME)
     if (runtimeModule) server.moduleGraph.invalidateModule(runtimeModule)
@@ -302,6 +317,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       root = resolve(options.root || userConfig.root || process.cwd())
       if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
       const resolved = await ensureEntries()
+      if (environment.command === 'serve') {
+        developmentAllowedHosts = await loadDevelopmentAllowedHosts()
+      }
       const input = Object.fromEntries(
         await Promise.all(
           resolved.applications.map(async (entry) => {
@@ -323,6 +341,13 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       const resolvedOutDir =
         userConfig.build?.outDir || clientOutDir || DEFAULT_CLIENT_OUT_DIR
       return {
+        // Configure before Vite constructs HTTP and WebSocket host guards.
+        // Vite merges this list with the consumer's explicit allowedHosts.
+        // Its suffix syntax also permits the suffix apex; application host
+        // selection still enforces root/subdomain ownership on fallthrough.
+        server: environment.command === 'serve'
+          ? { allowedHosts: developmentAllowedHosts }
+          : undefined,
         resolve: {
           dedupe: [...new Set([...FRAMEWORK_DEDUPE, ...(options.dedupe ?? [])])],
         },
