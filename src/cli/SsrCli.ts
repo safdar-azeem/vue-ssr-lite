@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
 import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
-import { createSsrManagedServer } from '../server/SsrServerRuntime'
+import { createSsrManagedServer, type SsrManagedServerOptions } from '../server/SsrServerRuntime'
+import { attachSsrPhaseTimings, createSsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
 
 const runServer = async (options: SsrCliOptions, production: boolean) => {
+  const startupTimings = production ? undefined : createSsrPhaseTimings()
   const hmrPort = production
     ? undefined
     : await resolveSsrCliHmrPort(options.hmrPort)
@@ -24,14 +26,17 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
         },
         appType: 'custom',
       })
-  const managed = await createSsrManagedServer({
+  startupTimings?.mark('Vite initialization')
+  const managedOptions: SsrManagedServerOptions = {
     production,
     root: options.root,
     vite,
     loadRuntime: production
       ? () => import(pathToFileURL(options.serverOutput).href)
       : () => importSsrViteModule(vite!, SSR_RUNTIME_VIRTUAL_ID),
-  })
+  }
+  if (startupTimings) attachSsrPhaseTimings(managedOptions, startupTimings)
+  const managed = await createSsrManagedServer(managedOptions)
   await managed.listen()
 
   let closing = false
