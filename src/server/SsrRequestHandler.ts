@@ -1,6 +1,8 @@
 import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
+import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
 import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../SsrObservability'
+import { prepareSsrCompiledMetadata } from './SsrCompiledMetadata'
 import { resolvePublicConfigValue } from '../SsrPublicConfig'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import type {
@@ -15,10 +17,8 @@ import type { SsrRenderedApplicationAsset } from '../SsrApplicationAssetRuntime'
 import type { SsrViteManifest } from '../SsrRenderedAssetRuntime'
 import { resolveRenderedApplicationAssets } from '../SsrRenderedAssetRuntime'
 import {
-  filterSsrCookieHeader,
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
-  resolveSsrHostEntry,
 } from './SsrHostRuntime'
 import { injectSsrHtml, renderSsrErrorDocument } from './SsrHtmlRuntime'
 import { isSsrResponseCacheable, resolveSsrResponseCacheKey } from './SsrResponseCacheRuntime'
@@ -158,17 +158,24 @@ export interface SsrRequestHandlerRuntime {
   readonly ssrAdmission: SsrAdmissionController
   readonly viteBase: string
   readonly ssrManifest?: SsrViteManifest
+  readonly takeRenderTimingDetails?: () => Record<string, unknown>
+  readonly resolveProductionAssets?: (
+    applicationId: string,
+    modules: readonly string[]
+  ) => readonly SsrRenderedApplicationAsset[]
   readonly loadTemplate: (
     definition: SsrCompiledConfig,
     entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    timings?: SsrPhaseTimings
   ) => Promise<string>
   readonly loadPreparedSsrTemplate: (
     definition: SsrCompiledConfig,
     entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    timings?: SsrPhaseTimings
   ) => Promise<string>
   readonly resolveDevelopmentAssets: (
     applicationId: string,
@@ -277,6 +284,11 @@ export const handleSsrRequest = async (
   let selectedEntryId = 'unknown'
   let activeRenderRequest: SsrHttpRequest<any> | undefined
   let activeDefinition = runtime.fallbackDefinition()
+  const timings = !runtime.production && activeDefinition.server.diagnostics && hasSsrTimingSink(activeDefinition.server.logger)
+    ? createSsrPhaseTimings()
+    : undefined
+  let timingDetails: Record<string, unknown> | undefined
+  let applicationRequest = false
 
   try {
     // Vite's custom middleware stack owns development modules and public files.
@@ -285,9 +297,13 @@ export const handleSsrRequest = async (
     if (!runtime.production && runtime.serveViteRequest) {
       if (await scope.run(runtime.serveViteRequest)) return undefined
     }
+    applicationRequest = true
+    timings?.mark('vite')
     const definition = await scope.run(runtime.loadDefinition)
+    timings?.mark('runtime')
     activeDefinition = definition
     const serverOptions = definition.server
+    const metadata = prepareSsrCompiledMetadata(definition)
     const requestUrl = new URL(request.url || '/', 'http://internal')
     pathname = requestUrl.pathname
     rawAssetPathname = (request.url || '/').split('?', 1)[0]
@@ -353,7 +369,7 @@ export const handleSsrRequest = async (
         },
       }
     }
-    const hostResolution = resolveSsrHostEntry(definition.applications, incomingHost)
+    const hostResolution = metadata.resolveHost(incomingHost)
     if (!hostResolution) {
       return jsonResponse(421, {
         status: 'error',
@@ -379,11 +395,7 @@ export const handleSsrRequest = async (
     const domain = snapshotRequestDomain(
       resolveSsrDomainContext(incomingHost, entry, definition.development, protocol)
     )
-    const cookie = filterSsrCookieHeader(
-      headerValue(request.headers, 'cookie'),
-      entry.cookieAllowlist,
-      entry.cookieDenylist
-    )
+    const cookie = metadata.applications.get(entry)!.filterCookie(headerValue(request.headers, 'cookie'))
     const url = new URL(
       `${requestUrl.pathname}${requestUrl.search}`,
       `${protocol}://${incomingHost}`
@@ -402,9 +414,11 @@ export const handleSsrRequest = async (
       search: requestUrl.search,
       entryId: entry.id,
     })
+    timings?.mark('host')
     const publicConfig = await scope.run(() =>
       resolvePublicConfigValue(entry.publicConfigFactory ?? entry.publicConfig, publicConfigRequest)
     )
+    timings?.mark('publicConfig')
     const renderRequest: SsrHttpRequest<any> = {
       requestId: request.requestId,
       url,
@@ -421,6 +435,7 @@ export const handleSsrRequest = async (
       entryId: entry.id,
     }
     activeRenderRequest = renderRequest
+    if (timings) attachSsrPhaseTimings(renderRequest, timings)
     renderRequest.siteOrigin = await scope.run(() =>
       resolveServerSiteOrigin({
         siteUrl: entry.application?.seo?.siteUrl,
@@ -445,6 +460,7 @@ export const handleSsrRequest = async (
         resolveSiteSeoForRequest(renderRequest, entry.id, renderRequest.siteOrigin!, entry.siteSeo)
       )
       if (resolution?.status === 'not-found') {
+        timings?.mark('seo')
         return {
           statusCode: resolution.responseStatus ?? 404,
           headers: { 'cache-control': 'private, no-store' },
@@ -452,6 +468,7 @@ export const handleSsrRequest = async (
       }
     }
 
+    timings?.mark('seo')
     const endpointTools: SsrEndpointTools = {
       signal,
       logger: createSafeSsrLogger(serverOptions.logger),
@@ -459,15 +476,19 @@ export const handleSsrRequest = async (
     for (const endpoint of entry.endpoints) {
       if (!endpoint.match(renderRequest)) continue
       const result = await scope.run(() => endpoint.handle(renderRequest, endpointTools))
-      if (result) return validateSsrHttpResponse(result)
+      if (result) {
+        timings?.mark('endpoints')
+        return validateSsrHttpResponse(result)
+      }
     }
+    timings?.mark('endpoints')
 
     if (runtime.production && (request.method === 'GET' || request.method === 'HEAD')) {
       if (
         await scope.run(() =>
           runtime.serveProductionAsset(
             rawAssetPathname,
-            definition.applications.map(({ template }) => template),
+            metadata.protectedTemplates,
             signal
           )
         )
@@ -484,9 +505,11 @@ export const handleSsrRequest = async (
       })
     }
 
+    timings?.mark('static assets')
     const requestRender = entry.resolveRouteRender
       ? await scope.run(() => entry.resolveRouteRender!(`${pathname}${requestUrl.search}`))
       : entry.kind
+    timings?.mark('route classification')
 
     const privateSeoHtml = requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
     const responseCache = requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
@@ -525,13 +548,17 @@ export const handleSsrRequest = async (
       }
     }
 
+    timings?.mark('response cache')
     if (requestRender === 'spa') {
       const template = await scope.run(() =>
-        runtime.loadTemplate(definition, entry, request.url || '/', signal)
+        runtime.loadTemplate(definition, entry, request.url || '/', signal, timings)
       )
+      timings?.mark('template')
+      const body = injectSpaDomainState(template, entry.id, domain, publicConfig)
+      timings?.mark('serialization / HTML injection')
       return {
         statusCode: 200,
-        body: injectSpaDomainState(template, entry.id, domain, publicConfig),
+        body,
         headers: {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': entry.cacheControl || 'private, no-store',
@@ -542,9 +569,11 @@ export const handleSsrRequest = async (
     }
 
     const application = entry.application!
+    if (timings) timingDetails = runtime.takeRenderTimingDetails?.()
     const template = await scope.run(() =>
-      runtime.loadPreparedSsrTemplate(definition, entry, request.url || '/', signal)
+      runtime.loadPreparedSsrTemplate(definition, entry, request.url || '/', signal, timings)
     )
+    timings?.mark('template')
     const admission = await runtime.ssrAdmission
       .acquire({
         signal,
@@ -566,6 +595,7 @@ export const handleSsrRequest = async (
       throw admission.error
     }
     const admissionLease = admission.lease
+    timings?.mark('admission')
 
     // The request may stop awaiting promptly when its canonical signal aborts,
     // but admission ownership follows the actual Vue SSR promise. Converting
@@ -603,6 +633,7 @@ export const handleSsrRequest = async (
     const renderCompletion = await scope.run(() => ownedRenderWork)
     if (renderCompletion.status === 'rejected') throw renderCompletion.error
     const rendered = renderCompletion.value
+    timings?.mark('renderer')
     if (rendered.response.redirect) {
       const redirect = rendered.response.redirect
       const target = new URL(redirect.location, renderRequest.url)
@@ -625,7 +656,8 @@ export const handleSsrRequest = async (
       }
     }
     const renderedAssets = runtime.production
-      ? resolveRenderedApplicationAssets({
+      ? runtime.resolveProductionAssets?.(application.id, rendered.renderedModules) ??
+        resolveRenderedApplicationAssets({
           applicationId: application.id,
           moduleIds: rendered.renderedModules,
           base: runtime.viteBase,
@@ -634,14 +666,18 @@ export const handleSsrRequest = async (
       : await scope.run(() =>
           runtime.resolveDevelopmentAssets(application.id, rendered.renderedModules)
         )
-    const document = injectSsrHtml(template, {
+    timings?.mark('asset resolution')
+    const injection = {
       applicationId: application.id,
       html: rendered.html,
       teleports: rendered.teleports,
       head: rendered.head,
       state: rendered.hydrationState,
       assets: renderedAssets,
-    })
+    }
+    if (timings) attachSsrPhaseTimings(injection, timings)
+    const document = injectSsrHtml(template, injection)
+    timings?.mark('HTML injection')
     safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
     safeSsrLog(serverOptions.logger, 'info', 'ssr.render.complete', rendered.metrics as any)
     const responseHeaders: Record<string, string | string[]> = {
@@ -760,5 +796,7 @@ export const handleSsrRequest = async (
       }
     }
     return jsonResponse(statusCode, { status: 'error', service: definition.name })
+  } finally {
+    if (applicationRequest) timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
   }
 }
