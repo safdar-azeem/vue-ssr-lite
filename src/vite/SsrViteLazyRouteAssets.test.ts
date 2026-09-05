@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer, request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -38,7 +38,10 @@ afterEach(async () => {
 
 describe('request-selected lazy route asset preparation', () => {
   it.each(['/', '/products/'])('prepares only the selected graph alongside native navigation under base %s', async (base) => {
-    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-lazy-assets-'))
+    // Vite canonicalizes filesystem module ids. In particular, macOS temp
+    // paths under /var resolve under /private/var; otherwise the transform
+    // gates below never recognize the component and remain pending forever.
+    root = await realpath(await mkdtemp(join(tmpdir(), 'vue-ssr-lite-lazy-assets-')))
     await mkdir(join(root, 'src'))
     await provisionHostVuePeers(root)
     await mkdir(join(root, 'node_modules/cold-widget'))
@@ -146,16 +149,25 @@ describe('request-selected lazy route asset preparation', () => {
     // Rejection remains observed if an architectural assertion fails while the
     // HTTP request is deliberately blocked in the test's SSR transform hook.
     void first.catch(() => undefined)
-    await ssrStarted.promise
-    expect(events).toEqual(['guard:/', 'load:home'])
-    await clientPanelStarted.promise
-    // Client dependency work has reached the nested component even though the
-    // route's SSR compilation/navigation cannot finish yet. No timing guess.
-    expect(ssr.runner.evaluatedModules.getModuleById(homeId)?.evaluated).not.toBe(true)
-    expect(transformed.get(`client:${homeId}`)).toBe(1)
-    expect(transformed.get(`client:${panelId}`)).toBe(1)
-    expect(transformed.has(`client:${unusedId}`)).toBe(false)
-    allowSsr.resolve()
+    const waitForStage = (stage: Promise<void>, label: string) => Promise.race([
+      stage,
+      first.then(({ status, body }) => {
+        throw new Error(`HTTP ${status} completed before ${label}: ${body.slice(0, 500)}`)
+      }),
+    ])
+    try {
+      await waitForStage(ssrStarted.promise, 'the selected Home SSR transform')
+      expect(events).toEqual(['guard:/', 'load:home'])
+      await waitForStage(clientPanelStarted.promise, 'the nested Panel client transform')
+      // Client dependency work has reached the nested component even though the
+      // route's SSR compilation/navigation cannot finish yet. No timing guess.
+      expect(ssr.runner.evaluatedModules.getModuleById(homeId)?.evaluated).not.toBe(true)
+      expect(transformed.get(`client:${homeId}`)).toBe(1)
+      expect(transformed.get(`client:${panelId}`)).toBe(1)
+      expect(transformed.has(`client:${unusedId}`)).toBe(false)
+    } finally {
+      allowSsr.resolve()
+    }
     const response = await first
     expect(response.status).toBe(200)
     expect(response.body).toContain('Home-A one')
