@@ -25,6 +25,7 @@ import {
 } from '../SsrAssetMetadata'
 import {
   createSsrStylesheetLinkTags,
+  prepareSsrViteComponentAssets,
   resolveApplicationStyleDependencies,
 } from './SsrViteAssetRuntime'
 
@@ -212,8 +213,14 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let configuredBuildBase: string | undefined
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
+  let entriesDirty = false
+  let loadingEntries: Promise<SsrViteEntries> | undefined
+  let entriesRevision = 0
+  let loadedConfig: Awaited<ReturnType<typeof loadSsrConfigFile>> | undefined
+  let configDependencies = new Set<string>()
   let clientOutDir = DEFAULT_CLIENT_OUT_DIR
   let resolveClientModule: ResolveFn | undefined
+  let developmentServer: ViteDevServer | undefined
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
   const publicClients = new Map<string, SsrViteApplicationEntry>()
   const revisionedAssetIdentitiesByNamingCallback = new WeakMap<
@@ -253,24 +260,43 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   }
 
   const invalidateConfigCache = () => {
-    entries = null
-    virtualClients.clear()
-    publicClients.clear()
-    clientOutDir = DEFAULT_CLIENT_OUT_DIR
+    entriesRevision += 1
+    entriesDirty = true
   }
 
   const ensureEntries = async (): Promise<SsrViteEntries> => {
-    if (entries) return entries
-    configPath = await resolveSsrConfigPath(root, options.config)
-    const config = await loadSsrConfigFile(root, configPath)
-    entries = extractSsrViteEntries(config, { root })
-    clientOutDir = config.server?.clientOutDir || DEFAULT_CLIENT_OUT_DIR
-    syncVirtualClients()
-    return entries
+    if (loadingEntries) return loadingEntries
+    if (entries && !entriesDirty) return entries
+    loadingEntries = (async () => {
+      for (;;) {
+        const revision = entriesRevision
+        const nextPath = await resolveSsrConfigPath(root, options.config)
+        const config = await loadSsrConfigFile(root, nextPath)
+        const next = extractSsrViteEntries(config, { root })
+        if (revision !== entriesRevision) continue
+        configPath = nextPath
+        loadedConfig = config
+        configDependencies = new Set(
+          ((config as { __vueSsrLiteConfigDependencies?: string[] })
+            .__vueSsrLiteConfigDependencies ?? []).map(normalizePath)
+        )
+        entries = next
+        entriesDirty = false
+        clientOutDir = config.server?.clientOutDir || DEFAULT_CLIENT_OUT_DIR
+        syncVirtualClients()
+        return next
+      }
+    })()
+    try {
+      return await loadingEntries
+    } finally {
+      loadingEntries = undefined
+    }
   }
 
   const loadDevelopmentAllowedHosts = async (): Promise<string[]> => {
-    const config = await loadSsrConfigFile(root, configPath)
+    await ensureEntries()
+    const config = loadedConfig!
     const normalized = normalizeSsrConfig(config, { root, development: true })
     // Match the configured development host namespace, including additional
     // hosts and named wildcard suffixes. A routing catch-all is not permission
@@ -284,12 +310,15 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let developmentAllowedHosts: string[] = []
 
   const invalidateVirtualModules = (server: ViteDevServer) => {
-    const runtimeModule = server.moduleGraph.getModuleById(RESOLVED_RUNTIME)
-    if (runtimeModule) server.moduleGraph.invalidateModule(runtimeModule)
-    for (const application of entries?.applications ?? []) {
-      const clientId = `${RESOLVED_CLIENT_PREFIX}${application.id}`
-      const clientModule = server.moduleGraph.getModuleById(clientId)
-      if (clientModule) server.moduleGraph.invalidateModule(clientModule)
+    for (const environment of Object.values(server.environments)) {
+      const graph = environment.moduleGraph
+      const runtimeModule = graph.getModuleById(RESOLVED_RUNTIME)
+      if (runtimeModule) graph.invalidateModule(runtimeModule)
+      for (const application of entries?.applications ?? []) {
+        const clientId = `${RESOLVED_CLIENT_PREFIX}${application.id}`
+        const clientModule = graph.getModuleById(clientId)
+        if (clientModule) graph.invalidateModule(clientModule)
+      }
     }
   }
 
@@ -391,7 +420,8 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       resolvedBase = config.base
       resolveClientModule = config.createResolver()
     },
-    configureServer(server) {
+    async configureServer(server) {
+      developmentServer = server
       // Vite marks every `?v=` dependency response immutable, including an
       // explicitly excluded package served from node_modules. The optimizer's
       // version is based on dependency/config inputs and can survive rebuilding
@@ -404,18 +434,34 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         }
         next()
       })
-      void ensureEntries().then(() => {
-        if (configPath) server.watcher.add(configPath)
-      })
+      await ensureEntries()
+      if (configPath) server.watcher.add(configPath)
+      server.watcher.add([...configDependencies])
     },
-    async handleHotUpdate({ file, server }) {
-      if (!isResolvedServerConfig(file, root, configPath)) return
+    transform(_code, id, transformOptions) {
+      if (developmentServer && transformOptions?.ssr) {
+        // This hook observes actual SSR compilation, not the set of possible
+        // route imports. A lazy route stays cold until Vue Router requests it.
+        // Do not await client work or alter the SSR source/plugin pipeline.
+        prepareSsrViteComponentAssets(developmentServer, id)
+      }
+      return null
+    },
+    closeBundle() {
+      developmentServer = undefined
+    },
+    async hotUpdate({ file, server }) {
+      if (this.environment.name !== 'client') return
+      if (!isResolvedServerConfig(file, root, configPath) && !configDependencies.has(normalizePath(file))) return
       invalidateVirtualModules(server)
       invalidateConfigCache()
       await ensureEntries()
       if (configPath) server.watcher.add(configPath)
+      server.watcher.add([...configDependencies])
       invalidateVirtualModules(server)
-      server.ws.send({ type: 'full-reload' })
+      for (const environment of Object.values(server.environments)) {
+        environment.hot.send({ type: 'full-reload' })
+      }
       return []
     },
     resolveId(id) {
