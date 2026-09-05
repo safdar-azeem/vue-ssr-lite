@@ -1697,6 +1697,7 @@ describe('universal projection compile coverage', () => {
     )
   }
 
+  // Config projection plus a real cold Vite client build needs an integration budget.
   it('lets a statically SPA-only application use normal browser middleware dependencies', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-spa-browser-middleware-'))
     await writeShell()
@@ -1795,7 +1796,7 @@ export default defineServer({ applications: [erp, storefront] })
     expect(output).toContain('BROWSER_ONLY_AUTH_EVALUATED_IN_NODE')
     expect(output).toContain('BROWSER_AUTH_MIDDLEWARE_BEHAVIOR')
     expect(output).not.toContain('const browserMiddleware = () => true')
-  })
+  }, 30_000)
 
   it('keeps SSR middleware dependency projection fail-closed', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-ssr-universal-middleware-'))
