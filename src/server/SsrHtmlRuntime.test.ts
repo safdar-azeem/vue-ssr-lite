@@ -6,6 +6,37 @@ import {
 } from './SsrHtmlRuntime'
 
 describe('SSR HTML runtime', () => {
+  it('scans long quoted attributes and raw-text elements without recognizing decoy mount elements', () => {
+    const largeAttribute = 'large > quoted < text '.repeat(10_000)
+    const source = `<html><head>
+      <meta data-content="${largeAttribute}">
+      <script>const example = '<div id="app"></div>'</script>
+      <style>.example::after { content: '<div id="app"></div>' }</style>
+      <title>Example &lt;div id="app"&gt;</title>
+      </head><body><!-- <div id="app"></div> -->
+      <textarea><div id="app"></div></textarea>
+      <div data-id="app" aria-id="app"></div>
+      <section data-text='quoted > end' ID = app></section></body></html>`
+    const prepared = prepareSsrHtmlTemplate(source)
+    expect(prepared).toContain(`<meta data-content="${largeAttribute}">`)
+    expect(prepared).toContain("<section data-text='quoted > end' ID = app><!--vue-ssr-lite:html--></section>")
+    expect(prepareSsrHtmlTemplate(prepared)).toBe(prepared)
+  })
+
+  it.each([
+    '<div id="app" id="other"></div>',
+    '<div id="other" ID = app></div>',
+    '<div id="app" id></div>',
+    '<div id="app"></div><aside id=app></aside>',
+  ])('continues rejecting duplicate mount ids after native token scanning: %s', (mount) => {
+    expect(() => prepareSsrHtmlTemplate(`<html><head></head><body>${mount}</body></html>`)).toThrow('appears more than once')
+  })
+
+  it('does not find a mount hidden by an unterminated quoted start tag', () => {
+    expect(() => prepareSsrHtmlTemplate('<html><head></head><body><div title="unterminated ><div id=app></div></body></html>'))
+      .toThrow('missing mount element')
+  })
+
   it('prepares and injects head, teleports, markup, and inert state', () => {
     const template = prepareSsrHtmlTemplate(
       '<!doctype html><html><head><title>Fallback</title></head><body><div id="app"></div></body></html>'
