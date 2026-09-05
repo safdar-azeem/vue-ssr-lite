@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises'
 import type { ViteDevServer } from 'vite'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import { safeSsrLog } from '../SsrObservability'
+import { createSsrPhaseTimings, readSsrPhaseTimings, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import {
   assertConfiguredProductionSeoOrigin,
   requiresProductionSeoOrigin,
@@ -27,16 +28,19 @@ import {
 } from './SsrAssetRuntime'
 import {
   assertSupportedSsrViteBase,
+  createSsrRenderedAssetResolver,
   parseSsrViteManifest,
   type SsrViteManifest,
 } from '../SsrRenderedAssetRuntime'
 import {
+  resolveApplicationStyleDependencies,
   resolveRenderedStyleDependencies,
   runWithSsrViteAssetResolutionContext,
 } from '../vite/SsrViteAssetRuntime'
 import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from './SsrHtmlRuntime'
 import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
-import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
+import { prepareSsrCompiledMetadata } from './SsrCompiledMetadata'
+import { captureSsrViteRuntimeRevision, importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import {
   createSsrRequestScope,
   handleSsrRequest,
@@ -318,9 +322,15 @@ const waitForStartedViteOptimizerWork = async (vite: ViteDevServer): Promise<voi
 export const createSsrManagedServer = async (
   options: SsrManagedServerOptions
 ): Promise<SsrManagedServer> => {
+  // The CLI starts this collector before creating Vite; programmatic hosts
+  // measure their managed-server startup from this boundary instead.
+  const inheritedStartupTimings = !options.production ? readSsrPhaseTimings(options) : undefined
+  const startupTimings = !options.production ? inheritedStartupTimings ?? createSsrPhaseTimings() : undefined
   let shuttingDown = false
   let shutdownPromise: Promise<void> | undefined
   let activeRequestCount = 0
+  let timedSsrRequestCount = 0
+  let readyAt: number | undefined
   let resolveRequestsDrained: (() => void) | undefined
   const waitForRequestsDrained = (): Promise<void> =>
     activeRequestCount === 0
@@ -328,8 +338,65 @@ export const createSsrManagedServer = async (
       : new Promise((resolveDrained) => {
           resolveRequestsDrained = resolveDrained
         })
-  const initialRuntime = await resolveRuntime(await options.loadRuntime(), options)
+  let templateRevision = 0
+  let developmentTemplatePaths = new Set([resolve(options.root, 'index.html').replaceAll('\\', '/')])
+  const onTemplateStructureChange = (file: string) => {
+    if (developmentTemplatePaths.has(resolve(file).replaceAll('\\', '/'))) templateRevision += 1
+  }
+  const detachTemplateWatcher = () => {
+    options.vite?.watcher.off('add', onTemplateStructureChange)
+    options.vite?.watcher.off('unlink', onTemplateStructureChange)
+  }
+  if (options.vite && !options.production) {
+    // Vite owns watching. Contents still pass through readFile/transformIndexHtml
+    // per request; only existence changes affect compiled templateMissing.
+    options.vite.watcher.on('add', onTemplateStructureChange)
+    options.vite.watcher.on('unlink', onTemplateStructureChange)
+  }
+  const captureRuntimeRevision = (loaded?: unknown) => {
+    const current = options.vite && captureSsrViteRuntimeRevision(options.vite, loaded)
+    const templates = templateRevision
+    return current ? () => templates === templateRevision && current() : undefined
+  }
+  const trackRuntimeTemplates = (definition: SsrCompiledConfig) => {
+    developmentTemplatePaths = new Set(definition.applications.map((entry) =>
+      resolve(options.root, entry.template).replaceAll('\\', '/')
+    ))
+  }
+  const loadRuntimeRevision = async () => {
+    for (;;) {
+      if (shuttingDown) {
+        return { error: new Error('SSR server is shutting down.'), isCurrent: undefined }
+      }
+      let isCurrent = captureRuntimeRevision()
+      try {
+        const loaded = await options.loadRuntime()
+        isCurrent = captureRuntimeRevision(loaded)
+        if (isCurrent && !isCurrent()) continue
+        const definition = await resolveRuntime(loaded, options)
+        // A config factory may await work while Vite replaces its dependencies.
+        // Never publish that superseded compile as the current revision.
+        if (isCurrent && !isCurrent()) continue
+        return { definition, isCurrent }
+      } catch (error) {
+        // A failure from an older in-flight compile cannot mark a newer Vite
+        // revision as failed. All waiters continue through the same refresh.
+        if (isCurrent && !isCurrent()) continue
+        // Preserve the guard for the failed attempt too. The caller may resume
+        // after another invalidation and must not mark that newer revision bad.
+        return { error, isCurrent }
+      }
+    }
+  }
+  const initialRevision = await loadRuntimeRevision()
+  if ('error' in initialRevision) {
+    detachTemplateWatcher()
+    throw initialRevision.error
+  }
+  const initialRuntime = initialRevision.definition
+  trackRuntimeTemplates(initialRuntime)
   const initialServerOptions = initialRuntime.server
+  startupTimings?.mark('runtime')
   const ssrAdmission = createSsrAdmissionController({
     maxConcurrent: initialServerOptions.maxConcurrentSsrRequests,
     maxQueued: initialServerOptions.maxQueuedSsrRequests,
@@ -354,7 +421,7 @@ export const createSsrManagedServer = async (
   const hasEnabledSsrApplications =
     options.production &&
     initialRuntime.applications.some(
-      (application) => application.kind === 'ssr'
+      (application) => application.kind === 'ssr' || application.hasRouteRenderOverrides
     )
   let ssrManifest: SsrViteManifest | undefined
   const viteBase = hasEnabledSsrApplications
@@ -416,26 +483,40 @@ export const createSsrManagedServer = async (
       })
     : undefined
   const productionTemplatePaths = new Map<string, string>()
+  const templatePaths = new WeakMap<SsrCompiledConfig['applications'][number], string>()
+  const resolveProductionAssets = ssrManifest
+    ? createSsrRenderedAssetResolver(ssrManifest, viteBase)
+    : undefined
 
-  // Dev reloads the Vite SSR runtime on every request so HMR is picked up.
-  // Coalesce concurrent loads (HMR storms) and keep the last good compile if a
-  // reload throws mid-invalidation — otherwise one failed eval takes the site down.
+  // Reuse compiled code/metadata until Vite invalidates its dependency graph.
+  // A refresh belongs to the server, so cancelling one waiter cannot cancel
+  // shared compilation or publish a partially constructed definition.
   let lastDefinition = initialRuntime
+  let isCurrentRevision = initialRevision.isCurrent
   let loadingDefinition: Promise<SsrCompiledConfig> | null = null
 
   const loadDefinition = (): Promise<SsrCompiledConfig> => {
     if (options.production) return Promise.resolve(initialRuntime)
     if (loadingDefinition) return loadingDefinition
+    if (isCurrentRevision?.()) return Promise.resolve(lastDefinition)
     loadingDefinition = (async () => {
       try {
-        const next = await resolveRuntime(await options.loadRuntime(), options)
-        lastDefinition = next
-        return next
-      } catch (error) {
-        safeSsrLog(initialServerOptions.logger, 'error', 'ssr.runtime.reload.failed', {
-          error: error instanceof Error ? error.message : 'Unknown error',
-        })
-        return lastDefinition
+        for (;;) {
+          const next = await loadRuntimeRevision()
+          // Recheck at publication, after the await boundary. Both successful
+          // and failed work can be superseded before this continuation resumes.
+          if (next.isCurrent && !next.isCurrent()) continue
+          isCurrentRevision = next.isCurrent
+          if ('error' in next) {
+            safeSsrLog(initialServerOptions.logger, 'error', 'ssr.runtime.reload.failed', {
+              error: next.error instanceof Error ? next.error.message : 'Unknown error',
+            })
+          } else {
+            lastDefinition = next.definition
+            trackRuntimeTemplates(lastDefinition)
+          }
+          return lastDefinition
+        }
       } finally {
         loadingDefinition = null
       }
@@ -445,42 +526,58 @@ export const createSsrManagedServer = async (
 
   const resolveTemplatePath = (
     definition: SsrCompiledConfig,
-    entry: { id: string; template: string }
+    entry: SsrCompiledConfig['applications'][number]
   ) => {
+    const cached = templatePaths.get(entry)
+    if (cached) return cached
     if (!options.production) {
-      return resolve(definition.server.root, entry.template)
+      return prepareSsrCompiledMetadata(definition).applications.get(entry)!.templatePath
     }
     const split = resolve(clientRoot, '.vue-ssr-lite', `${entry.id}.html`)
-    if (existsSync(split)) return split
-    return resolve(clientRoot, entry.template)
+    const path = existsSync(split) ? split : resolve(clientRoot, entry.template)
+    templatePaths.set(entry, path)
+    return path
   }
 
   const loadTemplate = async (
     definition: SsrCompiledConfig,
     entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    timings?: SsrPhaseTimings
   ) => {
     const templatePath = resolveTemplatePath(definition, entry)
     if (productionTemplates) {
       return productionTemplates.load(productionTemplatePaths.get(templatePath) ?? templatePath)
     }
-    const template = entry.templateMissing
-      ? SSR_HTML_TEMPLATE
-      : await readFile(templatePath, { encoding: 'utf8', signal })
+    const finishRead = timings?.start('template read')
+    let template: string
+    try {
+      template = entry.templateMissing
+        ? SSR_HTML_TEMPLATE
+        : await readFile(templatePath, { encoding: 'utf8', signal })
+    } finally {
+      finishRead?.()
+    }
     if (!options.vite) return template
     // Keep the selected application id in the URL Vite uses as the HTML
     // identity. Shared templates (one index.html, several hosts) cannot be
     // disambiguated from the filesystem filename alone.
     const templateUrl = `/@vue-ssr-lite/html/${entry.id}`
-    return options.vite.transformIndexHtml(templateUrl, template, requestUrl)
+    const finishVite = timings?.start('Vite HTML hooks')
+    try {
+      return await options.vite.transformIndexHtml(templateUrl, template, requestUrl)
+    } finally {
+      finishVite?.()
+    }
   }
 
   const loadPreparedSsrTemplate = async (
     definition: SsrCompiledConfig,
     entry: SsrCompiledConfig['applications'][number],
     requestUrl: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    timings?: SsrPhaseTimings
   ) => {
     if (productionTemplates) {
       const templatePath = resolveTemplatePath(definition, entry)
@@ -489,10 +586,13 @@ export const createSsrManagedServer = async (
         entry.mountSelector
       )
     }
-    return prepareSsrHtmlTemplate(
-      await loadTemplate(definition, entry, requestUrl, signal),
-      entry.mountSelector
-    )
+    const template = await loadTemplate(definition, entry, requestUrl, signal, timings)
+    const finishPrepare = timings?.start('template preparation')
+    try {
+      return prepareSsrHtmlTemplate(template, entry.mountSelector)
+    } finally {
+      finishPrepare?.()
+    }
   }
 
   const assertReady = async (definition: SsrCompiledConfig) => {
@@ -528,6 +628,46 @@ export const createSsrManagedServer = async (
       }
     })
   )
+
+  startupTimings?.mark('template preflight')
+  if (options.vite && !options.production) {
+    // The SSR entry and its static imports were evaluated by loadRuntimeRevision.
+    // Prepare the corresponding client shells without executing browser code
+    // or following dynamic imports. Reuse the asset pipeline's eager graph so
+    // the first template request also inherits its completed style analysis.
+    await Promise.all(initialRuntime.applications.map(async (application) => {
+      try {
+        await resolveApplicationStyleDependencies(
+          options.vite!, application.id, `/@vue-ssr-lite/client/${application.id}`
+        )
+      } catch (error) {
+        // Warmup is best effort. A client transform error must retain Vite's
+        // normal request/HMR recovery rather than prevent the server starting.
+        safeSsrLog(initialServerOptions.logger, 'debug', 'ssr.warmup.failed', {
+          applicationId: application.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }))
+  }
+  startupTimings?.mark('client shell warmup')
+  if (initialServerOptions.diagnostics) {
+    startupTimings?.report(initialServerOptions.logger, 'startup', 'all', {
+      lifecycle: 'startup',
+      scope: inheritedStartupTimings ? 'development server including Vite' : 'managed server',
+    })
+  }
+  if (productionTemplates) {
+    await Promise.all(initialRuntime.applications.map(async (application) => {
+      const path = resolveTemplatePath(initialRuntime, application)
+      const canonical = productionTemplatePaths.get(path) ?? path
+      if (application.kind === 'ssr' || application.hasRouteRenderOverrides) {
+        await productionTemplates.prepare(canonical, application.mountSelector)
+      } else {
+        await productionTemplates.load(canonical)
+      }
+    }))
+  }
 
   const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
     activeRequestCount += 1
@@ -569,6 +709,11 @@ export const createSsrManagedServer = async (
         ssrAdmission,
         viteBase,
         ssrManifest,
+        takeRenderTimingDetails: () => ({
+          lifecycle: timedSsrRequestCount++ === 0 ? 'first-ssr' : 'warm-ssr',
+          readyToRequestMs: readyAt === undefined ? undefined : startedAt - readyAt,
+        }),
+        resolveProductionAssets,
         loadTemplate,
         loadPreparedSsrTemplate,
         resolveDevelopmentAssets: (applicationId, modules) =>
@@ -635,6 +780,7 @@ export const createSsrManagedServer = async (
   const close = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise
     shuttingDown = true
+    detachTemplateWatcher()
     // Stop new SSR admission and detach every queued request. Active leases
     // remain valid until their actual Vue render work settles.
     ssrAdmission.dispose()
@@ -672,6 +818,8 @@ export const createSsrManagedServer = async (
           waitForRequestsDrained(),
           ssrAdmission.waitForIdle(),
         ])
+        // A disconnected waiter can leave server-owned compilation in flight.
+        await loadingDefinition
         // On a cold start Vite may have already moved from dependency scanning
         // into an optimizer batch. Cancelling at that boundary can leave
         // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
@@ -738,6 +886,7 @@ export const createSsrManagedServer = async (
         nodeServer.once('error', onError)
         nodeServer.listen(port, host, () => {
           nodeServer.off('error', onError)
+          readyAt = Date.now()
           logServerReady(host, port)
           resolveListen()
         })
