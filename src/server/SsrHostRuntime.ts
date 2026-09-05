@@ -241,6 +241,41 @@ export const resolveSsrForwardedProtocol = (
 
 const COOKIE_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
+/** Compile validated host definitions once; each resolution is a fresh record. */
+export const createSsrHostResolver = <T extends SsrHostApplication>(applications: readonly T[]) => {
+  const patterns = applications.flatMap((entry) => entry.hosts.map((raw) => {
+    const pattern = normalizeSsrHostPattern(raw)
+    const category: SsrHostMatchCategory = pattern === '*'
+      ? 'catch-all' : pattern.startsWith('*.') ? 'wildcard' : 'exact'
+    const hostname = stripSsrHostPort(category === 'wildcard' ? pattern.slice(2) : pattern)
+    return {
+      entry, pattern, category, hostname,
+      specificity: category === 'exact' ? EXACT_SPECIFICITY_BASE + hostname.length
+        : category === 'wildcard' ? hostname.length : 0,
+    }
+  }))
+  patterns.sort((left, right) => right.specificity - left.specificity ||
+    (left.entry.id < right.entry.id ? -1 : left.entry.id > right.entry.id ? 1 : 0))
+  return (host: string): SsrHostResolution<T> | null => {
+    const normalizedHostname = stripSsrHostPort(host)
+    if (!normalizedHostname) return null
+    for (const candidate of patterns) {
+      const matches = candidate.category === 'catch-all' ||
+        (candidate.category === 'exact'
+          ? normalizedHostname === candidate.hostname
+          : normalizedHostname.endsWith(`.${candidate.hostname}`))
+      if (matches) return {
+        entry: candidate.entry,
+        matchedPattern: candidate.pattern,
+        normalizedHostname,
+        category: candidate.category,
+        specificity: candidate.specificity,
+      }
+    }
+    return null
+  }
+}
+
 /**
  * Cookie passthrough for SSR upstream/client fetches:
  * - both empty → forward nothing (secure default)
@@ -251,22 +286,29 @@ export const filterSsrCookieHeader = (
   cookieHeader: SsrHeaderValue,
   allowlist: readonly string[] = [],
   denylist: readonly string[] = []
-): string | undefined => {
+): string | undefined => createSsrCookieFilter(allowlist, denylist)(cookieHeader)
+
+export const createSsrCookieFilter = (
+  allowlist: readonly string[],
+  denylist: readonly string[]
+) => {
   const allowed = new Set(allowlist.filter((name) => COOKIE_NAME.test(name)))
   const denied = new Set(denylist.filter((name) => COOKIE_NAME.test(name)))
-  if (!cookieHeader) return
-  if (allowed.size === 0 && denied.size === 0) return
-  const cookies = String(cookieHeader)
-    .split(';')
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .filter((part) => {
-      const separator = part.indexOf('=')
-      if (separator <= 0) return false
-      const name = part.slice(0, separator).trim()
-      if (denied.has(name)) return false
-      if (allowed.size === 0) return true
-      return allowed.has(name)
-    })
-  return cookies.length ? cookies.join('; ') : undefined
+  return (cookieHeader: SsrHeaderValue): string | undefined => {
+    if (!cookieHeader) return
+    if (allowed.size === 0 && denied.size === 0) return
+    const cookies = String(cookieHeader)
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => {
+        const separator = part.indexOf('=')
+        if (separator <= 0) return false
+        const name = part.slice(0, separator).trim()
+        if (denied.has(name)) return false
+        if (allowed.size === 0) return true
+        return allowed.has(name)
+      })
+    return cookies.length ? cookies.join('; ') : undefined
+  }
 }
