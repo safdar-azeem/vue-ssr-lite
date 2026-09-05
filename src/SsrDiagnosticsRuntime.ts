@@ -1,4 +1,65 @@
 import type { Router } from 'vue-router'
+import type { SsrLogger } from './SsrRuntimeTypes'
+import { safeSsrLog } from './SsrObservability'
+
+// The transport and renderer can live in different Vite module graphs. Carry
+// only this request's diagnostic collector across that boundary, without a
+// public request field or a process-global request store.
+const PHASE_TIMINGS = Symbol.for('vue-ssr-lite.internal.phase-timings')
+
+export const hasSsrTimingSink = (logger: SsrLogger | undefined): boolean => {
+  try {
+    return typeof logger?.debug === 'function'
+  } catch {
+    return false
+  }
+}
+
+export const createSsrPhaseTimings = () => {
+  const startedAt = performance.now()
+  let checkpoint = startedAt
+  const phases: Record<string, number> = Object.create(null)
+  const add = (phase: string, duration: number) => {
+    phases[phase] = (phases[phase] ?? 0) + duration
+  }
+  return {
+    mark(phase: string) {
+      const at = performance.now()
+      add(phase, at - checkpoint)
+      checkpoint = at
+    },
+    start(phase: string) {
+      const at = performance.now()
+      return () => add(phase, performance.now() - at)
+    },
+    report(
+      logger: SsrLogger | undefined,
+      requestId: string,
+      applicationId: string,
+      context: Record<string, unknown> = { lifecycle: 'request' }
+    ) {
+      if (!hasSsrTimingSink(logger)) return
+      const details = {
+        ...context,
+        requestId,
+        applicationId,
+        // renderer/template/injection totals contain their named subphases;
+        // nested timings are not additional time to add to the request total.
+        phases: { ...phases, total: performance.now() - startedAt },
+      }
+      safeSsrLog(logger, 'debug', 'ssr.diagnostic.timing', details)
+    },
+  }
+}
+
+export type SsrPhaseTimings = ReturnType<typeof createSsrPhaseTimings>
+
+export const attachSsrPhaseTimings = (request: object, timings: SsrPhaseTimings): void => {
+  Object.defineProperty(request, PHASE_TIMINGS, { value: timings })
+}
+
+export const readSsrPhaseTimings = (request: object): SsrPhaseTimings | undefined =>
+  (request as { [PHASE_TIMINGS]?: SsrPhaseTimings })[PHASE_TIMINGS]
 
 /**
  * Development-only render diagnostics.
