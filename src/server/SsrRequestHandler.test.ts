@@ -121,6 +121,114 @@ const handlerRuntime = (
 })
 
 describe('transport-independent SSR request handler', () => {
+  it.each([
+    '/@vite/client', '/@id/virtual-module', '/@fs/project/main.ts',
+    '/@vue-ssr-lite/client/app', '/src/App.vue', '/src/main.ts',
+    '/src/style.css', '/node_modules/.vite/deps/vue.js?v=123', '/favicon.ico',
+    '/app/@vite/client', '/app/@vue-ssr-lite/client/app',
+    '/products/@vue-ssr-lite/client/app', '/products/src/style.css',
+    '/plugin-owned-extensionless-resource',
+  ])('gives Vite ownership of %s before any application work', async (url) => {
+    const publicConfig = vi.fn(() => ({}))
+    const endpoint = { id: 'probe', match: vi.fn(() => false), handle: vi.fn() }
+    const definition = compiledDefinition(endpoint, publicConfig)
+    const classify = vi.fn(() => 'spa' as const)
+    definition.applications[0]!.resolveRouteRender = classify
+    const scope = createSsrRequestScope(0)
+    const runtime = handlerRuntime(scope, definition)
+    const loadDefinition = vi.fn(runtime.loadDefinition)
+    const serveViteRequest = vi.fn(async () => true)
+    try {
+      // Host selection must not gate resource ownership, even on other apps'
+      // domains or hosts that have no application at all.
+      for (const host of ['example.test', 'admin.localhost', 'portal.custom.test']) {
+        const response = await handleSsrRequest({
+          ...normalizedRequest(url), headers: { host, accept: '*/*' },
+        }, { ...runtime, loadDefinition, serveViteRequest })
+        expect(response).toBeUndefined()
+      }
+      expect(loadDefinition).not.toHaveBeenCalled()
+      expect(classify).not.toHaveBeenCalled()
+      expect(publicConfig).not.toHaveBeenCalled()
+      expect(endpoint.match).not.toHaveBeenCalled()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it.each(['/users/john.smith', '/releases/2.0', '/projects/example.com', '/docs/api.json'])(
+    'classifies dotted HTML route %s after Vite declines it', async (url) => {
+      const definition = compiledDefinition()
+      const classify = vi.fn(() => 'spa' as const)
+      definition.applications[0]!.resolveRouteRender = classify
+      const scope = createSsrRequestScope(0)
+      const serveViteRequest = vi.fn(async () => false)
+      try {
+        const response = await handleSsrRequest(normalizedHtmlRequest(url), {
+          ...handlerRuntime(scope, definition), serveViteRequest,
+        })
+        expect(response?.statusCode).toBe(200)
+        expect(serveViteRequest).toHaveBeenCalledOnce()
+        expect(classify).toHaveBeenCalledWith(url)
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
+  it.each(['/api/report.json', '/download/file.xml'])(
+    'serves endpoint %s without page classification after Vite fallthrough', async (url) => {
+      const definition = compiledDefinition({
+        id: 'download',
+        match: (request) => request.pathname === url,
+        handle: () => ({ statusCode: 200, body: 'endpoint' }),
+      })
+      const classify = vi.fn(() => 'spa' as const)
+      definition.applications[0]!.resolveRouteRender = classify
+      const scope = createSsrRequestScope(0)
+      try {
+        const response = await handleSsrRequest(normalizedRequest(url), {
+          ...handlerRuntime(scope, definition), serveViteRequest: async () => false,
+        })
+        expect(response?.body).toBe('endpoint')
+        expect(classify).not.toHaveBeenCalled()
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
+  it('never invokes development middleware in production', async () => {
+    const definition = compiledDefinition()
+    const scope = createSsrRequestScope(0)
+    const serveViteRequest = vi.fn(async () => true)
+    try {
+      const response = await handleSsrRequest(normalizedHtmlRequest('/'), {
+        ...handlerRuntime(scope, definition), production: true, serveViteRequest,
+      })
+      expect(response?.statusCode).toBe(200)
+      expect(serveViteRequest).not.toHaveBeenCalled()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('does not classify a missing favicon after Vite fallthrough', async () => {
+    const definition = compiledDefinition()
+    const classify = vi.fn(() => 'spa' as const)
+    definition.applications[0]!.resolveRouteRender = classify
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(normalizedRequest('/favicon.ico'), {
+        ...handlerRuntime(scope, definition), serveViteRequest: async () => false,
+      })
+      expect(response?.statusCode).toBe(404)
+      expect(classify).not.toHaveBeenCalled()
+    } finally {
+      scope.dispose()
+    }
+  })
+
   it('uses the renderer carried by the application module graph', async () => {
     const definition = compiledDefinition(undefined, undefined, 'ssr')
     const graphRenderer = vi.fn(renderSsrApplication)
