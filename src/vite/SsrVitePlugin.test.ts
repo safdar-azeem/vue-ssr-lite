@@ -1,20 +1,25 @@
 import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promises'
-import { createServer as createHttpServer, type Server } from 'node:http'
+import { createServer as createHttpServer, request as requestHttp, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h } from 'vue'
+import { createSsrManagedServer, type SsrManagedServer } from '../server/SsrServerRuntime'
 import { build, createServer, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from './SsrVitePlugin'
-import { closeViteDevServer, provisionHostVuePeers } from '../SsrTestFixtures'
+import { closeViteDevServer, provisionHostVuePeers, withSsrShells } from '../SsrTestFixtures'
 import { SSR_RENDERER_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 
 let root = ''
 let server: ViteDevServer | undefined
 let hmrServer: Server | undefined
+let managedServer: SsrManagedServer | undefined
 
 afterEach(async () => {
+  await managedServer?.close()
+  managedServer = undefined
   await closeViteDevServer(server, hmrServer)
   server = undefined
   hmrServer = undefined
@@ -72,6 +77,7 @@ const runConfig = async (
       isPreview: false,
     }
   )) as {
+    server?: { allowedHosts?: string[] }
     resolve?: { dedupe?: string[] }
     optimizeDeps?: { include?: string[]; exclude?: string[] }
     ssr?: {
@@ -86,6 +92,106 @@ const runConfig = async (
 }
 
 describe('SSR Vite package identity', () => {
+  it('adds named application hosts without turning catch-all routing into Vite access', async () => {
+    await writeMinimalConfig()
+    const config = await runConfig(root)
+    expect(config.server?.allowedHosts).toContain('example.com')
+    expect(config.server?.allowedHosts).toContain('.example.com')
+    expect(config.server?.allowedHosts).not.toContain('*')
+    expect((await runConfig(root, 'build')).server).toBeUndefined()
+  })
+
+  it.each(['/', '/products/'])(
+    'preserves real Vite host security and hybrid application ownership with base %s', async (base) => {
+      await writeMinimalConfig()
+      const applications = [
+        {
+          name: 'portal', render: 'ssr' as const, template: 'site.html',
+          domain: { development: 'portal.custom.test', mode: 'root' as const, customDomains: true },
+        },
+        {
+          name: 'shop', render: 'ssr' as const, template: 'site.html',
+          domain: { development: 'shop.example.test', mode: 'root-and-subdomains' as const },
+        },
+      ]
+      await writeFile(join(root, 'server.ts'), `export default ${JSON.stringify({ applications })}`)
+      hmrServer = createHttpServer()
+      server = await createServer({
+        root, base, configFile: false,
+        resolve: { alias: { 'vue-ssr-lite/client': fileURLToPath(new URL('../client.ts', import.meta.url)) } },
+        plugins: [vueSsrLite({ root }), vue()],
+        server: {
+          middlewareMode: true, hmr: { server: hmrServer },
+          allowedHosts: ['explicit.example.test'],
+        },
+        appType: 'custom',
+      })
+      expect(server.config.server.allowedHosts).toContain('explicit.example.test')
+      const classifyRedirect = vi.fn(() => '/home')
+      const Shell = defineComponent({ render: () => h('main') })
+      const loadRuntime = vi.fn(async () => ({
+        default: withSsrShells({
+          server: { port: 0 },
+          applications: applications.map((application) => ({
+            ...application,
+            routes: [
+              { path: '/', redirect: classifyRedirect },
+              { path: '/home', component: Shell, meta: { render: 'spa' as const } },
+            ],
+          })),
+        }, { portal: { root: Shell }, shop: { root: Shell } }),
+      }))
+      managedServer = await createSsrManagedServer({ production: false, root, vite: server, loadRuntime })
+      await managedServer.listen()
+      // Connect to loopback while sending the browser's actual custom Host.
+      // Node HTTP avoids DNS setup and exercises Vite's real host middleware.
+      const get = (host: string, path: string, accept = '*/*') =>
+        new Promise<{ status: number; body: string }>((resolveResponse, reject) => {
+          const request = requestHttp({
+            hostname: '127.0.0.1', port: managedServer!.address().port, path,
+            headers: { host, accept },
+          }, (response) => {
+            let body = ''
+            response.setEncoding('utf8')
+            response.on('data', (chunk) => { body += chunk })
+            response.on('end', () => resolveResponse({ status: response.statusCode!, body }))
+            response.on('error', reject)
+          })
+          request.on('error', reject)
+          request.end()
+        })
+      for (const application of applications) {
+        const host = application.domain.development
+        const page = await get(host, '/', 'text/html')
+        expect(page.status).toBe(200)
+        expect(page.body).toContain(`"applicationId":"${application.name}"`)
+        expect(classifyRedirect).toHaveBeenCalled()
+        const classifications = classifyRedirect.mock.calls.length
+        const loads = loadRuntime.mock.calls.length
+        for (const path of ['@vite/client', `@vue-ssr-lite/client/${application.name}`, 'src/main.ts']) {
+          const resource = await get(host, `${base}${path}`)
+          expect(resource.status).toBe(200)
+          expect(resource.body.length).toBeGreaterThan(0)
+        }
+        expect(classifyRedirect).toHaveBeenCalledTimes(classifications)
+        expect(loadRuntime).toHaveBeenCalledTimes(loads)
+      }
+      const tenantPage = await get('tenant.shop.example.test', '/', 'text/html')
+      expect(tenantPage.status).toBe(200)
+      expect(tenantPage.body).toContain('"applicationId":"shop"')
+      expect((await get('tenant.shop.example.test', `${base}@vite/client`)).status).toBe(200)
+      const loads = loadRuntime.mock.calls.length
+      for (const path of ['/', `${base}@vite/client`]) {
+        const blocked = await get('untrusted.example.test', path, 'text/html')
+        expect(blocked.status).toBe(403)
+        expect(blocked.body).toContain('Blocked request')
+      }
+      expect(loadRuntime).toHaveBeenCalledTimes(loads)
+      // Existing explicit Vite allowances still work.
+      expect((await get('explicit.example.test', `${base}@vite/client`)).status).toBe(200)
+    }
+  )
+
   it('serves a rebuilt runtime at the same package version after a dev restart', async () => {
     await writeMinimalConfig()
     root = await realpath(root)
