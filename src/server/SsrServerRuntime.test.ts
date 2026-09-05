@@ -1,5 +1,9 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { request as createHttpRequest } from 'node:http'
+import {
+  request as createHttpRequest,
+  type ClientRequest,
+  type IncomingHttpHeaders,
+} from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
@@ -28,8 +32,18 @@ import type { SsrResolvedProductionAsset } from './SsrAssetRuntime'
 
 let managed: SsrManagedServer | undefined
 let root = ''
+const pendingHtmlRequests = new Set<ClientRequest>()
+
+const abortPendingHtmlRequests = () => {
+  for (const request of pendingHtmlRequests) request.destroy()
+  pendingHtmlRequests.clear()
+}
 
 afterEach(async () => {
+  // A failed controlled-clock assertion must not leave a socket waiting on a
+  // deadline that disappears when real timers are restored.
+  abortPendingHtmlRequests()
+  vi.useRealTimers()
   await managed?.close().catch(() => undefined)
   if (root) await rm(root, { recursive: true, force: true })
   managed = undefined
@@ -77,6 +91,54 @@ const requestRawPathStatus = (port: number, path: string): Promise<number> =>
     request.once('error', rejectStatus)
     request.end()
   })
+
+// Use Node's transport for controlled-clock deadline tests: it delivers socket
+// events without fetch's pooled-connection housekeeping timers.
+const requestHtml = (port: number, path: string) =>
+  new Promise<{ status: number; headers: IncomingHttpHeaders; body: string }>(
+    (resolveResponse, rejectResponse) => {
+      const request = createHttpRequest({
+        hostname: '127.0.0.1',
+        port,
+        path,
+        agent: false,
+        headers: { accept: 'text/html' },
+      })
+      pendingHtmlRequests.add(request)
+      request.once('close', () => pendingHtmlRequests.delete(request))
+      request.once('response', (response) => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk: string) => {
+          body += chunk
+        })
+        response.once('error', rejectResponse)
+        response.once('end', () => {
+          resolveResponse({
+            status: response.statusCode || 0,
+            headers: response.headers,
+            body,
+          })
+        })
+      })
+      request.once('error', rejectResponse)
+      request.end()
+    }
+  )
+
+const waitForRequestStage = (
+  stage: Promise<void>,
+  response: ReturnType<typeof requestHtml>,
+  label: string
+) =>
+  Promise.race([
+    stage,
+    // Observe transport failures immediately while the test waits to advance
+    // its clock, instead of leaving a rejected response promise unhandled.
+    response.then(() => {
+      throw new Error(`The request completed before ${label}.`)
+    }),
+  ])
 
 describe('managed SSR server lifecycle', () => {
   it('uses a non-empty HOST override and otherwise preserves the configured host', () => {
@@ -848,6 +910,18 @@ describe('managed SSR server lifecycle', () => {
     const timedOutRenderGate = new Promise<void>((resolveRender) => {
       releaseTimedOutRenders = resolveRender
     })
+    let markTimeoutRenderStarted!: () => void
+    const timeoutRenderStarted = new Promise<void>((resolveStarted) => {
+      markTimeoutRenderStarted = resolveStarted
+    })
+    let markHangingRenderStarted!: () => void
+    const hangingRenderStarted = new Promise<void>((resolveStarted) => {
+      markHangingRenderStarted = resolveStarted
+    })
+    let markErrorRendererStarted!: () => void
+    const errorRendererStarted = new Promise<void>((resolveStarted) => {
+      markErrorRendererStarted = resolveStarted
+    })
     const Root = defineComponent({
       async setup() {
         const context = useSsrRequestContext()
@@ -858,6 +932,8 @@ describe('managed SSR server lifecycle', () => {
           context.url.pathname === '/timeout' ||
           context.url.pathname === '/timeout-hanging-renderer'
         ) {
+          if (context.url.pathname === '/timeout') markTimeoutRenderStarted()
+          else markHangingRenderStarted()
           await timedOutRenderGate
         }
         return () => h('main', 'ready')
@@ -870,9 +946,9 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineServer({
           name: 'test-runtime',
-          // The configured deadline includes development runtime reload work;
-          // keep enough headroom for the Vite-free config compiler while still
-          // exercising the hanging render timeout below.
+          // Advance this deadline only after the intended render has started.
+          // Wall-clock config loading under parallel suite load is unrelated
+          // to the redirect and timeout behaviors asserted here.
           server: {
             port: 0,
             requestTimeoutMs: 100,
@@ -881,6 +957,7 @@ describe('managed SSR server lifecycle', () => {
               if (request?.pathname === '/timeout') {
                 return { statusCode: 418, body: 'timeout handled' }
               }
+              markErrorRendererStarted()
               return new Promise<never>(() => undefined)
             },
           },
@@ -907,25 +984,46 @@ describe('managed SSR server lifecycle', () => {
     })
     await managed.listen()
     const { port } = managed.address()
-    const redirect = await fetch(`http://127.0.0.1:${port}/redirect`, {
-      headers: { accept: 'text/html' },
-      redirect: 'manual',
-    })
-    const timeout = await fetch(`http://127.0.0.1:${port}/timeout`, {
-      headers: { accept: 'text/html' },
-    })
-    const hangingRenderer = await fetch(`http://127.0.0.1:${port}/timeout-hanging-renderer`, {
-      headers: { accept: 'text/html' },
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout'],
     })
 
     try {
+      const redirect = await requestHtml(port, '/redirect')
       expect(redirect.status).toBe(307)
-      expect(redirect.headers.get('location')).toBe(`http://127.0.0.1:${port}/target`)
+      expect(redirect.headers.location).toBe(`http://127.0.0.1:${port}/target`)
+
+      const timeoutResponse = requestHtml(port, '/timeout')
+      await waitForRequestStage(
+        timeoutRenderStarted,
+        timeoutResponse,
+        'the timeout render'
+      )
+      await vi.advanceTimersByTimeAsync(100)
+      const timeout = await timeoutResponse
       expect(timeout.status).toBe(418)
-      expect(await timeout.text()).toBe('timeout handled')
+      expect(timeout.body).toBe('timeout handled')
       expect(timeoutRenderKind).toBe('timeout')
+
+      const hangingResponse = requestHtml(port, '/timeout-hanging-renderer')
+      await waitForRequestStage(
+        hangingRenderStarted,
+        hangingResponse,
+        'the hanging render'
+      )
+      await vi.advanceTimersByTimeAsync(100)
+      await waitForRequestStage(
+        errorRendererStarted,
+        hangingResponse,
+        'the error renderer'
+      )
+      // The error renderer has a separate bounded 250 ms fallback budget.
+      await vi.advanceTimersByTimeAsync(250)
+      const hangingRenderer = await hangingResponse
       expect(hangingRenderer.status).toBe(504)
     } finally {
+      abortPendingHtmlRequests()
+      vi.useRealTimers()
       // Timed-out request handlers stop awaiting immediately, while admission
       // remains owned by the actual Vue renders until these fixture gates open.
       releaseTimedOutRenders()
@@ -948,8 +1046,16 @@ describe('managed SSR server lifecycle', () => {
       },
     })
     let slow = true
-    let factoryObservedAbort = false
-    let activeFactories = 0
+    let siteResolutionObservedAbort = false
+    let activeSiteResolutions = 0
+    let markSiteResolutionStarted!: () => void
+    const siteResolutionStarted = new Promise<void>((resolveStarted) => {
+      markSiteResolutionStarted = resolveStarted
+    })
+    let markFactoryStarted!: () => void
+    const factoryStarted = new Promise<void>((resolveStarted) => {
+      markFactoryStarted = resolveStarted
+    })
     const cacheSet = vi.fn()
     managed = await createSsrManagedServer({
       production: false,
@@ -957,9 +1063,24 @@ describe('managed SSR server lifecycle', () => {
       loadRuntime: async () => ({
         default: defineServer({
           server: { port: 0, requestTimeoutMs: 60 },
-          resolveSiteUrl: async () => {
-            if (slow) await new Promise((resolveWait) => setTimeout(resolveWait, 40))
-            return 'http://localhost'
+          resolveSiteUrl: async ({ signal }) => {
+            activeSiteResolutions += 1
+            try {
+              if (slow) {
+                markSiteResolutionStarted()
+                await new Promise<void>((resolveWait) => {
+                  const onAbort = () => {
+                    siteResolutionObservedAbort = true
+                    resolveWait()
+                  }
+                  if (signal.aborted) onAbort()
+                  else signal.addEventListener('abort', onAbort, { once: true })
+                })
+              }
+              return 'http://localhost'
+            } finally {
+              activeSiteResolutions -= 1
+            }
           },
           applications: [
             defineApplication({
@@ -975,26 +1096,12 @@ describe('managed SSR server lifecycle', () => {
                 },
                 ttlMs: 60_000,
               },
-              publicConfig: async ({ signal }) => {
-                activeFactories += 1
-                try {
-                  if (slow) {
-                    await new Promise<void>((resolveWait) => {
-                      const onAbort = () => {
-                        factoryObservedAbort = true
-                        resolveWait()
-                      }
-                      if (signal.aborted) onAbort()
-                      else
-                        signal.addEventListener('abort', onAbort, {
-                          once: true,
-                        })
-                    })
-                  }
-                  return {}
-                } finally {
-                  activeFactories -= 1
+              publicConfig: async () => {
+                if (slow) {
+                  markFactoryStarted()
+                  await new Promise((resolveWait) => setTimeout(resolveWait, 40))
                 }
+                return {}
               },
             }),
           ],
@@ -1006,23 +1113,44 @@ describe('managed SSR server lifecycle', () => {
     })
     await managed.listen()
     const { port } = managed.address()
-    const timedOut = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { accept: 'text/html' },
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout'],
     })
-    expect(timedOut.status).toBe(504)
-    await timedOut.text()
-    await new Promise((resolveWait) => setTimeout(resolveWait, 0))
-    expect(factoryObservedAbort).toBe(true)
-    expect(activeFactories).toBe(0)
-    expect(cacheSet).not.toHaveBeenCalled()
+    try {
+      const timedOutResponse = requestHtml(port, '/')
+      // Public configuration runs before site-origin resolution in the request
+      // handler. Spend the first 40 ms there, then hold the second stage until
+      // the shared deadline aborts it.
+      await waitForRequestStage(
+        factoryStarted,
+        timedOutResponse,
+        'public configuration'
+      )
+      await vi.advanceTimersByTimeAsync(40)
+      await waitForRequestStage(
+        siteResolutionStarted,
+        timedOutResponse,
+        'site resolution'
+      )
+      // The next stage inherits the remaining 20 ms, not a new 60 ms deadline.
+      await vi.advanceTimersByTimeAsync(19)
+      expect(siteResolutionObservedAbort).toBe(false)
+      expect(activeSiteResolutions).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      const timedOut = await timedOutResponse
+      expect(timedOut.status).toBe(504)
+      expect(siteResolutionObservedAbort).toBe(true)
+      expect(activeSiteResolutions).toBe(0)
+      expect(cacheSet).not.toHaveBeenCalled()
 
-    slow = false
-    const successful = await fetch(`http://127.0.0.1:${port}/`, {
-      headers: { accept: 'text/html' },
-    })
-    expect(successful.status).toBe(200)
-    await successful.text()
-    expect(successfulSignal?.aborted).toBe(true)
+      slow = false
+      const successful = await requestHtml(port, '/')
+      expect(successful.status).toBe(200)
+      expect(successfulSignal?.aborted).toBe(true)
+    } finally {
+      abortPendingHtmlRequests()
+      vi.useRealTimers()
+    }
   })
 
   it('keeps valid renders available when observability and cleanup throw', async () => {
