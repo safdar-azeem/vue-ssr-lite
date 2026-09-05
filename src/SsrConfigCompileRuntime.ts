@@ -80,6 +80,7 @@ import {
   type SsrRouteRenderMatcher,
 } from './SsrRouteRenderRuntime'
 import type { SsrApplicationRenderer } from './SsrRenderRuntime'
+import { prepareSsrCompiledMetadata } from './server/SsrCompiledMetadata'
 
 export { defineServer }
 export { bundleSsrConfigModule } from './SsrConfigCompileBoundary'
@@ -1056,6 +1057,10 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     value: normalized,
     enumerable: false,
   })
+  Object.defineProperty(config, '__vueSsrLiteConfigDependencies', {
+    value: [...new Set([absoluteConfig, ...reachableConfigModules, ...discovered.files.values()])],
+    enumerable: false,
+  })
   return config
 }
 
@@ -1553,7 +1558,7 @@ export const compileSsrConfig = async (
     applications.push(compiled)
   }
   validateSsrHostEntries(applications)
-  return {
+  const compiled: SsrCompiledConfig = {
     name: config.name,
     applications,
     development,
@@ -1563,4 +1568,6 @@ export const compileSsrConfig = async (
     resolveSiteUrl,
     server: normalizeCompiledServerOptions(config, options, development),
   }
+  prepareSsrCompiledMetadata(compiled)
+  return compiled
 }
