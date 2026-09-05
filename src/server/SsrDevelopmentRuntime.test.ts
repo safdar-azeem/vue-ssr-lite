@@ -4,12 +4,26 @@ import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { RunnableDevEnvironment, type EnvironmentModuleNode, type ViteDevServer } from 'vite'
+import type { EnvironmentModuleNode, ViteDevServer } from 'vite'
 import { defineComponent, h } from 'vue'
 import { withSsrShells } from '../SsrTestFixtures'
 import { useSsrRequestContext } from '../SsrRequestContext'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrManagedServer, type SsrManagedServer } from './SsrServerRuntime'
+
+const runnableTestEnvironments = vi.hoisted(() => new WeakSet<object>())
+
+// Vite exports the runnable-environment type and factory, not its constructor.
+// Brand only this file's deterministic doubles at the Vite boundary; retain
+// the real guard for every other environment and the real runtime/revision code.
+vi.mock('vite', async (importOriginal) => {
+  const vite = await importOriginal<typeof import('vite')>()
+  return {
+    ...vite,
+    isRunnableDevEnvironment: (environment: Parameters<typeof vite.isRunnableDevEnvironment>[0]) =>
+      runnableTestEnvironments.has(environment) || vite.isRunnableDevEnvironment(environment),
+  }
+})
 
 const deferred = <T = void>() => {
   let resolve!: (value: T) => void
@@ -84,14 +98,14 @@ const createHarness = async (options: { multi?: boolean; debug?: boolean; templa
     getModuleByUrl: (id: string) => id === ROOT ? { id: ROOT } : undefined,
   }
   const runner = { evaluatedModules, import: vi.fn(async () => namespace) }
-  const ssr = Object.create(RunnableDevEnvironment.prototype)
-  Object.defineProperties(ssr, {
-    runner: { value: runner },
-    moduleGraph: { value: {
+  const ssr = {
+    runner,
+    moduleGraph: {
       getModuleById: (id: string) => nodes.get(id),
       getModuleByUrl: async (id: string) => nodes.get(id),
-    } },
-  })
+    },
+  }
+  runnableTestEnvironments.add(ssr)
   const watcher = Object.assign(new EventEmitter(), { add: vi.fn() })
   const transform = vi.fn(async (_url: string, html: string, originalUrl: string) =>
     html.replace('</head>', `<meta name="request-path" content="${originalUrl}"></head>`)
