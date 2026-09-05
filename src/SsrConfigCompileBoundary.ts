@@ -1,5 +1,5 @@
 import { access, readFile } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { init as initEsModuleLexer, parse as parseEsModule } from 'es-module-lexer'
 import type { Plugin } from 'esbuild'
@@ -543,6 +543,55 @@ export const bundleSsrConfigModule = async (
   const code = result.outputFiles?.[0]?.text
   if (!code) throw new Error(`Failed to bundle server config: ${entry}`)
   return { code, graph }
+}
+
+/**
+ * Bundle independent application declarations in one esbuild invocation.
+ *
+ * Application discovery used to start a complete esbuild service build for
+ * every candidate file. Besides repeating package/tsconfig resolution, that
+ * also reparsed the same library helpers for every application. A single
+ * multi-entry build preserves an independent output module for each entry and
+ * lets the boundary plugin record one authoritative union graph.
+ */
+export const bundleSsrConfigModules = async (
+  root: string,
+  entries: readonly string[]
+): Promise<{ codes: Map<string, string>; graph: SsrConfigModuleGraph }> => {
+  const graph = createSsrConfigModuleGraph()
+  const codes = new Map<string, string>()
+  if (!entries.length) return { codes, graph }
+
+  const entryPoints = Object.fromEntries(
+    entries.map((entry, index) => [`application-${index}`, entry])
+  )
+  const esbuild = await import('esbuild')
+  const result = await esbuild.build({
+    absWorkingDir: root,
+    entryPoints,
+    outdir: resolve(root, '.vue-ssr-lite-config-discovery'),
+    entryNames: '[name]',
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    packages: 'external',
+    logLevel: 'silent',
+    plugins: [createSsrConfigBoundaryPlugin(graph)],
+  })
+  const outputByName = new Map(
+    (result.outputFiles ?? []).map((output) => [
+      basename(output.path, extname(output.path)),
+      output.text,
+    ])
+  )
+  entries.forEach((entry, index) => {
+    const code = outputByName.get(`application-${index}`)
+    if (!code) throw new Error(`Failed to bundle application config: ${entry}`)
+    codes.set(entry, code)
+  })
+  return { codes, graph }
 }
 
 const normalizeGraphPath = (filePath: string): string =>
