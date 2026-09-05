@@ -426,7 +426,7 @@ describe('zero-config clean consumer fixture', () => {
       (module) => module.url
     )
     expect(clientModuleUrls).toContainEqual(
-      expect.stringContaining('vue-ssr-lite_client.js?v=')
+      expect.stringMatching(/node_modules\/vue-ssr-lite\/client\.mjs(?:\?|$)/)
     )
 
     const subsequent = await fetch(`${origin}/`, {
