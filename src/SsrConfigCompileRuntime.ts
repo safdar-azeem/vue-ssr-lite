@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import type { RouteRecordRaw } from 'vue-router'
 import {
   bundleSsrConfigModule,
+  bundleSsrConfigModules,
   collectApplicationDeclarationFiles,
   collectSkippedApplicationRoutesFiles,
   isEvaluatedApplicationConfig,
@@ -285,6 +286,13 @@ export interface SsrDiscoveredApplicationSources {
   truncated: boolean
 }
 
+interface SsrConfigSourceAnalysis {
+  source: string
+  applicationModule: boolean
+  browserOnlyMiddleware: boolean
+  projection?: SsrUniversalRuntimeProjection
+}
+
 const evaluateBundledConfigModule = async (
   root: string,
   code: string
@@ -303,7 +311,8 @@ const evaluateBundledConfigModule = async (
 export const discoverApplicationSourceFiles = async (
   root: string,
   configPath: string,
-  authoritativeGraph?: SsrConfigModuleGraph
+  authoritativeGraph?: SsrConfigModuleGraph,
+  sourceAnalyses: ReadonlyMap<string, SsrConfigSourceAnalysis> = new Map()
 ): Promise<SsrDiscoveredApplicationSources> => {
   const walked = await collectApplicationDeclarationFiles(configPath, 0, new Set(), root)
   const moduleResolver = authoritativeGraph
@@ -323,12 +332,12 @@ export const discoverApplicationSourceFiles = async (
   const authoritativeApplicationFiles: string[] = []
   for (const file of [...new Set(authoritativeFiles)]) {
     try {
+      const cached = sourceAnalyses.get(file)
       if (
-        await isDefineApplicationModuleSource(
-          await readFile(file, 'utf8'),
-          file,
-          moduleResolver
-        )
+        cached?.applicationModule ??
+        (await isDefineApplicationModuleSource(
+          await readFile(file, 'utf8'), file, moduleResolver
+        ))
       ) {
         authoritativeApplicationFiles.push(file)
       }
@@ -349,15 +358,20 @@ export const discoverApplicationSourceFiles = async (
   const routesModules = new Map<string, string>()
   const routesExports = new Map<string, string>()
   const projections = new Map<string, SsrUniversalRuntimeProjection>()
-  for (const file of candidateFiles) {
-    if (
-      skippedRoutesFiles.has(
+  const applicationCandidates = candidateFiles.filter(
+    (file) =>
+      !skippedRoutesFiles.has(
         file.replaceAll('\\', '/').replace(/^\/private(?=\/(?:var|tmp)\/)/, '')
       )
-    ) {
-      continue
-    }
-    const { code, graph } = await bundleSsrConfigModule(root, file)
+  )
+  const bundledApplications = await bundleSsrConfigModules(
+    root,
+    applicationCandidates
+  )
+  for (const file of applicationCandidates) {
+    const code = bundledApplications.codes.get(file)
+    if (!code) throw new Error(`Failed to discover application config: ${file}`)
+    const graph = bundledApplications.graph
     const namespace = await evaluateBundledConfigModule(root, code)
     if (!isEvaluatedApplicationConfig(namespace.default)) continue
     const application = namespace.default
@@ -368,7 +382,8 @@ export const discoverApplicationSourceFiles = async (
       )
     }
     files.set(application.name, file)
-    const source = await readFile(file, 'utf8')
+    const analysis = sourceAnalyses.get(file)
+    const source = analysis?.source ?? (await readFile(file, 'utf8'))
     const routesAbsolute = resolveApplicationRoutesModule(file, graph, application.name)
     if (routesAbsolute) {
       routesModules.set(application.name, toProjectRelative(root, routesAbsolute))
@@ -379,15 +394,13 @@ export const discoverApplicationSourceFiles = async (
         `Application "${application.name}" must import a dedicated routes module so the client graph does not import ${file}.`
       )
     }
-    const browserOnlyMiddleware =
-      application.render === 'spa' &&
-      (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver))
-    const projection = await projectUniversalRuntimeSource(
-      source,
-      file,
-      moduleResolver,
-      { browserOnlyMiddleware }
-    )
+    const browserOnlyMiddleware = application.render === 'spa' &&
+      (analysis?.browserOnlyMiddleware ??
+        (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver)))
+    const projection = analysis?.projection ??
+      (await projectUniversalRuntimeSource(source, file, moduleResolver, {
+        browserOnlyMiddleware,
+      }))
     assertUniversalProjectionCoverage(application, projection, file)
     if (projection) projections.set(application.name, projection)
   }
@@ -890,28 +903,41 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
   })
   const preEvaluationProjections = new Map<string, SsrUniversalRuntimeProjection>()
   const preEvaluationApplicationFiles = new Set<string>()
-  for (const file of [absoluteConfig, ...reachableConfigModules]) {
-    const source = file === absoluteConfig ? configSource : await readFile(file, 'utf8')
-    let applicationModule = false
-    if (
-      file !== absoluteConfig &&
-      (await isDefineApplicationModuleSource(source, file, moduleResolver))
-    ) {
-      preEvaluationApplicationFiles.add(file)
-      applicationModule = true
-    }
-    const browserOnlyMiddleware =
-      (file === absoluteConfig || applicationModule) &&
-      (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver))
-    const projection = await projectUniversalRuntimeSource(
-      source,
-      file,
-      moduleResolver,
-      { browserOnlyMiddleware }
-    )
+  const sourceAnalyses = new Map<string, SsrConfigSourceAnalysis>()
+  const analyzedSources = await Promise.all(
+    [absoluteConfig, ...reachableConfigModules].map(async (file) => {
+      const source =
+        file === absoluteConfig ? configSource : await readFile(file, 'utf8')
+      const applicationModule =
+        file !== absoluteConfig &&
+        (await isDefineApplicationModuleSource(source, file, moduleResolver))
+      const browserOnlyMiddleware =
+        (file === absoluteConfig || applicationModule) &&
+        (await sourceDeclaresSpaOnlyApplication(source, file, moduleResolver))
+      const projection = await projectUniversalRuntimeSource(
+        source,
+        file,
+        moduleResolver,
+        { browserOnlyMiddleware }
+      )
+      return {
+        file,
+        analysis: {
+          source,
+          applicationModule,
+          browserOnlyMiddleware,
+          projection,
+        } satisfies SsrConfigSourceAnalysis,
+      }
+    })
+  )
+  for (const { file, analysis } of analyzedSources) {
+    const { applicationModule, projection } = analysis
+    if (applicationModule) preEvaluationApplicationFiles.add(file)
     if (projection) {
       preEvaluationProjections.set(file, projection)
     }
+    sourceAnalyses.set(file, analysis)
   }
   const protectedUniversalDependencies = [
     ...new Set(
@@ -935,7 +961,12 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     moduleResolver,
     protectedUniversalIdentities
   )
-  const discovered = await discoverApplicationSourceFiles(root, absoluteConfig, graph)
+  const discovered = await discoverApplicationSourceFiles(
+    root,
+    absoluteConfig,
+    graph,
+    sourceAnalyses
+  )
   let singleApplicationProjection = discovered.files.size
     ? undefined
     : preEvaluationProjections.get(absoluteConfig)
