@@ -71,6 +71,8 @@ const responseHtml = async (host: string): Promise<string> =>
   })
 
 describe('request-aware multi-application assets', () => {
+  // Cold Vite startup, dependency optimization, and two SSR module graphs
+  // need the same integration budget as the production fixture below.
   it('isolates lazy route CSS in development', async () => {
     devServer = await createFixtureViteServer()
     managedServer = await createSsrManagedServer({
@@ -90,7 +92,7 @@ describe('request-aware multi-application assets', () => {
     expect(website).not.toContain('AdminLazy.vue?vue')
     expect(admin).toContain('AdminLazy.vue?vue')
     expect(admin).not.toContain('WebsiteLazy.vue?vue')
-  })
+  }, 30_000)
 
   it('isolates lazy route CSS and chunks through the shared production manifest', async () => {
     productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-multi-'))
