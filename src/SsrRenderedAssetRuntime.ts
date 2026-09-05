@@ -84,40 +84,67 @@ const joinAssetBase = (base: string, file: string): string => {
   return `${cleanBase.endsWith('/') ? cleanBase : `${cleanBase}/`}${cleanFile}`
 }
 
+interface SsrManifestAsset {
+  identity: string
+  href: string
+  rel: 'stylesheet' | 'modulepreload'
+}
+
+const prepareManifestModule = (files: readonly string[], base: string): readonly SsrManifestAsset[] => {
+  const assets: SsrManifestAsset[] = []
+  for (const file of files) {
+    const rel = STYLESHEET_ASSET_RE.test(file) ? 'stylesheet'
+      : JAVASCRIPT_ASSET_RE.test(file) ? 'modulepreload' : undefined
+    if (!rel) continue
+    const href = joinAssetBase(base, file)
+    assets.push({ identity: `${rel}:${href}`, href, rel })
+  }
+  return assets
+}
+
+const collectRenderedAssets = (
+  applicationId: string,
+  moduleIds: readonly string[],
+  resolveModule: (id: string) => readonly SsrManifestAsset[] | undefined
+): SsrRenderedApplicationAsset[] => {
+  const assets = new Map<string, SsrRenderedApplicationAsset>()
+  for (const moduleId of moduleIds) {
+    const files = resolveModule(moduleId)
+    if (!files) {
+      throw new Error(
+        `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's SSR manifest for application ${JSON.stringify(applicationId)}.`
+      )
+    }
+    for (const { identity, href, rel } of files) {
+      if (!assets.has(identity)) {
+        assets.set(identity, { applicationId, href, rel })
+      }
+    }
+  }
+  return [...assets.values()]
+}
+
 /** Map only final Vue-rendered module ids through Vite's authoritative manifest. */
 export const resolveRenderedApplicationAssets = (options: {
   applicationId: string
   moduleIds: readonly string[]
   base: string
   manifest: SsrViteManifest
-}): SsrRenderedApplicationAsset[] => {
-  const assets = new Map<string, SsrRenderedApplicationAsset>()
-  for (const moduleId of options.moduleIds) {
-    const manifestKey = moduleCandidates(moduleId).find((candidate) =>
-      Object.hasOwn(options.manifest, candidate)
-    )
-    if (!manifestKey) {
-      throw new Error(
-        `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's SSR manifest for application ${JSON.stringify(options.applicationId)}.`
-      )
-    }
-    for (const file of options.manifest[manifestKey]) {
-      const rel = STYLESHEET_ASSET_RE.test(file)
-        ? 'stylesheet'
-        : JAVASCRIPT_ASSET_RE.test(file)
-          ? 'modulepreload'
-          : undefined
-      if (!rel) continue
-      const href = joinAssetBase(options.base, file)
-      const identity = `${rel}:${href}`
-      if (!assets.has(identity)) {
-        assets.set(identity, {
-          applicationId: options.applicationId,
-          href,
-          rel,
-        })
-      }
-    }
+}): SsrRenderedApplicationAsset[] => collectRenderedAssets(options.applicationId, options.moduleIds, (id) => {
+  const key = moduleCandidates(id).find((candidate) => Object.hasOwn(options.manifest, candidate))
+  return key ? prepareManifestModule(options.manifest[key], options.base) : undefined
+})
+
+/** Prepare immutable manifest relationships at server startup. Request-specific
+ * rendered module IDs still determine the exact asset selection and order. */
+export const createSsrRenderedAssetResolver = (manifest: SsrViteManifest, base: string) => {
+  const modules = new Map(Object.entries(manifest).map(([id, files]) =>
+    [id, prepareManifestModule(files, base)] as const
+  ))
+  const resolveModule = (id: string) => {
+    const key = moduleCandidates(id).find((candidate) => modules.has(candidate))
+    return key ? modules.get(key) : undefined
   }
-  return [...assets.values()]
+  return (applicationId: string, moduleIds: readonly string[]) =>
+    collectRenderedAssets(applicationId, moduleIds, resolveModule)
 }
