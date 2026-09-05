@@ -2,7 +2,7 @@ import { defineServer } from 'vue-ssr-lite'
 import { siteSeo } from './src/seo/site'
 import { sitemap } from './src/seo/sitemap'
 import { robots } from './src/seo/robots'
-import { loggerMiddleware } from './src/loggerMiddleware'
+import { loggerMiddleware } from './src/middleware/loggerMiddleware'
 export default defineServer({
   render: 'ssr',
 
