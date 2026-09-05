@@ -1,3 +1,4 @@
+import { readSsrHtmlAttributes, readSsrHtmlStartTag } from '../SsrHtmlParsing'
 import {
   serializeManagedHead,
   type ManagedHeadSnapshot,
@@ -8,6 +9,7 @@ import {
   serializeSsrState,
 } from '../SsrSerialization'
 import type { SsrHydrationState } from '../SsrRuntimeTypes'
+import { readSsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import {
   SSR_DEVELOPMENT_RENDERED_STYLESHEET_ATTRIBUTE,
   type SsrRenderedApplicationAsset,
@@ -44,47 +46,14 @@ interface SsrHtmlElementStart {
 }
 
 const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'textarea', 'title'])
+const RAW_TEXT_CLOSING = new Map([...RAW_TEXT_ELEMENTS].map((name) =>
+  [name, new RegExp(`<\\/\\s*${name}\\s*>`, 'ig')] as const
+))
 
-const readElementIds = (attributes: string): string[] => {
-  const ids: string[] = []
-  let index = 0
-  while (index < attributes.length) {
-    while (/\s|\//.test(attributes[index] || '')) index += 1
-    const nameStart = index
-    while (index < attributes.length && !/[\s=/>]/.test(attributes[index])) {
-      index += 1
-    }
-    if (index === nameStart) {
-      index += 1
-      continue
-    }
-    const name = attributes.slice(nameStart, index).toLowerCase()
-    while (/\s/.test(attributes[index] || '')) index += 1
-    let value = ''
-    if (attributes[index] === '=') {
-      index += 1
-      while (/\s/.test(attributes[index] || '')) index += 1
-      const quote = attributes[index]
-      if (quote === '"' || quote === "'") {
-        index += 1
-        const valueStart = index
-        while (index < attributes.length && attributes[index] !== quote) {
-          index += 1
-        }
-        value = attributes.slice(valueStart, index)
-        if (attributes[index] === quote) index += 1
-      } else {
-        const valueStart = index
-        while (index < attributes.length && !/[\s>]/.test(attributes[index])) {
-          index += 1
-        }
-        value = attributes.slice(valueStart, index)
-      }
-    }
-    if (name === 'id') ids.push(value)
-  }
-  return ids
-}
+const readElementIds = (attributes: string): string[] =>
+  !/\bid\b/i.test(attributes) ? [] : readSsrHtmlAttributes(attributes)
+    .filter(([name]) => name === 'id')
+    .map(([, value]) => value)
 
 /**
  * Locate real start tags without treating attribute-name suffixes or raw-text
@@ -107,37 +76,17 @@ const scanSsrHtmlElementStarts = (source: string): SsrHtmlElementStart[] => {
       continue
     }
 
-    let nameEnd = start + 2
-    while (/[A-Za-z0-9:-]/.test(source[nameEnd] || '')) nameEnd += 1
-    const tagName = source.slice(start + 1, nameEnd)
-    let end = nameEnd
-    let quote = ''
-    while (end < source.length) {
-      const character = source[end]
-      if (quote) {
-        if (character === quote) quote = ''
-      } else if (character === '"' || character === "'") {
-        quote = character
-      } else if (character === '>') {
-        break
-      }
-      end += 1
-    }
-    if (end >= source.length) break
-    end += 1
-    elements.push({
-      tagName,
-      end,
-      attributes: source.slice(nameEnd, end - 1),
-      ids: readElementIds(source.slice(nameEnd, end - 1)),
-    })
+    const tag = readSsrHtmlStartTag(source, start)
+    if (!tag) break
+    const { name: tagName, end, attributes } = tag
+    elements.push({ tagName, end, attributes, ids: readElementIds(attributes) })
 
     const normalizedTag = tagName.toLowerCase()
     if (
       RAW_TEXT_ELEMENTS.has(normalizedTag) &&
-      !source.slice(nameEnd, end).trimEnd().endsWith('/>')
+      !attributes.endsWith('/')
     ) {
-      const closing = new RegExp(`<\\/\\s*${normalizedTag}\\s*>`, 'ig')
+      const closing = RAW_TEXT_CLOSING.get(normalizedTag)!
       closing.lastIndex = end
       const match = closing.exec(source)
       index = match ? closing.lastIndex : source.length
@@ -330,6 +279,7 @@ const serializeSsrRenderedAssets = (
   source: string,
   assets: readonly SsrRenderedApplicationAsset[]
 ): string => {
+  if (!assets.length) return ''
   const existing = new Set<string>()
   for (const element of scanSsrHtmlElementStarts(source)) {
     const tagName = element.tagName.toLowerCase()
@@ -472,8 +422,10 @@ export const injectSsrHtml = (
       throw new Error(`Transformed SSR template is missing marker ${marker}.`)
     }
   }
+  const finishSerialization = readSsrPhaseTimings(injection)?.start('HTML state serialization')
   const stateId = getSsrStateElementId(injection.applicationId)
   const stateScript = `<script id="${escapeSsrHtml(stateId)}" type="application/json">${serializeSsrState(injection.state)}</script>`
+  finishSerialization?.()
   const snapshot = injection.head ?? { tags: [] }
   const documentTemplate = stripConflictingStaticTags(template, snapshot)
   const managedHead = serializeManagedHead(snapshot)
