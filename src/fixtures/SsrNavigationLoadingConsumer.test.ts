@@ -35,6 +35,7 @@ let fixtureRoot = ''
 let linkedPackageRoot = ''
 let clientOutDir = ''
 let restoreBrowserGlobals: (() => void) | undefined
+let releaseMiddlewareGates: (() => void) | undefined
 let dom: JSDOM | undefined
 
 const importDevelopmentRuntime = async (server: ViteDevServer) => {
@@ -54,14 +55,15 @@ const importDevelopmentRuntime = async (server: ViteDevServer) => {
 const waitFor = async (
   condition: () => boolean,
   message: string,
-  timeout = 2_000
+  timeout = 2_000,
+  diagnostics?: () => string
 ) => {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     if (condition()) return
     await new Promise<void>((resolve) => setTimeout(resolve, 5))
   }
-  throw new Error(message)
+  throw new Error(diagnostics ? `${message}\n${diagnostics()}` : message)
 }
 
 const browserExecutable = [
@@ -256,7 +258,16 @@ const runChromiumNavigationRegression = async (
         if (await evaluate<boolean>(expression)) return
         await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20))
       }
-      throw new Error(message)
+      const state = await evaluate<Record<string, unknown>>(
+        `({
+          url: location.href,
+          pendingMiddleware: window.__vsslMiddlewareResolvers?.length ?? null,
+          fallback: Boolean(document.querySelector('.page-skeleton')),
+          indicator: Boolean(document.querySelector('.vssl-loading-indicator')),
+          routeContent: document.querySelector('.route-content')?.innerHTML ?? null
+        })`
+      )
+      throw new Error(`${message}\n${JSON.stringify({ ...state, browserMessages }, null, 2)}`)
     }
 
     await waitForExpression(
@@ -401,11 +412,34 @@ const runChromiumNavigationRegression = async (
       `Boolean(document.querySelector('.about-page')) && ${noLoading}`,
       'Chromium navigation was stuck after rapid async routes.'
     )
+    await evaluate(
+      `(() => {
+        window.__vsslMiddlewareResolvers = []
+        window.__VSSL_WAIT_FOR_MIDDLEWARE__ = () => new Promise(resolve => {
+          window.__vsslMiddlewareResolvers.push(resolve)
+        })
+      })()`
+    )
+    const middlewareLoading =
+      `window.__vsslMiddlewareResolvers.length === 1 && ` +
+      `Boolean(document.querySelector('.page-skeleton')) && ` +
+      `Boolean(document.querySelector('.vssl-loading-indicator'))`
+    const releaseMiddleware = async () => {
+      const released = await evaluate<boolean>(
+        `(() => {
+          if (window.__vsslMiddlewareResolvers.length !== 1) return false
+          window.__vsslMiddlewareResolvers.shift()()
+          return true
+        })()`
+      )
+      expect(released).toBe(true)
+    }
     await click('.dashboard-link')
     await waitForExpression(
-      `Boolean(document.querySelector('.page-skeleton'))`,
+      middlewareLoading,
       'Chromium did not show the slow middleware fallback.'
     )
+    await releaseMiddleware()
     await waitForExpression(
       `document.querySelector('.dashboard-page')?.dataset.authRuns === '1' && ` +
         noLoading,
@@ -425,7 +459,7 @@ const runChromiumNavigationRegression = async (
     )
     await click('.dashboard-link')
     await waitForExpression(
-      `Boolean(document.querySelector('.page-skeleton'))`,
+      middlewareLoading,
       'Chromium did not show the superseded fallback.'
     )
     await click('.settings-link')
@@ -433,6 +467,7 @@ const runChromiumNavigationRegression = async (
       `Boolean(document.querySelector('.settings-page')) && ${noLoading}`,
       'Chromium superseding Settings navigation did not settle.'
     )
+    await releaseMiddleware()
     await click('.about-link')
     await waitForExpression(
       `Boolean(document.querySelector('.about-page')) && ${noLoading}`,
@@ -443,18 +478,33 @@ const runChromiumNavigationRegression = async (
     )
     await click('.dashboard-link')
     await waitForExpression(
+      middlewareLoading,
+      'Chromium did not show both loading UIs before the middleware redirect.'
+    )
+    await releaseMiddleware()
+    await waitForExpression(
       `Boolean(document.querySelector('.login-page')) && ${noLoading}`,
       'Chromium middleware redirect did not settle on Login.'
     )
+    await evaluate(
+      `window.__vsslAcceptedLogin = document.querySelector('.login-page')`
+    )
     await click('.dashboard-link')
     await waitForExpression(
-      `Boolean(document.querySelector('.page-skeleton'))`,
+      middlewareLoading,
       'Chromium did not show loading for the redirect back to current Login.'
     )
+    expect(
+      await evaluate<boolean>(
+        `location.pathname === '/login' && location.search === '?redirect=/dashboard' && ` +
+          `!document.querySelector('.login-page')`
+      )
+    ).toBe(true)
+    await releaseMiddleware()
     await waitForExpression(
       `location.pathname === '/login' && ` +
         `location.search === '?redirect=/dashboard' && ` +
-        `Boolean(document.querySelector('.login-page')) && ${noLoading}`,
+        `document.querySelector('.login-page') === window.__vsslAcceptedLogin && ${noLoading}`,
       'Chromium redirect back to current Login did not settle loading.'
     )
     await evaluate('history.back()')
@@ -481,9 +531,10 @@ const runChromiumNavigationRegression = async (
     )
     await click('.cancelled-link')
     await waitForExpression(
-      `Boolean(document.querySelector('.page-skeleton'))`,
+      middlewareLoading,
       'Chromium did not show the cancellation fallback.'
     )
+    await releaseMiddleware()
     await waitForExpression(
       `Boolean(document.querySelector('.about-page')) && ` +
         `document.querySelector('.about-note')?.value === 'chromium state' && ${noLoading}`,
@@ -570,6 +621,8 @@ const installBrowserGlobals = (window: JSDOM['window']) => {
 }
 
 afterEach(async () => {
+  releaseMiddlewareGates?.()
+  releaseMiddlewareGates = undefined
   restoreBrowserGlobals?.()
   restoreBrowserGlobals = undefined
   dom?.window.close()
@@ -878,6 +931,42 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(assigned).not.toHaveBeenCalled()
     expect(replaced).not.toHaveBeenCalled()
 
+    const middlewareResolvers: Array<() => void> = []
+    const fixtureWindow = dom.window as typeof dom.window & {
+      __VSSL_WAIT_FOR_MIDDLEWARE__?: () => Promise<void>
+    }
+    fixtureWindow.__VSSL_WAIT_FOR_MIDDLEWARE__ = () =>
+      new Promise<void>((resolveMiddleware) => {
+        middlewareResolvers.push(resolveMiddleware)
+      })
+    releaseMiddlewareGates = () => {
+      delete fixtureWindow.__VSSL_WAIT_FOR_MIDDLEWARE__
+      for (const resolveMiddleware of middlewareResolvers.splice(0)) {
+        resolveMiddleware()
+      }
+    }
+    const middlewareLoading = () =>
+      middlewareResolvers.length === 1 &&
+      Boolean(dom!.window.document.querySelector('.page-skeleton')) &&
+      Boolean(dom!.window.document.querySelector('.vssl-loading-indicator'))
+    const waitForMiddlewareLoading = (message: string) =>
+      waitFor(middlewareLoading, message, 2_000, () =>
+        JSON.stringify({
+          url: dom!.window.location.href,
+          pendingMiddleware: middlewareResolvers.length,
+          fallback: Boolean(dom!.window.document.querySelector('.page-skeleton')),
+          indicator: Boolean(dom!.window.document.querySelector('.vssl-loading-indicator')),
+          routeContent: dom!.window.document.querySelector('.route-content')?.innerHTML,
+          warnings: warnings.map((values) => values.map(String)),
+          errors: errors.map((values) => values.map(String)),
+          jsdomErrors: jsdomErrors.map(String),
+        }, null, 2)
+      )
+    const releaseMiddleware = () => {
+      expect(middlewareResolvers).toHaveLength(1)
+      middlewareResolvers.shift()!()
+    }
+
     const click = new dom.window.MouseEvent('click', {
       bubbles: true,
       cancelable: true,
@@ -886,10 +975,7 @@ describe('linked-package real SFC navigation loading consumer', () => {
     dashboardLink.dispatchEvent(click)
 
     expect(click.defaultPrevented).toBe(true)
-    await waitFor(
-      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
-      'The route-area fallback did not appear.'
-    )
+    await waitForMiddlewareLoading('The route-area fallback did not appear.')
     expect(dom.window.document.querySelector('.about-page')).toBeNull()
     expect(dom.window.document.querySelector('.persistent-header')).toBe(
       header
@@ -901,6 +987,7 @@ describe('linked-package real SFC navigation loading consumer', () => {
       dom.window.document.querySelector('.vssl-loading-indicator')
     ).not.toBeNull()
 
+    releaseMiddleware()
     await waitFor(
       () => Boolean(dom!.window.document.querySelector('.dashboard-page')),
       'The Dashboard route did not finish rendering.'
@@ -994,8 +1081,7 @@ describe('linked-package real SFC navigation loading consumer', () => {
     })
     dashboardLink.dispatchEvent(supersededClick)
     expect(supersededClick.defaultPrevented).toBe(true)
-    await waitFor(
-      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
+    await waitForMiddlewareLoading(
       'The superseded Dashboard fallback did not appear.'
     )
     const supersededObserver = new dom.window.MutationObserver(() => {
@@ -1022,9 +1108,13 @@ describe('linked-package real SFC navigation loading consumer', () => {
       'The superseding Settings navigation did not render.'
     )
     await waitFor(
-      () => !dom!.window.document.querySelector('.page-skeleton'),
+      () =>
+        !dom!.window.document.querySelector('.page-skeleton') &&
+        !dom!.window.document.querySelector('.vssl-loading-indicator'),
       'The superseding Settings navigation did not settle its fallback.'
     )
+    // The discarded work may finish late, but has no presentation authority.
+    releaseMiddleware()
     supersededObserver.disconnect()
     expect(supersededLoadingDisappeared).toBe(false)
     expect(dom.window.document.querySelector('.dashboard-page')).toBeNull()
@@ -1067,11 +1157,11 @@ describe('linked-package real SFC navigation loading consumer', () => {
     })
     dashboardLink.dispatchEvent(unauthenticatedClick)
     expect(unauthenticatedClick.defaultPrevented).toBe(true)
-    await waitFor(
-      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
+    await waitForMiddlewareLoading(
       'The redirect transaction fallback did not appear.'
     )
     loadingStarted = true
+    releaseMiddleware()
     await waitFor(
       () => Boolean(dom!.window.document.querySelector('.login-page')),
       'The middleware redirect did not render Login.'
@@ -1099,10 +1189,13 @@ describe('linked-package real SFC navigation loading consumer', () => {
     })
     dashboardLink.dispatchEvent(redirectToCurrentClick)
     expect(redirectToCurrentClick.defaultPrevented).toBe(true)
-    await waitFor(
-      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
+    await waitForMiddlewareLoading(
       'The redirect back to current Login did not show its fallback.'
     )
+    expect(dom.window.document.querySelector('.login-page')).toBeNull()
+    expect(dom.window.location.pathname).toBe('/login')
+    expect(dom.window.location.search).toBe('?redirect=/dashboard')
+    releaseMiddleware()
     await waitFor(
       () =>
         !dom!.window.document.querySelector('.page-skeleton') &&
@@ -1142,10 +1235,8 @@ describe('linked-package real SFC navigation loading consumer', () => {
     })
     cancelledLink.dispatchEvent(cancellationClick)
     expect(cancellationClick.defaultPrevented).toBe(true)
-    await waitFor(
-      () => Boolean(dom!.window.document.querySelector('.page-skeleton')),
-      'The cancellation fallback did not appear.'
-    )
+    await waitForMiddlewareLoading('The cancellation fallback did not appear.')
+    releaseMiddleware()
     await waitFor(
       () =>
         !dom!.window.document.querySelector('.page-skeleton') &&
@@ -1205,6 +1296,12 @@ describe('linked-package real SFC navigation loading consumer', () => {
       })
       link.dispatchEvent(repeatedClick)
       expect(repeatedClick.defaultPrevented).toBe(true)
+      if (link === dashboardLink) {
+        await waitForMiddlewareLoading(
+          `${label} did not show both loading UIs.`
+        )
+        releaseMiddleware()
+      }
       await waitFor(
         () => Boolean(dom!.window.document.querySelector(page)),
         `${label} navigation did not render.`
@@ -1217,6 +1314,9 @@ describe('linked-package real SFC navigation loading consumer', () => {
       )
     }
 
+    expect(middlewareResolvers).toHaveLength(0)
+    releaseMiddlewareGates()
+    releaseMiddlewareGates = undefined
     expect(documentRequests).toEqual(['/', '/products'])
     // Undici's Node WebSocket requires Node's Event constructor. The JSDOM
     // navigation phase is complete, so restore host globals before CDP.
