@@ -1,12 +1,13 @@
+import { readSsrHtmlAttributes, readSsrHtmlStartTag } from '../SsrHtmlParsing'
 import type {
   EnvironmentModuleNode,
   HtmlTagDescriptor,
+  TransformResult,
   ViteDevServer,
 } from 'vite'
 import { isCSSRequest, normalizePath } from 'vite'
 import { parse } from 'es-module-lexer'
 import { relative } from 'node:path'
-import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   SSR_DEVELOPMENT_STYLESHEET_ATTRIBUTE,
   type SsrRenderedApplicationAsset,
@@ -192,105 +193,145 @@ export const readEagerViteImports = async (
   readEagerViteImportsFromCode(server, module, module.transformResult?.code)
 
 interface SsrViteAssetGraphAnalysis {
-  transformedCode: Map<EnvironmentModuleNode, string>
   eagerDependencies: Map<
     EnvironmentModuleNode,
     readonly EnvironmentModuleNode[]
   >
+  stylesheets: {
+    href: string
+    identity: string | undefined
+    renderedHref: string
+    renderedIdentity: string | undefined
+  }[]
+  isCurrent: () => boolean
 }
 
-interface SsrViteAssetResolutionContext {
-  analyses: WeakMap<
-    ViteDevServer,
-    Map<string, SsrViteAssetGraphAnalysis>
-  >
+interface SsrViteEagerEdge {
+  isCurrent: () => boolean
+  dependencies: Promise<EnvironmentModuleNode[]>
 }
 
-const assetResolutionContext =
-  new AsyncLocalStorage<SsrViteAssetResolutionContext>()
+interface SsrViteEagerGraphStore {
+  edges: WeakMap<EnvironmentModuleNode, SsrViteEagerEdge>
+  graphs: WeakMap<EnvironmentModuleNode, {
+    isCurrent: () => boolean
+    work: Promise<SsrViteAssetGraphAnalysis>
+  }>
+}
 
-/** Keep graph analysis request-local while sharing it between template and
- * rendered-style discovery for the same application. */
+// These stores contain only Vite code/dependency metadata. They are owned by
+// an environment, so a Vite restart cannot retain its old graph. No HTML,
+// rendered module selection, or application/request state is stored here.
+// vite.config may bundle the plugin separately from the managed server. Own
+// the store on Vite's environment so both copies join the same preparation.
+const EAGER_GRAPH_STORE = Symbol.for('vue-ssr-lite.internal.vite-eager-graph')
+const getEagerGraphStore = (environment: ViteDevServer['environments']['client']) => {
+  const owner = environment as typeof environment & { [EAGER_GRAPH_STORE]?: SsrViteEagerGraphStore }
+  let store = owner[EAGER_GRAPH_STORE]
+  if (!store) {
+    store = { edges: new WeakMap(), graphs: new WeakMap() }
+    Object.defineProperty(owner, EAGER_GRAPH_STORE, { value: store })
+  }
+  return store
+}
+
+const resolveSsrViteEagerEdge = (
+  server: ViteDevServer,
+  module: EnvironmentModuleNode,
+  entryTransform?: TransformResult
+): SsrViteEagerEdge => {
+  const environment = server.environments.client
+  const store = getEagerGraphStore(environment)
+  const existing = store.edges.get(module)
+  if (existing?.isCurrent()) return existing
+  const invalidation = module.lastInvalidationTimestamp
+  const hmr = module.lastHMRTimestamp
+  let pending = true
+  let transform: TransformResult | null | undefined
+  let importedModules: EnvironmentModuleNode['importedModules'] | undefined
+  const isCurrent = () => server.environments.client === environment &&
+    module.lastInvalidationTimestamp === invalidation && module.lastHMRTimestamp === hmr &&
+    (!module.id || environment.moduleGraph.getModuleById(module.id) === module) &&
+    (pending || (module.transformResult === transform && module.importedModules === importedModules))
+  const dependencies = (async () => {
+    // Publish the entire transform + edge analysis as one shared operation.
+    // Overlapping roots must not independently transform the same cold child.
+    // Vite also coalesces this call with browser requests and revalidates HMR.
+    transform = entryTransform ?? module.transformResult ?? await environment.transformRequest(module.url)
+    if (!transform) {
+      throw new Error(`vue-ssr-lite cannot inspect eager imports for untransformed Vite module ${module.url}.`)
+    }
+    importedModules = module.importedModules
+    const result = await readEagerViteImportsFromCode(server, module, transform.code)
+    pending = false
+    return result
+  })()
+  const edge = { isCurrent, dependencies }
+  store.edges.set(module, edge)
+  void dependencies.catch(() => {
+    if (store.edges.get(module) === edge) store.edges.delete(module)
+  })
+  return edge
+}
+
+/** @internal Kept for transport callers; graph metadata now has Vite ownership. */
 export const runWithSsrViteAssetResolutionContext = <T>(
   work: () => T
-): T => assetResolutionContext.run({ analyses: new WeakMap() }, work)
+): T => work()
 
-const resolveSsrViteAssetGraphAnalysis = (
-  server: ViteDevServer,
-  applicationId: string
-): SsrViteAssetGraphAnalysis => {
-  const context = assetResolutionContext.getStore()
-  if (!context) {
-    return {
-      transformedCode: new Map(),
-      eagerDependencies: new Map(),
-    }
-  }
-  let applications = context.analyses.get(server)
-  if (!applications) {
-    applications = new Map()
-    context.analyses.set(server, applications)
-  }
-  let analysis = applications.get(applicationId)
-  if (!analysis) {
-    analysis = {
-      transformedCode: new Map(),
-      eagerDependencies: new Map(),
-    }
-    applications.set(applicationId, analysis)
-  }
-  return analysis
-}
-
-const transformEagerModuleGraph = async (
+const resolveSsrViteEagerGraph = (
   server: ViteDevServer,
   entryModule: EnvironmentModuleNode,
-  transformedCode = new Map<EnvironmentModuleNode, string>(),
-  eagerDependencies = new Map<
-    EnvironmentModuleNode,
-    readonly EnvironmentModuleNode[]
-  >()
-): Promise<void> => {
+  entryTransform?: TransformResult
+): Promise<SsrViteAssetGraphAnalysis> => {
   const environment = server.environments.client
-  const visited = new Set<EnvironmentModuleNode>([entryModule])
-  const resolveDependencies = async (
-    module: EnvironmentModuleNode
-  ): Promise<readonly EnvironmentModuleNode[]> => {
-    const cached = eagerDependencies.get(module)
-    if (cached) return cached
-    // Dependency optimization can invalidate a graph node while its request is
-    // completing. The returned transform is still the usable result for this
-    // traversal, even when Vite intentionally leaves transformResult unset.
-    let code = transformedCode.get(module) ?? module.transformResult?.code
-    if (code == null) {
-      code = (await environment.transformRequest(module.url))?.code
-    }
-    if (code != null) transformedCode.set(module, code)
-    const dependencies = await readEagerViteImportsFromCode(server, module, code)
-    eagerDependencies.set(module, dependencies)
-    return dependencies
-  }
+  const store = getEagerGraphStore(environment)
+  const existing = store.graphs.get(entryModule)
+  if (existing?.isCurrent()) return existing.work
+  const checks: (() => boolean)[] = []
+  const isCurrent = () => server.environments.client === environment &&
+    checks.every((check) => check())
+  const analysis: SsrViteAssetGraphAnalysis = { eagerDependencies: new Map(), stylesheets: [], isCurrent }
+  const visited = new Set<EnvironmentModuleNode>()
   const visit = async (module: EnvironmentModuleNode): Promise<void> => {
-    const dependencies = (await resolveDependencies(module)).filter(
-      (dependency) => !visited.has(dependency)
-    )
-    await Promise.all(
-      dependencies.map(async (dependency) => {
-        visited.add(dependency)
-        await visit(dependency)
-      })
-    )
+    if (visited.has(module)) return
+    visited.add(module)
+    // A shared graph traversal awaits only transforms it actually needs.
+    // Never follow Vite's dynamic edges or wait for unrelated client work.
+    const edge = resolveSsrViteEagerEdge(server, module, module === entryModule ? entryTransform : undefined)
+    checks.push(edge.isCurrent)
+    const dependencies = await edge.dependencies
+    analysis.eagerDependencies.set(module, dependencies)
+    await Promise.all(dependencies.map(visit))
   }
-  await visit(entryModule)
-}
-
-const toApplicationStylesheet = (
-  applicationId: string,
-  module: EnvironmentModuleNode
-): SsrApplicationStylesheet | undefined => {
-  const id = module.id ?? module.url
-  if (!isViteStylesheetModule(id)) return undefined
-  return { applicationId, href: module.url }
+  const work = visit(entryModule).then(() => {
+    const collected = new Set<EnvironmentModuleNode>()
+    const collect = (module: EnvironmentModuleNode) => {
+      if (collected.has(module)) return
+      collected.add(module)
+      if (isViteStylesheetModule(module.id ?? module.url)) {
+        const href = module.url
+        const renderedHref = applyViteBase(href, server.config.base)
+        analysis.stylesheets.push({
+          href,
+          identity: normalizeViteAssetUrl(href),
+          renderedHref,
+          renderedIdentity: normalizeViteAssetUrl(renderedHref, { base: server.config.base }),
+        })
+      }
+      for (const dependency of analysis.eagerDependencies.get(module) ?? []) collect(dependency)
+    }
+    collect(entryModule)
+    return analysis
+  })
+  const record = { isCurrent, work }
+  store.graphs.set(entryModule, record)
+  void work.catch(() => {
+    if (store.graphs.get(entryModule) === record) store.graphs.delete(entryModule)
+  })
+  // If the optimizer invalidated a transform while returning it, that result
+  // still serves this traversal, but isCurrent prevents reusing it next time.
+  return work
 }
 
 /**
@@ -319,33 +360,16 @@ export const resolveApplicationStyleDependencies = async (
   // `transformRequest` completes the entry's module-graph update. The eager
   // traversal then awaits every missing dependency transform it discovers, so
   // a global wait for unrelated client-environment requests is unnecessary.
-  const analysis = resolveSsrViteAssetGraphAnalysis(server, applicationId)
-  analysis.transformedCode.set(entryModule, transformed.code)
-  await transformEagerModuleGraph(
-    server,
-    entryModule,
-    analysis.transformedCode,
-    analysis.eagerDependencies
-  )
+  const analysis = await resolveSsrViteEagerGraph(server, entryModule, transformed)
   const styles = new Map<string, SsrApplicationStylesheet>()
-  const visited = new Set<EnvironmentModuleNode>()
   // Preserve Vite's eager import order so the initial stylesheet cascade
   // matches client module evaluation. Dynamic edges are intentionally omitted;
-  // future route CSS can be layered onto this application asset boundary once
-  // request-specific SSR module usage is available.
-  const collectStyles = async (module: EnvironmentModuleNode): Promise<void> => {
-    if (visited.has(module)) return
-    visited.add(module)
-    const stylesheet = toApplicationStylesheet(applicationId, module)
-    const identity = stylesheet && normalizeViteAssetUrl(stylesheet.href)
-    if (stylesheet && identity && !styles.has(identity)) {
-      styles.set(identity, stylesheet)
-    }
-    for (const dependency of analysis.eagerDependencies.get(module) ?? []) {
-      await collectStyles(dependency)
+  // selected route CSS belongs to the rendered-module asset boundary below.
+  for (const { href, identity } of analysis.stylesheets) {
+    if (identity && !styles.has(identity)) {
+      styles.set(identity, { applicationId, href })
     }
   }
-  await collectStyles(entryModule)
   return [...styles.values()]
 }
 
@@ -366,71 +390,78 @@ const renderedModuleUrls = (
   ])]
 }
 
+const resolveRenderedModuleGraph = async (
+  server: ViteDevServer,
+  moduleId: string,
+  applicationId?: string
+): Promise<SsrViteAssetGraphAnalysis> => {
+  const environment = server.environments.client
+  let module = environment.moduleGraph.getModuleById(moduleId)
+  for (const url of renderedModuleUrls(server, moduleId)) {
+    if (module) break
+    module = await environment.moduleGraph.getModuleByUrl(url)
+    // Once Vite supplies a node, let the shared edge operation own its cold
+    // transform. Using its canonical URL also joins Vite's browser work.
+    if (!module) {
+      try {
+        await environment.transformRequest(url)
+      } catch {
+        continue
+      }
+      module = await environment.moduleGraph.getModuleByUrl(url)
+    }
+  }
+  if (!module) {
+    throw new Error(
+      `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's client module graph${applicationId === undefined ? '' : ` for application ${JSON.stringify(applicationId)}`}.`
+    )
+  }
+  return resolveSsrViteEagerGraph(server, module)
+}
+
+/**
+ * Called when Vite actually transforms an SSR component, including a lazy
+ * component requested by Vue Router. Never inspect/invoke route loaders here.
+ * Preparing browser code runs alongside SSR compilation/evaluation; it does
+ * not execute client code, follow dynamic edges, or select response assets.
+ */
+export const prepareSsrViteComponentAssets = (server: ViteDevServer, moduleId: string): void => {
+  // Only component compilation units, not server/config modules or Vue query
+  // submodules. The full component's eager graph includes its scripts/styles.
+  if (!/\.(?:vue|jsx|tsx)$/.test(moduleId) || moduleId.startsWith('\0')) return
+  void resolveRenderedModuleGraph(server, moduleId).catch(() => {
+    // A speculative client transform must not fail SSR navigation or leave an
+    // unhandled rejection on cancellation/HMR/shutdown. Actual rendered asset
+    // resolution still awaits the graph and reports failures normally.
+  })
+}
+
 /** Resolve only CSS reachable from modules Vue reported in this request. */
 export const resolveRenderedStyleDependencies = async (
   server: ViteDevServer,
   applicationId: string,
   moduleIds: readonly string[]
 ): Promise<SsrRenderedApplicationAsset[]> => {
-  const environment = server.environments.client
-  const roots: EnvironmentModuleNode[] = []
-  const analysis = resolveSsrViteAssetGraphAnalysis(server, applicationId)
-  for (const moduleId of moduleIds) {
-    let module = environment.moduleGraph.getModuleById(moduleId)
-    for (const url of renderedModuleUrls(server, moduleId)) {
-      if (module) break
-      module = await environment.moduleGraph.getModuleByUrl(url)
-      if (!module?.transformResult) {
-        try {
-          await environment.transformRequest(url)
-        } catch {
-          continue
-        }
-        module = await environment.moduleGraph.getModuleByUrl(url)
-      }
-    }
-    if (!module) {
-      throw new Error(
-        `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's client module graph for application ${JSON.stringify(applicationId)}.`
-      )
-    }
-    if (!module.transformResult) {
-      const transformed = await environment.transformRequest(module.url)
-      if (transformed) analysis.transformedCode.set(module, transformed.code)
-    }
-    await transformEagerModuleGraph(
-      server,
-      module,
-      analysis.transformedCode,
-      analysis.eagerDependencies
-    )
-    roots.push(module)
-  }
+  // Start independent roots together so cold dependencies are discovered in
+  // the same Vite optimizer crawl, not serially after each preceding graph.
+  // Promise.all retains input order; completion order must not change CSS's
+  // cascade. Shared nodes join the same transform/edge analysis above.
+  const analyses = await Promise.all(moduleIds.map((moduleId) =>
+    resolveRenderedModuleGraph(server, moduleId, applicationId)
+  ))
   const assets = new Map<string, SsrRenderedApplicationAsset>()
-  const visited = new Set<EnvironmentModuleNode>()
-  const collect = async (module: EnvironmentModuleNode): Promise<void> => {
-    if (visited.has(module)) return
-    visited.add(module)
-    const stylesheet = toApplicationStylesheet(applicationId, module)
-    if (stylesheet) {
-      const href = applyViteBase(stylesheet.href, server.config.base)
-      const identity = normalizeViteAssetUrl(href, {
-        base: server.config.base,
-      })
+  for (const analysis of analyses) {
+    for (const { renderedHref: href, renderedIdentity: identity } of analysis.stylesheets) {
       if (identity && !assets.has(identity)) {
         assets.set(identity, {
-          ...stylesheet,
+          applicationId,
           href,
           rel: 'stylesheet',
           temporary: true,
         })
       }
     }
-    for (const dependency of analysis.eagerDependencies.get(module) ?? []) {
-      await collect(dependency)
-    }
   }
-  for (const root of roots) await collect(root)
   return [...assets.values()]
 }
 
@@ -440,6 +471,9 @@ interface HtmlStartTag {
 }
 
 const RAW_TEXT_HTML_ELEMENTS = new Set(['script', 'style', 'textarea', 'title'])
+const RAW_TEXT_HTML_CLOSING = new Map([...RAW_TEXT_HTML_ELEMENTS].map((name) =>
+  [name, new RegExp(`</${name}`, 'ig')] as const
+))
 
 const readHtmlStartTags = (html: string): HtmlStartTag[] => {
   const tags: HtmlStartTag[] = []
@@ -456,30 +490,19 @@ const readHtmlStartTags = (html: string): HtmlStartTag[] => {
       index = start + 1
       continue
     }
-    let nameEnd = start + 2
-    while (/[A-Za-z0-9:-]/.test(html[nameEnd] || '')) nameEnd += 1
-    let end = nameEnd
-    let quote = ''
-    while (end < html.length) {
-      const character = html[end]
-      if (quote) {
-        if (character === quote) quote = ''
-      } else if (character === '"' || character === "'") {
-        quote = character
-      } else if (character === '>') {
-        break
-      }
-      end += 1
-    }
-    if (end >= html.length) break
-    const name = html.slice(start + 1, nameEnd).toLowerCase()
-    const attributes = html.slice(nameEnd, end)
+    const tag = readSsrHtmlStartTag(html, start)
+    if (!tag) break
+    const { attributes } = tag
+    const name = tag.name.toLowerCase()
+    const end = tag.end - 1
     tags.push({
       name,
       attributes,
     })
     if (RAW_TEXT_HTML_ELEMENTS.has(name) && !attributes.trimEnd().endsWith('/')) {
-      const closingStart = html.toLowerCase().indexOf(`</${name}`, end + 1)
+      const closing = RAW_TEXT_HTML_CLOSING.get(name)!
+      closing.lastIndex = end + 1
+      const closingStart = closing.exec(html)?.index ?? -1
       const closingEnd = closingStart < 0 ? -1 : html.indexOf('>', closingStart)
       index = closingEnd < 0 ? html.length : closingEnd + 1
     } else {
@@ -491,34 +514,7 @@ const readHtmlStartTags = (html: string): HtmlStartTag[] => {
 
 const readHtmlAttributes = (source: string): Map<string, string> => {
   const attributes = new Map<string, string>()
-  let index = 0
-  while (index < source.length) {
-    while (/\s|\//.test(source[index] || '')) index += 1
-    const nameStart = index
-    while (index < source.length && !/[\s=/>]/.test(source[index])) index += 1
-    if (nameStart === index) {
-      index += 1
-      continue
-    }
-    const name = source.slice(nameStart, index).toLowerCase()
-    while (/\s/.test(source[index] || '')) index += 1
-    let value = ''
-    if (source[index] === '=') {
-      index += 1
-      while (/\s/.test(source[index] || '')) index += 1
-      const quote = source[index]
-      if (quote === '"' || quote === "'") {
-        index += 1
-        const valueStart = index
-        while (index < source.length && source[index] !== quote) index += 1
-        value = source.slice(valueStart, index)
-        if (source[index] === quote) index += 1
-      } else {
-        const valueStart = index
-        while (index < source.length && !/[\s>]/.test(source[index])) index += 1
-        value = source.slice(valueStart, index)
-      }
-    }
+  for (const [name, value] of readSsrHtmlAttributes(source)) {
     if (!attributes.has(name)) attributes.set(name, value)
   }
   return attributes
@@ -548,6 +544,7 @@ export const createSsrStylesheetLinkTags = (
   stylesheets: readonly SsrApplicationStylesheet[],
   options: { base: string; htmlPath: string }
 ): HtmlTagDescriptor[] => {
+  if (!stylesheets.length) return []
   const identities = readExistingStylesheetIdentities(
     html,
     options.base,
