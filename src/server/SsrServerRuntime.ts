@@ -592,8 +592,15 @@ export const createSsrManagedServer = async (
         },
         serveViteRequest: options.vite
           ? async () => {
-              await runViteMiddleware(options.vite!, request, response)
-              return response.writableEnded
+              const originalUrl = request.url
+              try {
+                await runViteMiddleware(options.vite!, request, response)
+                return response.writableEnded || response.destroyed
+              } finally {
+                // Vite strips its base and may rewrite module queries. A
+                // declined request must retain its application URL.
+                request.url = originalUrl
+              }
             }
           : undefined,
       })
