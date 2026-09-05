@@ -37,7 +37,7 @@ const consumerVersions = {
   vueRouter: process.env.SSR_SMOKE_VUE_ROUTER_VERSION || '4.6.4',
 }
 const FRAMEWORK_WARNING =
-  /inject\(\) can only be used|Symbol\(route location\)|resolveComponent can only be used|Non-function value encountered for default slot|missing template or render function|Hydration completed but contains mismatches|already been installed|reading ['"]meta['"]/i
+  /\[Vue Router warn\]: No match found for location|inject\(\) can only be used|Symbol\(route location\)|resolveComponent can only be used|Non-function value encountered for default slot|missing template or render function|Hydration completed but contains mismatches|already been installed|reading ['"]meta['"]/i
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(`[vue-ssr-lite] package smoke: ${message}`)
@@ -516,7 +516,7 @@ const assertResponse = async (origin, path, status, markers) => {
 const assertWarningFree = (output, label) => {
   assert(
     !FRAMEWORK_WARNING.test(output),
-    `${label} emitted a framework identity warning:\n${output}`
+    `${label} emitted a framework warning:\n${output}`
   )
 }
 
@@ -1258,6 +1258,14 @@ export default defineConfig({ base: '/app/', plugins: [vue(), vueSsrLite()] })
         await assertResponse(`http://127.0.0.1:${port}`, '/app/', 200, [
           'vue-ssr-lite-domain',
         ])
+        for (const path of [
+          '/app/@vite/client',
+          '/app/@vue-ssr-lite/client/app',
+          '/app/src/main.ts',
+        ]) {
+          await assertResponse(`http://127.0.0.1:${port}`, path, 200, [])
+        }
+        assertWarningFree(spaDev.output(), 'packed custom-base development resources')
       } finally {
         const shutdownMs = await stopCli(spaDev)
         console.log(`[vue-ssr-lite] custom-base SPA shutdown run ${run}: ${shutdownMs}ms`)
