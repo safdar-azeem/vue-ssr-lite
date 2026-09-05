@@ -215,6 +215,44 @@ describe('zero-config clean consumer fixture', () => {
     expect(hmrStylesheetModule?.code).toContain('import.meta.hot.accept')
   })
 
+  it.each(['/', '/app/', '/products/'])(
+    'serves development resources before runtime reload with base %s', async (base) => {
+      devServer = await createServer({
+        root: fixtureRoot,
+        configFile: join(fixtureRoot, 'vite.config.ts'),
+        base,
+        server: { middlewareMode: true, hmr: { server: createHttpServer() } },
+        appType: 'custom',
+      })
+      let runtimeLoads = 0
+      managedServer = await createSsrManagedServer({
+        production: false,
+        root: fixtureRoot,
+        vite: devServer,
+        loadRuntime: () => {
+          runtimeLoads += 1
+          return importEphemeralDevelopmentRuntime(devServer!)
+        },
+      })
+      await managedServer.listen()
+      const origin = `http://127.0.0.1:${managedServer.address().port}`
+      const initialLoads = runtimeLoads
+      for (const path of [
+        '@vite/client', '@vue-ssr-lite/client/app',
+        'src/main.ts', 'src/App.vue', 'src/style.css',
+      ]) {
+        const response = await fetch(`${origin}${base}${path}`)
+        expect(response.status).toBe(200)
+        await response.text()
+        expect(runtimeLoads).toBe(initialLoads)
+      }
+      const page = await fetch(`${origin}/lazy`, { headers: { accept: 'text/html' } })
+      expect(page.status).toBe(200)
+      expect(await page.text()).toContain('lazy-consumer')
+      expect(runtimeLoads).toBeGreaterThan(initialLoads)
+    }
+  )
+
   it('uses Vite development paths when configured with a CDN base', async () => {
     const cdnBase = 'https://cdn.example.com/products/'
     devServer = await createServer({
