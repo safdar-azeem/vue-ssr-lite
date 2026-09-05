@@ -535,6 +535,7 @@ describe('managed SSR server lifecycle', () => {
     const closeVite = vi.fn(async () => undefined)
     const vite = {
       close: closeVite,
+      middlewares: (_request: unknown, _response: unknown, next: () => void) => next(),
       transformIndexHtml: async (_url: string, html: string) => html,
     } as unknown as ViteDevServer
     managed = await createSsrManagedServer({
@@ -673,6 +674,39 @@ describe('managed SSR server lifecycle', () => {
     await managed.listen()
 
     await expect(managed.close()).rejects.toThrow('SSR server graceful shutdown timed out.')
+  })
+
+  it('restores the original application URL after Vite base rewriting falls through', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await writeFile(join(root, 'index.html'), '<html><body><div id="app"></div></body></html>')
+    const transformedUrls: string[] = []
+    const vite = {
+      close: vi.fn(async () => undefined),
+      middlewares: (
+        request: import('node:http').IncomingMessage,
+        _response: import('node:http').ServerResponse,
+        next: () => void
+      ) => {
+        request.url = '/users/john.smith?rewritten=true'
+        next()
+      },
+      transformIndexHtml: async (_url: string, html: string, originalUrl: string) => {
+        transformedUrls.push(originalUrl)
+        return html
+      },
+    } as unknown as ViteDevServer
+    managed = await createSsrManagedServer({
+      production: false, root, vite,
+      loadRuntime: async () => ({ default: spaConfig() }),
+    })
+    await managed.listen()
+    const response = await fetch(
+      `http://127.0.0.1:${managed.address().port}/products/users/john.smith?tab=profile`,
+      { headers: { accept: 'text/html' } }
+    )
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(transformedUrls).toEqual(['/products/users/john.smith?tab=profile'])
   })
 
   it('finishes request scope when Vite middleware owns the response', async () => {
