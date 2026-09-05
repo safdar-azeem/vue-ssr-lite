@@ -279,6 +279,12 @@ export const handleSsrRequest = async (
   let activeDefinition = runtime.fallbackDefinition()
 
   try {
+    // Vite's custom middleware stack owns development modules and public files.
+    // Only an explicit fallthrough may enter the application lifecycle; URL
+    // extensions and prefixes cannot establish resource ownership.
+    if (!runtime.production && runtime.serveViteRequest) {
+      if (await scope.run(runtime.serveViteRequest)) return undefined
+    }
     const definition = await scope.run(runtime.loadDefinition)
     activeDefinition = definition
     const serverOptions = definition.server
@@ -357,9 +363,6 @@ export const handleSsrRequest = async (
     }
     const entry = hostResolution.entry
     selectedEntryId = entry.id
-    const requestRender = entry.resolveRouteRender
-      ? await scope.run(() => entry.resolveRouteRender!(`${pathname}${requestUrl.search}`))
-      : entry.kind
     safeSsrLog(serverOptions.logger, 'debug', 'ssr.host_resolved', {
       entryId: entry.id,
       category: hostResolution.category,
@@ -426,7 +429,7 @@ export const handleSsrRequest = async (
         request: renderRequest,
         production: runtime.production,
         requireProductionOrigin: requiresProductionSeoOrigin(
-          requestRender === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
+          entry.kind === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
           entry.application?.seo
         ),
         allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
@@ -471,14 +474,6 @@ export const handleSsrRequest = async (
       ) {
         return undefined
       }
-    } else if (
-      runtime.serveViteRequest &&
-      (pathname.startsWith('/src/') ||
-        pathname.startsWith('/@') ||
-        pathname.includes('.') ||
-        pathname === '/__vite_ping')
-    ) {
-      if (await scope.run(runtime.serveViteRequest)) return undefined
     }
 
     if (!isHtmlNavigation(request, pathname)) {
@@ -488,6 +483,10 @@ export const handleSsrRequest = async (
         message: 'Resource not found.',
       })
     }
+
+    const requestRender = entry.resolveRouteRender
+      ? await scope.run(() => entry.resolveRouteRender!(`${pathname}${requestUrl.search}`))
+      : entry.kind
 
     const privateSeoHtml = requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
     const responseCache = requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
