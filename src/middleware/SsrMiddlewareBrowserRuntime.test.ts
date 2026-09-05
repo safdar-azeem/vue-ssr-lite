@@ -1651,9 +1651,14 @@ describe('browser middleware navigation', () => {
   })
 
   it('settles loading when middleware redirects back to the already-current route', async () => {
-    const gate = deferred()
+    const firstGate = deferred()
+    const redirectBackGate = deferred()
+    let redirectRuns = 0
     const redirect = defineMiddleware(async ({ to }) => {
-      await gate.promise
+      redirectRuns += 1
+      await (redirectRuns === 1
+        ? firstGate.promise
+        : redirectBackGate.promise)
       return {
         path: '/login',
         query: { redirect: to.fullPath },
@@ -1707,7 +1712,6 @@ describe('browser middleware navigation', () => {
       }
     )
     await created.router!.isReady()
-    await created.router!.push('/login?redirect=/dashboard')
     const mount = document.createElement('div')
     document.body.append(mount)
     created.app.mount(mount)
@@ -1717,7 +1721,17 @@ describe('browser middleware navigation', () => {
       created.hydration.dispose()
       mount.remove()
     }
+    const firstNavigation = created.router!.push('/dashboard')
+    await waitForVisualLoading()
+    expect(mount.querySelector('.page-loader')).not.toBeNull()
+    firstGate.resolve()
+    await firstNavigation
+    await waitForSuccessfulNavigationUi()
+    expect(created.router!.currentRoute.value.fullPath).toBe(
+      '/login?redirect=/dashboard'
+    )
     const login = mount.querySelector('.login-page')
+    expect(login).not.toBeNull()
     const assign = vi.fn()
     const replace = vi.fn()
     const location = window.location
@@ -1760,7 +1774,7 @@ describe('browser middleware navigation', () => {
     expect(mount.querySelector('.page-loader')).not.toBeNull()
     expect(mount.querySelector('.vssl-loading-indicator')).not.toBeNull()
 
-    gate.resolve()
+    redirectBackGate.resolve()
     await navigationSettled
     await nextTick()
     expect(created.router!.currentRoute.value.fullPath).toBe(
