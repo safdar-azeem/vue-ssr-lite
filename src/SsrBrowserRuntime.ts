@@ -5,6 +5,7 @@ import {
   START_LOCATION,
 } from 'vue-router'
 import { createSsrApplication } from './SsrApplicationRuntime'
+import { completeSsrBrowserHydration } from './SsrHydrationRuntime'
 import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
@@ -159,6 +160,7 @@ export const hydrateSsrApplication = async (
     // loading UI. Server markup remains visible until this hydration mount;
     // RouterView and LoadingIndicator observe subsequent navigations only.
     created.app.mount(options.mountSelector ?? '#app')
+    await completeSsrBrowserHydration(created.app, created.hydration)
     created.managedHead.hydrate(document.head)
     stateElement.remove()
   } catch (error) {
