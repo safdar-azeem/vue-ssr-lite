@@ -1778,24 +1778,100 @@ Guarantees:
 
 # 20. Implementation Ownership
 
-Add approximately:
+Implement `useFetch` as a self-contained feature module rather than placing all files directly inside `src/data/`.
+
+Recommended structure:
 
 ```text
 src/data/
-├── SsrFetchTypes.ts
-├── SsrFetchRuntime.ts
-├── useFetch.ts
-├── index.ts
-├── SsrFetchRuntime.test.ts
-└── useFetch.test.ts
+├── fetch/
+│   ├── composables/
+│   │   └── useFetch.ts
+│   │
+│   ├── runtime/
+│   │   ├── SsrFetchRuntime.ts
+│   │   ├── SsrFetchExecution.ts
+│   │   ├── SsrFetchCache.ts
+│   │   ├── SsrFetchHydration.ts
+│   │   └── SsrFetchIdentity.ts
+│   │
+│   ├── types/
+│   │   └── SsrFetchTypes.ts
+│   │
+│   ├── __tests__/
+│   │   ├── useFetch.test.ts
+│   │   ├── SsrFetchRuntime.test.ts
+│   │   ├── SsrFetchHydration.test.ts
+│   │   └── SsrFetchIdentity.test.ts
+│   │
+│   └── index.ts
+│
+└── index.ts
 ```
 
-Integrate with:
+### Module responsibilities
+
+```text
+composables/useFetch.ts
+→ public Vue composable
+→ refs / PromiseLike facade
+→ component-scope integration
+→ reactive URL / variables watching
+
+runtime/SsrFetchRuntime.ts
+→ application/request-owned fetch runtime
+→ FetchEntry / HookConsumer ownership
+→ runtime orchestration
+
+runtime/SsrFetchExecution.ts
+→ physical native fetch execution
+→ deduplication
+→ execution settlement
+→ request/consumer coordination
+→ cancellation plumbing
+
+runtime/SsrFetchCache.ts
+→ successful cache entries
+→ browser LRU
+→ cache commits / passive consumer propagation
+
+runtime/SsrFetchHydration.ts
+→ HydratedFetchRecord
+→ temporary HydrationRecordMap
+→ SSR serialization/restoration
+→ lazy browser cache adoption
+→ hydration cleanup
+
+runtime/SsrFetchIdentity.ts
+→ URL normalization
+→ variables → query construction
+→ public identity
+→ private runtime fingerprint
+→ same-origin/cross-origin normalization
+
+types/SsrFetchTypes.ts
+→ public and internal fetch types
+→ options
+→ result types
+→ callback contexts
+→ errors
+```
+
+The exact internal split may be adjusted when implementation requires it. Do not create tiny files merely for the sake of abstraction.
+
+The important architectural rule is:
+
+> `src/data/fetch/` owns the complete fetch feature. Root/application runtime files should only integrate or provide the feature, not contain fetch-domain implementation logic.
+
+### Existing integration points
+
+Integrate the feature with:
 
 ```text
 src/SsrApplicationRuntime.ts
 src/SsrHydrationRuntime.ts
 src/index.ts
+src/data/index.ts
 
 src/SsrPublicApi.test.ts
 src/SsrReleaseContract.test.ts
@@ -1806,19 +1882,38 @@ README.md
 examples/1-single-app/src/pages/ProductsPage.vue
 ```
 
-Create/provide the fetch runtime before root component setup.
+Responsibilities of these integration files should remain narrow:
 
-Reuse the existing hydration controller. Hold restored hydration records in a
-temporary `HydrationRecordMap` (scoped to the runtime instance) keyed by public
-identity until component setup derives the consumer's runtime fingerprint, then
-lazily adopt `record.cache` into the fingerprinted `FetchEntry` map. Clear
-`HydrationRecordMap` completely when the initial application hydration finishes,
-on hydration failure, or upon application disposal, while retaining adopted
-entries in the normal `FetchEntry` map.
+```text
+SsrApplicationRuntime.ts
+→ create/provide the fetch runtime for the application/request lifecycle
 
-Do not implement through the public extension API.
+SsrHydrationRuntime.ts
+→ connect the fetch module to the existing generic hydration lifecycle
 
-No module-global `Map`, singleton, or request state.
+src/index.ts
+→ expose approved public API only
+
+src/data/index.ts
+→ internal/public feature barrel as appropriate
+
+SsrPublicApi.test.ts
+→ verify public exports/contracts
+
+SsrReleaseContract.test.ts
+→ verify release/package contract
+
+SsrPackageArtifact.mjs
+→ ensure required public artifacts are packaged
+```
+
+Do not move generic application, hydration, server, or package infrastructure into the fetch module.
+
+Do not broadly reorganize unrelated existing repository files as part of `task-005`.
+
+Use senior engineering judgment for additional internal files only when they materially improve separation of concerns, maintainability, or correctness.
+
+No module-global `Map`, singleton cache, or cross-request state is allowed.
 
 ---
 
