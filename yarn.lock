@@ -1449,7 +1449,7 @@ vue-router@^4.6.4:
   dependencies:
     "@vue/devtools-api" "^6.6.4"
 
-vue@^3.5.40:
+vue@~3.5.40:
   version "3.5.40"
   resolved "https://registry.yarnpkg.com/vue/-/vue-3.5.40.tgz#c4a9d4c62f98ea33aa811a75c3fbd476dc782184"
   integrity sha512-+8PJ4SJXdn/cHGImF4CKdxlWHIN5Dkt7DoufRREM6h6uVCx2m7QxgcEQmmzyOK8A9mcafg7sFbJFYsdFVubTig==
