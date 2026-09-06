@@ -97,7 +97,7 @@ describe('repository release contract', () => {
     expect(manifest.engines?.node).toBe('^20.19.0 || >=22.12.0')
     expect(manifest.peerDependencies).toMatchObject({
       vite: '^7.0.0',
-      vue: '^3.5.0',
+      vue: '~3.5.0',
       'vue-router': '^4.6.0',
     })
     for (const range of Object.values({
@@ -201,8 +201,45 @@ describe('repository release contract', () => {
       expect(exampleManifest.dependencies?.['vue-ssr-lite']).toBe(
         manifest.version
       )
+      expect(exampleManifest.dependencies?.vue).toBe(manifest.peerDependencies?.vue)
       expect(lockfile).toContain(`vue-ssr-lite@${manifest.version}:`)
       expect(lockfile).not.toContain('vue-ssr-lite@1.0.0-rc.1:')
     }
+  })
+
+  it('ships first-party useFetch through the existing root entry without a separate query-client dependency', async () => {
+    const [entry, feature, readme, example, artifact] = await Promise.all([
+      readFile(join(repositoryRoot, 'src/index.ts'), 'utf8'),
+      readFile(join(repositoryRoot, 'src/data/fetch/index.ts'), 'utf8'),
+      readFile(join(repositoryRoot, 'README.md'), 'utf8'),
+      readFile(join(repositoryRoot, 'examples/1-single-app/src/pages/ProductsPage.vue'), 'utf8'),
+      readFile(join(repositoryRoot, 'scripts/SsrPackageArtifact.mjs'), 'utf8'),
+    ])
+    expect(entry).toContain("export { useFetch } from './data/index'")
+    expect(feature).toContain("export { useFetch } from './composables/useFetch'")
+    expect(feature).not.toContain('SsrFetchRuntime')
+    expect(readme).toContain('await useFetch()')
+    expect(readme).toContain('await refresh()')
+    expect(example).toContain('useFetch<ProductsResponse>')
+    expect(example).not.toContain('await fetch(')
+    expect(example).toContain("'/api/products'")
+    expect(example).not.toContain('dummyjson.com')
+    expect(artifact).toContain('UseFetchResult')
+    expect(artifact).toContain('RequiredFetchVariables')
+    const manifest = await readJson<PackageManifest>(join(repositoryRoot, 'package.json'))
+    for (const dependency of ['@tanstack/vue-query', '@vueuse/core', 'axios']) {
+      expect(manifest.dependencies).not.toHaveProperty(dependency)
+      expect(manifest.peerDependencies).not.toHaveProperty(dependency)
+    }
+  })
+
+  it('owns the Vue hydration compatibility range and exercises both supported endpoints in CI', async () => {
+    const manifest = await readJson<PackageManifest>(join(repositoryRoot, 'package.json'))
+    const workflow = await readFile(join(repositoryRoot, '.github/workflows/vue-hydration-compatibility.yml'), 'utf8')
+    expect(manifest.peerDependencies?.vue).toBe('~3.5.0')
+    expect(manifest.devDependencies?.vue).toBe('~3.5.40')
+    expect(workflow).toContain('3.5.0')
+    expect(workflow).toContain('~3.5.0')
+    expect(workflow).toContain('SsrVueHydrationCompatibility.test.ts')
   })
 })
