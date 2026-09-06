@@ -69,12 +69,15 @@ automatic execution decision**. It captures that decision when `useFetch()` is
 called and never changes what it waits for later.
 
 On SSR, `useFetch()` must start or join the initial execution immediately. The
-same promise is then observed in two ways:
+consumer's logical execution promise is then observed in two ways. It is not
+necessarily the entry's physical fetch promise:
 
 ```text
 useFetch()
  ↓
-start or join initial execution P immediately
+start or join physical entry promise
+ ↓
+create consumer execution promise P
  ├── register `() => P` with onServerPrefetch()
  └── PromiseLike.then() waits for P on SSR
 ```
@@ -83,6 +86,13 @@ start or join initial execution P immediately
 It must never be the mechanism that starts the request. This ordering is required
 to avoid a deadlock when async setup is currently waiting in `await
 useFetch()`.
+
+Each attached consumer receives its own logical execution promise even when
+multiple consumers share one physical entry promise. If consumer A cancels,
+A's promise settles immediately with cancellation state while the physical
+request and consumer B remain active. `onServerPrefetch()` and optional
+`await useFetch()` always observe the consumer promise, so cancelled async
+setup cannot remain suspended behind work it no longer owns.
 
 The `then()` behavior is fixed for the lifetime of the hook:
 
@@ -291,13 +301,32 @@ The enhanced `RouterView` must therefore not become the owner of useFetch networ
 
 # 4. Hydration
 
-SSR data must be serialized through the existing generic hydration system.
+SSR hydration must serialize consumer state separately from the entry's last
+successful shared cache value through the existing generic hydration system.
 
 Reserve one internal contribution key such as:
 
 ```text
 vue-ssr-lite:fetch
 ```
+
+The internal payload for one public hydration identity is:
+
+```ts
+interface HydratedFetchRecord {
+  state: {
+    data: unknown
+    pending: boolean
+    error: UseFetchError | null
+  }
+
+  cache?: {
+    data: unknown
+  }
+}
+```
+
+This is an internal hydration record, not public API.
 
 Flow:
 
@@ -317,15 +346,15 @@ hydration payload
 
 BROWSER
 
-restore fetch state BEFORE component setup
+restore fetch record BEFORE component setup
  ↓
 useFetch(same identity)
  ↓
-reuse SSR result
+restore consumer state for initial markup
  ↓
-pending=false
+seed successful cache independently when present
  ↓
-NO network request
+no hydration network request
  ↓
 NO callback replay
 ```
@@ -348,7 +377,94 @@ With:
 await useFetch(...)
 ```
 
-during hydration, `await` resolves immediately because restored data already exists.
+during hydration, `await` resolves immediately because the initial consumer
+state was restored.
+
+Handled SSR failures are also part of hydration continuation:
+
+```text
+SSR handled fetch error
+ ↓
+serialize safe UseFetchError
+ ↓
+browser hydration
+ ↓
+data    undefined
+pending false
+error   restored error
+ ↓
+NO duplicate request
+NO onError replay
+```
+
+The restored error is authoritative for the initial hydrated tree. It is not a
+cache hit itself, but an independent `cache.data` record may still seed a
+later `cache-first` consumer.
+
+Hydration-state and successful-cache restoration are deliberately independent:
+
+```text
+normal successful request V1
+→ state.data = V1
+→ cache.data = V1
+
+network-only consumer fails while cached success is V1
+→ state.data = undefined
+→ state.pending = false
+→ state.error = failure
+→ cache.data = V1
+
+handled initial failure with no successful cache
+→ state.error = failure
+→ cache omitted
+
+server:false
+→ state.data = undefined
+→ state.pending = true
+→ state.error = null
+→ cache omitted
+```
+
+On hydration, the common consumer `state` preserves SSR markup exactly. The
+optional `cache` seeds the browser entry separately and may satisfy a future
+`cache-first` consumer after hydration. Omit `cache` when no successful value
+exists.
+
+## Hydration identity and collision rule
+
+The hydration-visible identity is deliberately limited to serializable,
+non-secret information:
+
+```text
+method
+final normalized request URL (fragment removed, query canonical)
+explicit key namespace
+```
+
+Before dehydration, group entries and active SSR consumers by this public
+hydration identity. One `HydratedFetchRecord` may be emitted for an identity
+only when both conditions hold:
+
+1. every entry in the group has the same runtime request fingerprint; and
+2. every active consumer has the same hydration-visible snapshot:
+   `data`, `pending`, and safe `error`.
+
+Compare consumer snapshots using the same generic hydration serialization used
+for the payload, not ref or object identity. When both conditions hold, emit
+the common consumer snapshot as `record.state` and the shared entry's last
+successful value, if any, as `record.cache`. If either condition fails, throw a
+deterministic SSR configuration error before writing the payload. The error
+must identify the public identity and instruct the developer to provide
+distinct explicit keys, for example `customer-profile` and `admin-profile`.
+
+This also rejects divergent consumers such as a successful parent and a
+failed `network-only` child, or `server:false` and automatic consumers sharing
+one identity. It preserves their final SSR markup by requiring separate keys
+instead of choosing one consumer state to hydrate.
+
+Never serialize a private fingerprint, a raw native request option, or a secret
+solely to resolve this collision. An explicit `key` always contributes to the
+public hydration identity.
 
 ## Shared fetch entries versus hook consumers
 
@@ -359,7 +475,7 @@ request identity:
 ```text
 FetchEntry
 ├── settled successful data/cache metadata
-├── physical in-flight promise
+├── physical entry promise
 ├── physical AbortController
 └── attached consumers
 ```
@@ -372,7 +488,7 @@ HookConsumer
 ├── data ref
 ├── pending ref
 ├── error ref
-├── initial execution promise
+├── logical initial-execution promise
 ├── caller signal and timeout
 ├── callback subscriptions
 └── policy progression / identity generation
@@ -504,6 +620,12 @@ Callback `variables` is the immutable normalized snapshot captured when the
 execution starts. When the option is omitted, use a readonly empty snapshot;
 never expose a mutable options object or a later reactive value.
 
+Callback `ctx.key` is the resolved public hydration/cache identity, so it
+always exists. It is an opaque deterministic identity: callers may compare it
+for equality but must not parse or depend on its string encoding. An explicit
+`options.key` contributes only its namespace to that identity. Never expose
+the runtime request fingerprint through callbacks.
+
 Signature concept:
 
 ```ts
@@ -529,6 +651,17 @@ timeout          disabled
 ```
 
 Do not add `staleTime`.
+
+## Call-site contract
+
+`useFetch()` is a setup composable in v1. It must be called synchronously from
+a Vue component `setup()` or `<script setup>` while a `vue-ssr-lite`
+application runtime is active. Nested user composables invoked from setup are
+valid because they share that active context.
+
+Do not create a module-global fallback runtime. If no active Vue instance or
+`vue-ssr-lite` application runtime exists, throw a descriptive configuration
+error explaining that `useFetch()` must run from component setup.
 
 ---
 
@@ -654,6 +787,25 @@ Variables replace an existing URL query parameter with the same key.
 
 No nested objects in v1.
 
+Variables are input to URL construction, not a second identity dimension:
+
+```text
+raw URL
+ ↓
+apply canonical variables
+ ↓
+remove URL fragment
+ ↓
+final normalized request URL
+ ↓
+public hydration/cache identity
+```
+
+Consequently, `useFetch('/api/products?page=2')` and
+`useFetch('/api/products', { variables: { page: 2 } })` have the same request
+identity. Keep the variables snapshot separately for reactivity,
+`ctx.variables`, and detecting variable changes.
+
 Both URL and variables may be reactive refs/getters.
 
 ---
@@ -673,6 +825,15 @@ Ignore settled useFetch cache, execute native fetch, then update cache.
 
 Still deduplicate the same in-flight request.
 
+For a new `network-only` consumer, do not seed its refs from existing settled
+cache data:
+
+```text
+data    undefined
+pending true
+error   null
+```
+
 ### `cache-first`
 
 ```text
@@ -685,17 +846,77 @@ otherwise
 
 Cached errors do not satisfy `cache-first`.
 
+Initial consumer state is exact:
+
+| Situation | `data` | `pending` | `error` |
+| --- | --- | --- | --- |
+| `cache-first` hit | cached data | `false` | `null` |
+| `cache-first` miss | `undefined` | `true` | `null` |
+| `network-only` | `undefined` | `true` | `null` |
+| hydration-restored success | SSR data | `false` | `null` |
+| hydration-restored handled error | `undefined` | `false` | restored error |
+| `refresh()` on an existing hook | keep that hook's current data | `true` | `null` |
+
+Consumer policies remain independent. If consumer A starts a `network-only`
+execution while consumer B uses `cache-first` against existing cached data, B
+receives the cached data with `pending=false`. Every active consumer whose
+current identity matches a successful cache commit must receive the new data.
+When A's request succeeds, B receives the committed data, remains
+`pending=false`, and does not receive `onDone` because its own logical
+execution did not complete.
+
+A failed request never erases the existing successful cache value. Given cache
+value V1, a failing `network-only` request or refresh has these independent
+outcomes:
+
+```text
+new network-only consumer A
+→ data undefined, error failure
+
+existing consumer A calling refresh()
+→ data remains V1, error failure
+
+passive cache-first consumer B
+→ data remains V1, error null, pending false
+```
+
 ### `nextFetchPolicy`
 
 For one mounted hook:
 
 ```text
-first automatic execution
+first eligible automatic decision
 → fetchPolicy
 
-later automatic executions
+after that decision completes
+→ advance policy progression
+
+later eligible automatic executions
 → nextFetchPolicy ?? fetchPolicy
 ```
+
+The initial policy progression advances after a completed initial automatic
+decision, including:
+
+```text
+hydration success
+hydration handled error
+cache-first hit
+network success
+network handled error
+```
+
+It does not advance for:
+
+```text
+immediate:false
+server:false during SSR
+refresh()
+consumer cancellation before completion
+```
+
+Therefore a `server:false` hook has made no initial automatic decision during
+SSR. Its post-hydration browser execution still uses `fetchPolicy`.
 
 Example:
 
@@ -714,9 +935,8 @@ first          network-only
 later          cache-first
 ```
 
-Hydrated SSR data means the initial execution is already complete.
-
-Later browser executions use `nextFetchPolicy`.
+Hydrated SSR data or a handled error means the initial automatic decision is
+complete. Later eligible browser executions use `nextFetchPolicy`.
 
 A newly mounted hook starts again from `fetchPolicy`.
 
@@ -744,9 +964,16 @@ Rules:
 - keep previous data;
 - `pending=true`;
 - clear previous error;
-- deduplicate identical active refresh;
+- if the same runtime identity already has any active physical request—whether
+  automatic or started by another `refresh()`—join it rather than starting a
+  second request;
+- attach a new logical refresh execution for the calling consumer, including
+  its own callback subscription;
 - update shared cache;
 - `pending=false` after settlement.
+
+“Force network” bypasses settled cache; it never bypasses an identical
+in-flight physical request.
 
 Do not change first/next policy progression.
 
@@ -786,7 +1013,9 @@ must resolve immediately with the idle base result.
 
 `await` must NOT implicitly execute the request.
 
-Only `refresh()` starts it.
+`immediate:false` is manual mode in v1: URL and variable changes do not start
+automatic requests. Only `refresh()` starts a request for the then-current
+identity.
 
 ### `server:false`
 
@@ -821,12 +1050,13 @@ Do not create a server-side unresolved Promise.
 
 The renderer may recreate applications across resolution passes.
 
-A request already performed during the same HTTP request must never run again because setup was recreated.
+A settled request—success or handled error—during the same HTTP request must
+never run again because setup was recreated.
 
 ```text
 pass 1
  ↓
-fetch products
+fetch products or receive handled error
  ↓
 save request-local fetch state
  ↓
@@ -834,7 +1064,7 @@ reconciliation
  ↓
 pass 2
  ↓
-restore same fetch state
+restore same settled fetch state
  ↓
 ZERO second API request
 ```
@@ -980,9 +1210,10 @@ one mounted vue-ssr-lite application
 → one fetch cache
 ```
 
-Same-key consumers share the entry's settled successful data, active physical
-request, and cache updates. The entry also records the active execution's
-settled outcome, but that outcome is projected into each consumer separately.
+Consumers with the same runtime map key share the entry's settled successful
+data, active physical request, and cache updates. The entry also records the
+active execution's settled outcome, but that outcome is projected into each
+consumer separately.
 Each hook still owns:
 
 - its `data`, `pending`, and `error` refs;
@@ -1013,17 +1244,47 @@ No public cache-size configuration.
 
 # 15. Request Identity
 
-Generate deterministic identity from:
+Use two separate identities.
+
+The public hydration identity contains only deterministic, serializable
+request location information:
 
 ```text
 method
-normalized URL
-canonical variables
+final normalized request URL (fragment removed, query canonical)
 explicit custom key namespace
 ```
 
-The public identity must also carry a deterministic, non-secret request
-semantics fingerprint. At minimum include:
+It must never include headers, referrer values, credentials, tokens, or any
+other native request-option value. Same-origin SSR and browser calls must
+derive the same public hydration identity. The explicit `key` is a namespace
+component and is the supported way to distinguish otherwise identical calls
+that must hydrate as separate results.
+
+Normalize identity location as follows:
+
+```text
+same-origin request
+→ pathname + canonical search
+
+cross-origin request
+→ origin + pathname + canonical search
+```
+
+Thus, for an application at `https://example.com`, these calls share one
+public identity:
+
+```ts
+useFetch('/api/products?page=2')
+useFetch('https://example.com/api/products?page=2')
+useFetch('/api/products', { variables: { page: 2 } })
+```
+
+`useFetch('https://api.other.com/api/products?page=2')` retains its external
+origin and therefore has a different identity.
+
+The runtime request fingerprint is non-serialized and determines whether two
+consumers may share a physical entry. It includes:
 
 ```text
 headers
@@ -1034,52 +1295,22 @@ referrer
 referrerPolicy
 integrity
 native RequestInit cache mode
+automatically forwarded server credentials
 ```
 
-Normalize headers by lowercasing each header name and sorting the header names.
-For each name, preserve every non-sensitive header value exactly and preserve
-the original order of duplicate values; do not sort or trim values. Sensitive
-header values (including `Cookie`, `Authorization`, and equivalent
-credentials) are omitted from the public identity and included only in the
-runtime-only fingerprint described below.
-The `signal` is never part of identity: cancellation belongs to the consumer
-or entry lifecycle, not request representation. The library's `fetchPolicy`
-is also not part of identity; it controls whether an identity is read from or
-sent to the cache. The native `cache` request mode is part of the fingerprint.
+Normalize caller headers through `new Headers(options.headers)`. Use the
+platform-normalized header representation, lowercase and sort header names,
+and do not attempt to preserve raw duplicate-header ordering. The `signal` is
+not part of either identity because cancellation belongs to the consumer or
+entry lifecycle. The library's `fetchPolicy` is also not part of either
+identity; it controls cache read/write behavior rather than the response
+representation.
 
-Same-origin SSR/browser identities must match.
-
-Do not serialize secrets into hydration state.
-
-Never put raw:
-
-```text
-Cookie
-Authorization
-credential values
-```
-
-into public cache keys.
-
-The safe `credentials` mode (`omit`, `same-origin`, or `include`) remains part
-of the public request fingerprint; only the underlying credential material is
-private.
-
-Maintain a separate runtime-only fingerprint for sensitive/request-specific
-options, including forwarded Cookie/Authorization and any other secret header
-values. This fingerprint may distinguish physical entries on the server but
-must never be serialized into hydration state or exposed as a browser cache
-identifier.
-
-The runtime map key is the public identity plus this private fingerprint. The
-hydration payload carries only the public identity and serializable settled
-data, so a browser can resume the same safe request without receiving server
-credential material.
-
-An explicit `key` is a namespace component, not permission to ignore request
-semantics. If calls share an explicit public key but differ in any fingerprint
-field, keep them in separate physical entries (or report a deterministic
-incompatibility) rather than silently returning the wrong representation.
+The runtime map key is the public hydration identity plus the runtime request
+fingerprint. Neither the fingerprint nor raw native request-option values may
+enter hydration state. During SSR, the collision rule in section 4 rejects a
+snapshot where multiple runtime fingerprints would need to occupy one public
+hydration identity.
 
 ---
 
@@ -1095,15 +1326,24 @@ uses native relative fetch semantics.
 
 Server:
 
-resolve relative URLs against the actual incoming HTTP request origin.
-
-Do not use canonical SEO `siteOrigin`.
+resolve relative URLs from `SsrRequestContext.url.origin` (or the normalized
+`SsrRequestContext.request.url`). Do not rebuild an origin from raw `Host` or
+forwarded headers, and do not use canonical SEO `siteOrigin`; Core has already
+applied trusted-proxy and host normalization to the request URL.
 
 For same-origin SSR fetches:
 
-- forward incoming Cookie unless `credentials:'omit'`;
-- forward Authorization when appropriate;
-- explicit consumer Authorization wins;
+- automatically forward `SsrRequestContext.request.cookie` unless
+  `credentials:'omit'`; never read `request.headers.cookie` for this purpose;
+  `request.cookie` is the selected application's allow/deny-filtered cookie
+  value;
+- automatically forward incoming Authorization from Core's normalized request
+  headers only when `credentials !== 'omit'`, the caller did not provide
+  Authorization, and the incoming request has Authorization;
+- an explicit caller Authorization always wins;
+- `credentials:'omit'` prevents automatic Authorization forwarding;
+- never automatically forward Authorization for a cross-origin URL;
+- never forward Proxy-Authorization;
 - never blindly proxy hop-by-hop/proxy headers.
 
 For external absolute URLs:
@@ -1164,7 +1404,9 @@ abort old request only if orphaned
  ↓
 derive new identity
  ↓
-apply nextFetchPolicy
+apply current policy according to hook progression
+ ├── initial policy has not completed → fetchPolicy
+ └── initial policy has completed → nextFetchPolicy ?? fetchPolicy
  ↓
 cache or network
 ```
@@ -1200,6 +1442,19 @@ state. A consumer abort must not abort a physical request that another
 consumer still needs. When the last consumer detaches, the entry controller
 aborts the orphaned physical request. An aborted SSR request or disposed
 application may abort the entry even while consumers remain attached.
+
+For a non-timeout caller abort or per-consumer lifecycle detach, settle only
+that consumer as follows:
+
+```text
+pending false
+error   null
+data    retain that consumer's current value
+```
+
+Do not call `onError` for this terminal cancellation state. A timeout is
+different: set `pending=false`, set `error.kind='timeout'`, and invoke that
+consumer's `onError` exactly once.
 
 Guarantees:
 
@@ -1332,7 +1587,7 @@ Also cover:
 3. typed required variables.
 4. network-only/cache-first/nextFetchPolicy.
 5. explicit refresh.
-6. same-key in-flight dedupe.
+6. same-runtime-identity in-flight dedupe.
 7. callback ownership.
 8. reactive URL/variables race protection.
 9. request cancellation.
@@ -1346,14 +1601,63 @@ Also cover:
     not keep enhanced navigation loading for the duration of the HTTP request;
     only the local hook pending state remains active (a single setup microtask
     is acceptable).
-17. two same-key consumers keep independent `pending`/`error` state when one
-    caller aborts, while the other continues to use the shared physical
-    request.
+17. two same-runtime-identity consumers keep independent `pending`/`error`
+    state when one caller aborts, while the other continues to use the shared
+    physical request.
 18. SSR starts the initial execution before registering `onServerPrefetch`,
     and registration observes that same promise without a duplicate request or
     deadlock.
 19. `immediate:false` and `server:false` expose the exact idle/pending states
     defined in section 10.
+20. SSR rejects two settled entries with the same public hydration identity and
+    different runtime fingerprints (including different Authorization values),
+    with an error requiring distinct explicit keys.
+21. hydration state contains no raw headers, referrer, credentials, or runtime
+    fingerprint material.
+22. the policy-state table is respected, including a `network-only` consumer
+    ignoring settled data while a simultaneous `cache-first` consumer reads it.
+23. cancellation settles only the cancelled consumer's logical execution
+    promise; an awaited consumer does not remain suspended while another
+    consumer continues the shared physical request.
+24. a handled SSR fetch error is restored with `pending=false` and the safe
+    error value during hydration, without a browser request or callback replay,
+    and the error itself does not become a future `cache-first` hit; an
+    independently restored successful cache value may still satisfy one.
+25. automatic same-origin SSR credentials use the application-filtered
+    `SsrRequestContext.request.cookie` and relative URLs use Core's normalized
+    request URL/origin.
+26. non-timeout consumer cancellation ends at `pending=false`, `error=null`,
+    and retained local data; timeout instead reports one timeout error.
+27. a URL query and equivalent `variables` input resolve to one final URL and
+    therefore the same public and runtime identity.
+28. policy progression advances only for the completed initial automatic
+    decisions listed in section 8; `immediate:false`, SSR `server:false`,
+    `refresh()`, and pre-completion cancellation do not advance it.
+29. `immediate:false` does not auto-fetch after URL or variable changes; a
+    later `refresh()` fetches the current identity.
+30. `refresh()` joins an already active automatic request for the same runtime
+    identity and still gives the refresh caller its own logical callbacks.
+31. every active same-identity consumer receives a successful cache commit,
+    while a failed network-only/refresh execution leaves the last successful
+    cache and passive consumer state intact.
+32. automatic Authorization forwarding follows the exact same-origin,
+    credentials, explicit-header, and cross-origin rules in section 16;
+    Proxy-Authorization is never forwarded.
+33. calling `useFetch()` outside synchronous component setup with an active
+    `vue-ssr-lite` runtime throws the descriptive configuration error, and
+    callback `ctx.key` is an opaque equality-comparable public identity that
+    does not expose a runtime fingerprint or promise a string format.
+34. SSR rejects active consumers sharing a public hydration identity when
+    their `data`, `pending`, or safe `error` snapshots diverge—for example, a
+    successful parent and failed `network-only` child—and requires distinct
+    explicit keys.
+35. when cached success V1 exists and a `network-only` consumer fails, SSR
+    renders and hydration restores that consumer's failure state without a
+    browser request, while the independently restored cache lets a later
+    `cache-first` consumer read V1.
+36. same-origin relative, absolute, and variables-derived URLs normalize to
+    one public identity, while a cross-origin URL includes its origin and
+    remains distinct.
 
 ---
 
