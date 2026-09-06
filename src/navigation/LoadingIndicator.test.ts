@@ -95,6 +95,51 @@ describe('LoadingIndicator', () => {
     app.unmount()
   })
 
+  it('uses the light and dark theme defaults through the public color variable', async () => {
+    const { app, root, runtime } = mountIndicator()
+    runtime.subscriber().start(transaction(1))
+    await vi.advanceTimersByTimeAsync(120)
+    await nextTick()
+
+    const bar = root.querySelector('.vssl-loading-indicator__bar') as HTMLElement
+    const styles = root.querySelector('style')?.textContent ?? ''
+    expect(bar.style.background).toContain('--vssl-loading-indicator-color')
+    expect(styles).toContain(':root{--vssl-loading-indicator-default-color:#3B82F6}')
+    expect(styles).toContain('.dark,.dark-mode{--vssl-loading-indicator-default-color:#3B82F6}')
+
+    app.unmount()
+  })
+
+  it('keeps an explicit global color override authoritative in dark mode', async () => {
+    const applicationStyles = document.createElement('style')
+    applicationStyles.textContent = ':root { --vssl-loading-indicator-color: rgb(255, 0, 0); }'
+    document.head.appendChild(applicationStyles)
+    document.body.classList.add('dark')
+    const runtime = harness()
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({ render: () => h(LoadingIndicator, { delay: 0 }) })
+    app.provide(SSR_NAVIGATION_RUNTIME, runtime.runtime)
+    app.mount(root)
+
+    runtime.subscriber().start(transaction(1))
+    await nextTick()
+
+    const bar = root.querySelector('.vssl-loading-indicator__bar') as HTMLElement
+    const globalColor = (element: Element) =>
+      getComputedStyle(element)
+        .getPropertyValue('--vssl-loading-indicator-color')
+        .replace(/\s+/g, '')
+    expect(globalColor(document.documentElement)).toBe('rgb(255,0,0)')
+    expect(globalColor(document.body)).toBe('rgb(255,0,0)')
+    expect(bar.style.background).toContain('var(--vssl-loading-indicator-color')
+
+    app.unmount()
+    root.remove()
+    applicationStyles.remove()
+    document.body.classList.remove('dark')
+  })
+
   it('stays visible for a newer transaction when a stale one settles', async () => {
     const { app, root, runtime } = mountIndicator()
     runtime.subscriber().start(transaction(1))
