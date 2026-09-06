@@ -1,5 +1,66 @@
 # task-005 — First-Party SSR-Aware `useFetch`
 
+## Review 009 security correction
+
+The review `task-005/review/009` qualifies every browser cache-adoption step
+below. Consumer state still hydrates normally, preserving SSR markup with zero
+hydration requests. Successful cache may enter the persistent browser entry
+only when its SSR provenance **and** the browser request establish compatible
+anonymous semantics. Public identity alone cannot establish that proof.
+
+The internal cache record carries `browserReusable`; absence in an older payload
+means false. Automatically forwarded Cookie/Authorization always makes the
+successful value non-reusable. No credentials, private fingerprint, or hash of
+private options may be serialized. The implementation conservatively permits
+reuse only with `credentials: 'omit'`, no explicit headers, and otherwise default
+representation options on both sides. Cross-origin `same-origin` credentials do
+not qualify because a redirect can return to the browser's origin. Other SSR
+values still hydrate consumer state, but a later `cache-first` browser hook must
+fetch its own value. Provenance belongs to the successful physical execution;
+later failures, cache hits, and SSR reconciliation must preserve it.
+
+This correction leaves the public API, hydration authority, request fingerprint,
+deduplication, and consumer/cache separation unchanged. The canonical example now
+uses the repository-owned `/api/products` fixture. Vue-private hydration discovery
+is owned by the guarded Vue 3.5.x adapter described in
+[`hydration-compatibility.md`](./hydration-compatibility.md).
+
+## Review 010 identity-continuity correction
+
+The review `task-005/review/010` further qualifies URL resolution and SSR
+reconciliation. On the server, relative inputs resolve against the complete
+normalized `SsrRequestContext.request.url`, matching browser `document.baseURI`
+path semantics. At `/shop/deep`, `api/items` and `./api/items` resolve to
+`/shop/api/items`, `../api/items` resolves to `/api/items`, and `/api/items`
+remains root-relative. SSR and hydration must therefore derive the same public
+identity for the same page and input.
+
+SSR reconciliation also carries private runtime fingerprints through a separate,
+request-local server channel. This channel is never part of `HydratedFetchRecord`,
+never enters `SsrHydrationState`, and is disposed with the HTTP request. A prior
+public record is restored only when its server-only fingerprint exactly matches
+the current pass. A changed or missing fingerprint throws the existing safe SSR
+configuration-mismatch error and requires distinct explicit keys. The error must
+not contain either request representation. The browser hydration payload remains
+limited to public consumer state, safe errors, cache data, and reuse provenance.
+
+## Review 011 final-pass data-minimization correction
+
+The review `task-005/review/011` separates historical reconciliation data from
+the final browser projection. The request-local server channel stores both the
+private fingerprint and the settled `HydratedFetchRecord` required if an
+identity returns in a later pass. That history remains available across an
+absent intermediate pass and is disposed with the request.
+
+`SsrFetchHydration.snapshot()` must build browser continuation from entries and
+consumers visited by the current, final accepted render pass only. It must never
+seed that result from historical records. An identity used in pass 1 but absent
+from final pass 2 therefore remains request-local and neither its public key nor
+its state/cache data enters `SsrHydrationState`. If the identity returns in pass
+3, matching private identity restores it without a request; a mismatch throws
+the safe configuration error before another request. This changes no public API
+or browser hydration contract.
+
 ## Objective
 
 Implement a minimal, first-party, fully type-safe SSR-aware `useFetch()` directly in `vue-ssr-lite`.
@@ -322,6 +383,8 @@ interface HydratedFetchRecord {
 
   cache?: {
     data: unknown
+    // Missing on older payloads is treated as false.
+    browserReusable?: boolean
   }
 }
 ```
@@ -361,7 +424,7 @@ useFetch()
  ├── derive THIS browser consumer's runtime fingerprint F
  ├── find temporary HydratedFetchRecord by public identity A
  ├── restore consumer state
- └── adopt record.cache, if present, into normal runtime entry:
+ └── adopt record.cache only with reusable provenance and compatible browser semantics:
      FetchEntry[A + F]
  ↓
 no hydration network request
@@ -394,7 +457,7 @@ useFetch()
 
 consumer ← state
 
-FetchEntry[A + F] ← cache
+FetchEntry[A + F] ← cache (only if safe to reuse across SSR/browser)
 ```
 
 This gives the browser cache its proper normal runtime identity without
@@ -421,7 +484,8 @@ pre-seed the normal browser runtime entry map using only the public identity**,
 as that would silently bypass the fingerprint isolation designed in section 15.
 Instead, hydration records are held in the temporary public-identity
 continuation map until the hydrating consumer executes, derives its runtime
-fingerprint, and lazily adopts `record.cache`.
+fingerprint, and lazily adopts `record.cache` only under the Review 009 safety
+rule above. Credential-dependent values remain consumer continuation state.
 
 ### Hydration authority
 
@@ -1327,6 +1391,11 @@ The renderer may recreate applications across resolution passes.
 A settled request—success or handled error—during the same HTTP request must
 never run again because setup was recreated.
 
+This reuse requires an exact match with the prior pass's private runtime
+fingerprint. Core transfers that identity in request-local server metadata kept
+separate from serializable plugin state. A changed or missing private identity
+is a deterministic configuration mismatch; it never re-keys prior data.
+
 ```text
 pass 1
  ↓
@@ -1628,10 +1697,21 @@ uses native relative fetch semantics.
 
 Server:
 
-resolve relative URLs from `SsrRequestContext.url.origin` (or the normalized
-`SsrRequestContext.request.url`). Do not rebuild an origin from raw `Host` or
-forwarded headers, and do not use canonical SEO `siteOrigin`; Core has already
+resolve relative URLs against the complete normalized
+`SsrRequestContext.request.url`. Do not reduce the base to its origin, rebuild
+an origin from raw `Host` or forwarded headers, and do not use canonical SEO
+`siteOrigin`; Core has already
 applied trusted-proxy and host normalization to the request URL.
+
+This preserves native path-relative behavior:
+
+```text
+page https://example.com/shop/deep
+/api/items  → https://example.com/api/items
+api/items   → https://example.com/shop/api/items
+./api/items → https://example.com/shop/api/items
+../api/items → https://example.com/api/items
+```
 
 For same-origin SSR fetches:
 
@@ -2033,8 +2113,8 @@ Also cover:
     and the error itself does not become a future `cache-first` hit; an
     independently restored successful cache value may still satisfy one.
 25. automatic same-origin SSR credentials use the application-filtered
-    `SsrRequestContext.request.cookie` and relative URLs use Core's normalized
-    request URL/origin.
+    `SsrRequestContext.request.cookie` and relative URLs resolve against Core's
+    complete normalized request URL.
 26. non-timeout consumer cancellation ends at `pending=false`, `error=null`,
     and retained local data; timeout instead reports one timeout error.
 27. a URL query and equivalent `variables` input resolve to one final URL and
@@ -2093,6 +2173,12 @@ Also cover:
     browser cache/LRU semantics.
 45. Unconsumed hydration records and the continuation map are cleared on
     hydration completion, hydration failure, or application disposal.
+46. On a nested page, path-relative inputs resolve to identical SSR and browser
+    URLs/public identities, render SSR data, and perform no hydration request.
+47. SSR reconciliation restores public state/cache only when request-local
+    private fingerprints match. An Authorization A-to-B change fails with a
+    deterministic explicit-key error, performs no B request, re-keys no A data,
+    and exposes neither credential. Missing private metadata also fails closed.
 
 ---
 
