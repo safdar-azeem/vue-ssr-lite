@@ -53,6 +53,7 @@ import {
   SSR_NAVIGATION_RUNTIME,
 } from './navigation/SsrNavigationRuntime'
 import type { SsrNavigationRuntime } from './navigation/SsrNavigationTypes'
+import { SSR_FETCH_RUNTIME, SsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntime'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -99,6 +100,11 @@ export interface SsrCreateApplicationOptions<
    * restored so plugins (an API client cache, an i18n loader) resume warm.
    */
   resumeState?: Record<string, unknown> | null
+  /**
+   * Server reconciliation only: request-local plugin identity metadata. This
+   * channel is never included in the browser hydration document.
+   */
+  resumeReconciliationState?: Record<string, unknown> | null
   /**
    * Server reconciliation only: application state accepted from the prior pass.
    */
@@ -225,10 +231,14 @@ export const createSsrApplication = async <
   // The hydration controller owns generic plugin state contribution and
   // restoration. On the browser it carries the plugin state serialized during
   // the server render so installed plugins can restore before mount. On a
-  // server re-render pass it carries `resumeState` so plugins resume warm.
+  // server re-render pass it carries `resumeState` so plugins resume warm;
+  // private continuity metadata and historical plugin state travel only through
+  // the separate request-local reconciliation channel and can never enter
+  // browser hydration JSON.
   const hydration = createSsrHydrationController(
     options.hydrationState?.plugins ?? options.resumeState,
-    options.server
+    options.server,
+    options.resumeReconciliationState
   )
   // The resolution controller is shared across render passes of one request so
   // registered work and pass requests accumulate coherently.
@@ -264,7 +274,7 @@ export const createSsrApplication = async <
     fingerprintSsrReconciliationState(
       {
         application: context.state,
-        plugins: hydration.collect(),
+        plugins: hydration.collect(false),
         head: managedHead.collect(),
         response: context.response,
       },
@@ -307,6 +317,10 @@ export const createSsrApplication = async <
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
+    app.provide(SSR_FETCH_RUNTIME, new SsrFetchRuntime(
+      options.server, context, hydration, !options.server && Boolean(options.hydrationState) && !options.spa
+    ))
+    if (!options.server) app.onUnmount(() => hydration.dispose())
     if (router) {
       // Install the observer before middleware so its transaction surrounds
       // guards and route resolution. Successful navigation hands its loading
