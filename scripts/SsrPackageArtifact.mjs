@@ -138,7 +138,7 @@ import * as server from 'vue-ssr-lite/server'
 import * as vite from 'vue-ssr-lite/vite'
 
 const expected = [
-  [root, ['defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
+  [root, ['defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useFetch', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
   [client, ['hydrateSsrApplication', 'mountSpaApplication']],
   [server, ['defineSitemap', 'createSsrManagedServer', 'createSsrMemoryResponseCache']],
   [vite, ['vueSsrLite']],
@@ -160,6 +160,7 @@ export { root, client, server, vite }
   defineMiddleware,
   RouterView,
   LoadingIndicator,
+  useFetch,
   useSeo,
   usePublicConfig,
   useOrigin,
@@ -170,7 +171,22 @@ export { root, client, server, vite }
   type AppContext,
   type ApplicationConfig,
   type SiteSeoResolution,
+  type UseFetchResult,
+  type UseFetchReturn,
+  type UseFetchError,
+  type UseFetchOptions,
+  type UseFetchOptionsBase,
+  type UseFetchOptionsParameter,
+  type UseFetchDoneContext,
+  type UseFetchErrorContext,
+  type UseFetchPolicy,
+  type UseFetchVariables,
+  type UseFetchVariableShape,
+  type UseFetchVariablePrimitive,
+  type UseFetchVariableValue,
+  type VariablesOption,
 } from 'vue-ssr-lite'
+import type { ShallowRef } from 'vue'
 import {
   hydrateSsrApplication,
   mountSpaApplication,
@@ -190,6 +206,7 @@ void [
   defineMiddleware,
   RouterView,
   LoadingIndicator,
+  useFetch,
   useSeo,
   usePublicConfig,
   useOrigin,
@@ -211,7 +228,55 @@ type PublicTypes = [
   SsrHydrateOptions,
   SitemapContext,
   SsrVitePluginOptions,
+  UseFetchResult<string>,
+  UseFetchReturn<string>,
+  UseFetchError,
+  UseFetchOptions<string, UseFetchVariables>,
+  UseFetchOptionsBase<string, UseFetchVariables>,
+  UseFetchOptionsParameter<string, UseFetchVariables>,
+  UseFetchDoneContext<string, UseFetchVariables>,
+  UseFetchErrorContext<UseFetchVariables>,
+  UseFetchPolicy,
+  UseFetchVariables,
+  UseFetchVariableShape<{ page: number }>,
+  UseFetchVariablePrimitive,
+  UseFetchVariableValue,
+  VariablesOption<UseFetchVariables>,
 ]
+interface RequiredFetchVariables { category: string; page?: number }
+interface FetchProduct { id: number; title: string }
+async function fetchTypes() {
+  const result = useFetch<FetchProduct[]>('/api/products')
+  const data: ShallowRef<FetchProduct[] | undefined> = result.data
+  const awaited = await result
+  const awaitedData: ShallowRef<FetchProduct[] | undefined> = awaited.data
+  const typed = useFetch<FetchProduct[], RequiredFetchVariables>('/api/products', {
+    variables: { category: 'books', page: 2 },
+    onDone(ctx) {
+      const products: FetchProduct[] = ctx.data
+      const variables: Readonly<RequiredFetchVariables> = ctx.variables
+      void [products, variables]
+    },
+  })
+  // @ts-expect-error Required variables require options.
+  useFetch<FetchProduct[], RequiredFetchVariables>('/api/products')
+  // @ts-expect-error Required variables cannot be omitted.
+  useFetch<FetchProduct[], RequiredFetchVariables>('/api/products', {})
+  // @ts-expect-error Incorrect variables are rejected.
+  useFetch<FetchProduct[], RequiredFetchVariables>('/api/products', { variables: { category: 42 } })
+  // @ts-expect-error Unknown variable names are rejected.
+  useFetch<FetchProduct[], RequiredFetchVariables>('/api/products', { variables: { category: 'books', unknown: 1 } })
+  // @ts-expect-error Nested variable values are rejected.
+  useFetch<unknown, { nested: { id: number } }>('/api/products', { variables: { nested: { id: 1 } } })
+  // @ts-expect-error Pending is readonly.
+  result.pending.value = false
+  // @ts-expect-error Error is readonly.
+  result.error.value = null
+  useFetch<unknown, { page?: number }>('/api/products')
+  useFetch('/api/products', { variables: () => ({ page: 2 }) })
+  void [data, awaitedData, typed]
+}
+void fetchTypes
 export type { PublicTypes }
 `,
     'utf8'
