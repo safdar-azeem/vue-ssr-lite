@@ -587,9 +587,12 @@ export const bundleSsrConfigModules = async (
     ])
   )
   entries.forEach((entry, index) => {
-    const code = outputByName.get(`application-${index}`)
-    if (!code) throw new Error(`Failed to bundle application config: ${entry}`)
-    codes.set(entry, code)
+    // esbuild deliberately omits an output file when a TypeScript entry erases
+    // completely (for example, a shared `export interface` module). Discovery
+    // scans project scripts as candidates, so an omitted empty entry is a valid
+    // non-application module rather than a failed build. Actual parse, resolve,
+    // and load failures have already rejected `esbuild.build()` above.
+    codes.set(entry, outputByName.get(`application-${index}`) ?? 'export {}\n')
   })
   return { codes, graph }
 }
