@@ -22,22 +22,24 @@ export default defineServer({
 
 ## SSR Data Fetching
 
-The `/products` route fetches product data from the public [DummyJSON products API](https://dummyjson.com/products).
+The `/products` page uses `useFetch()` against the deterministic, same-origin
+`/api/products` endpoint registered in `server.ts`. Its six products are defined
+in `server/products.ts`; the example needs no external API, images, database,
+CORS configuration, or service credentials.
 
-When `/products` is requested directly, the `fetch()` request runs from the
-page's async setup while Vue is server-rendering. The response therefore
-contains the product titles and details in the server-generated HTML before
-hydration.
+A direct `/products` load starts one native HTTP request during SSR, even though
+the hook is not awaited. The HTML contains the products. Hydration restores
+that state without another request. Browser navigation renders local pending
+UI while fetching; `RouterView` does not own the network loading interval.
 
-The same `ProductsPage.vue` component also works during normal Vue Router
-navigation in the browser, where it runs as normal Vue application code. It
-uses native `fetch()` directly; no local API server, proxy, database, or
-vue-ssr-lite-specific data-fetching abstraction is required.
+The catalog is public, so the hook uses `credentials: 'omit'`. Its anonymous SSR
+cache can safely be adopted by the browser. `fetchPolicy: 'cache-first'` lets
+later page mounts reuse that successful application cache. **Refresh products**
+bypasses settled cache and makes one request (or joins an existing one).
+The endpoint uses HTTP `Cache-Control: no-store`, so this demonstrates the
+useFetch application cache independently of the browser's HTTP cache.
 
-`App.vue` uses the enhanced `RouterView`, which coordinates navigation with
-native Vue `<Suspense>` so async setup has the same browser-side fallback. The
-route outlet does not fetch data itself.
-
-DummyJSON is an external demonstration service, so its availability is outside
-vue-ssr-lite's control. The page renders a small friendly error state when the
-request fails or returns a non-2xx response.
+**Simulate an error** switches to `/api/products?fail=true`, which always returns
+503. The page displays the HTTP error without retrying. Turn it off to return
+to the successful catalog identity. This gives SSR, hydration, pending, refresh,
+cache reuse, and HTTP errors a repository-owned demonstration surface.
