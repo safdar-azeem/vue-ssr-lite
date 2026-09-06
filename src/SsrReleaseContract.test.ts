@@ -233,13 +233,21 @@ describe('repository release contract', () => {
     }
   })
 
-  it('owns the Vue hydration compatibility range and exercises both supported endpoints in CI', async () => {
+  it('documents the Vue hydration compatibility range and manual coverage', async () => {
     const manifest = await readJson<PackageManifest>(join(repositoryRoot, 'package.json'))
-    const workflow = await readFile(join(repositoryRoot, '.github/workflows/vue-hydration-compatibility.yml'), 'utf8')
+    const compatibility = await readFile(
+      join(repositoryRoot, 'doc/hydration-compatibility.md'),
+      'utf8'
+    )
+    const suite = await readFile(
+      join(repositoryRoot, 'src/hydration/SsrVueHydrationCompatibility.test.ts'),
+      'utf8'
+    )
     expect(manifest.peerDependencies?.vue).toBe('~3.5.0')
     expect(manifest.devDependencies?.vue).toBe('~3.5.40')
-    expect(workflow).toContain('3.5.0')
-    expect(workflow).toContain('~3.5.0')
-    expect(workflow).toContain('SsrVueHydrationCompatibility.test.ts')
+    expect(compatibility).toContain('manual')
+    expect(compatibility).toContain('3.5.x')
+    expect(compatibility).not.toMatch(/github actions|workflow_dispatch|runs? .*\bCI\b|CI .*runs?|CI definition/i)
+    expect(suite).toContain('@vitest-environment jsdom')
   })
 })
