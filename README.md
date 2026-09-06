@@ -16,7 +16,7 @@ Small, fast, and simple.
 - `/sitemap.xml` and `/robots.txt`
 - Request-aware route CSS and module preloads
 - Canonical URLs, Open Graph, Twitter Cards, and JSON-LD
-- Standard Vue data fetching with native `fetch()`, GraphQL, or your preferred API client
+- First-party SSR-aware `useFetch()` with optional await, hydration, reactive state, and request-safe caching
 
 # Installation
 
@@ -126,21 +126,254 @@ Your Vue application is now SSR. You are ready to go. If you need extra configur
 
 # Data Fetching
 
-Use native `await fetch()`, GraphQL/Apollo, Axios, or your existing API client.
+Once your application is running, use the built-in `useFetch()` composable for normal page data.
+
+It works in SSR, hydration, and client-side navigation while keeping the API close to normal Vue code.
+
+## Basic usage
 
 ```vue
 <script setup lang="ts">
-const response = await fetch('https://dummyjson.com/products?limit=6')
+import { useFetch } from 'vue-ssr-lite'
 
-const data = (await response.json()) as ProductsResponse
+interface Product {
+  id: number
+  title: string
+}
+
+interface ProductsResponse {
+  products: Product[]
+}
+
+const {
+  data,
+  pending,
+  error,
+  refresh,
+} = useFetch<ProductsResponse>('/api/products')
 </script>
 
 <template>
-  <article v-for="product in data?.products" :key="product.id">
-    <h2>{{ product.title }}</h2>
-  </article>
+  <p v-if="pending">Loading products…</p>
+  <p v-else-if="error">Unable to load products.</p>
+
+  <template v-else>
+    <article v-for="product in data?.products" :key="product.id">
+      <h2>{{ product.title }}</h2>
+    </article>
+  </template>
+
+  <button :disabled="pending" @click="refresh()">
+    Refresh
+  </button>
 </template>
 ```
+
+That is enough for most pages.
+
+On a direct SSR request, `useFetch()` starts the request during setup and the final server-rendered HTML contains the fetched data. During hydration, the server result is restored without repeating the same initial request. On client-side navigation, the page renders with `pending=true` while the browser request is running.
+
+## `await` is optional
+
+Normally, do not `await` `useFetch()`:
+
+```ts
+const { data, pending, error } = useFetch<ProductsResponse>('/api/products')
+```
+
+Use `await` only when later setup code itself needs the settled SSR result, for example when generating SEO from fetched data:
+
+```ts
+import { useFetch, useSeo } from 'vue-ssr-lite'
+
+const { data, error } = await useFetch<ProductsResponse>('/api/products')
+
+useSeo({
+  title: () =>
+    !error.value && data.value
+      ? `${data.value.products.length} Products`
+      : 'Products',
+})
+```
+
+On the server, `await useFetch()` waits for the initial request.
+
+In the browser, `await useFetch()` does **not** wait for the network request. The component continues on the next microtask and `pending` remains the source of truth for browser loading. Use `await refresh()` when browser code explicitly needs to wait for a fresh request to finish.
+
+## Query variables
+
+Use `variables` for query parameters:
+
+```ts
+import { ref } from 'vue'
+
+const category = ref('phones')
+const page = ref(1)
+
+const products = useFetch<
+  ProductsResponse,
+  { category: string; page?: number }
+>('/api/products', {
+  variables: () => ({
+    category: category.value,
+    page: page.value,
+  }),
+})
+```
+
+This produces a URL such as:
+
+```text
+/api/products?category=phones&page=1
+```
+
+Variable keys are normalized automatically. Arrays become repeated query parameters, `null` becomes an empty value, and `undefined` is omitted.
+
+The URL and `variables` may be plain values, refs, or getters. When their resolved request identity changes, `useFetch()` automatically switches to the new request unless `immediate:false` is enabled.
+
+## Fetch policies
+
+The default policy is `network-only`.
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'network-only',
+})
+```
+
+Use `cache-first` when an existing successful value may be reused:
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'cache-first',
+})
+```
+
+For a hook that should fetch initially and prefer cache after its reactive identity changes:
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'network-only',
+  nextFetchPolicy: 'cache-first',
+})
+```
+
+Identical in-flight requests are deduplicated even with `network-only`.
+
+## Manual fetching and refresh
+
+Disable the automatic request with `immediate:false`:
+
+```ts
+const products = useFetch<ProductsResponse>('/api/products', {
+  immediate: false,
+})
+
+// Later
+await products.refresh()
+```
+
+`refresh()` always requests fresh data, keeps the current data visible while the request is pending, and can be awaited in both SSR and browser code.
+
+## Client-only requests
+
+Set `server:false` when a request should not run during SSR:
+
+```ts
+const result = useFetch('/api/browser-only', {
+  server: false,
+})
+```
+
+During SSR the hook exposes its pending state without making the request. After hydration, the browser starts it normally.
+
+If `immediate:false` is also set, the request stays idle until `refresh()` is called.
+
+## Errors, timeout, and cancellation
+
+Expected HTTP, network, parse, and timeout failures are exposed through `error`:
+
+```ts
+const { data, pending, error } = useFetch('/api/products', {
+  timeout: 5_000,
+})
+```
+
+`error.value.kind` is one of:
+
+```text
+http
+network
+parse
+timeout
+```
+
+Normal request failures do not require `try/catch` around `useFetch()` or `refresh()`. Check `error` before relying on the result.
+
+Use a normal `AbortSignal` when the caller needs cancellation:
+
+```ts
+const controller = new AbortController()
+
+const result = useFetch('/api/products', {
+  signal: controller.signal,
+})
+
+controller.abort()
+```
+
+Cancelling one hook does not cancel a shared physical request that another active hook still needs.
+
+## Request options
+
+`useFetch()` supports GET and HEAD requests plus the common native fetch options:
+
+```ts
+useFetch('/api/products', {
+  method: 'GET',
+  headers: {
+    'x-workspace': 'acme',
+  },
+  credentials: 'include',
+  cache: 'no-store',
+})
+```
+
+Supported request options include:
+
+- `headers`
+- `credentials`
+- `mode`
+- `redirect`
+- `referrer`
+- `referrerPolicy`
+- `integrity`
+- native `cache`
+
+`fetchPolicy` controls the `useFetch()` application cache. Native `cache` controls the browser/server HTTP fetch behavior. They are separate concepts.
+
+## Callbacks
+
+Use `onDone` and `onError` when an individual request execution needs a side effect:
+
+```ts
+useFetch<ProductsResponse>('/api/products', {
+  onDone(ctx) {
+    console.log(ctx.data, ctx.status)
+  },
+  onError(ctx) {
+    console.log(ctx.error.kind, ctx.status)
+  },
+})
+```
+
+Callbacks belong to the requesting hook. They do not replay for hydration or cache hits.
+
+## Other API clients
+
+`useFetch()` is optional. Native `fetch()`, GraphQL/Apollo, Axios, and other API clients continue to work normally.
+
+Use `useFetch()` when you want the built-in SSR, hydration, reactive request state, deduplication, and lightweight cache behavior without adding another data-fetching library.
 
 # Application Shell
 
@@ -207,7 +440,6 @@ import website from './src/modules/website/app'
 import app from './src/modules/app/app'
 import admin from './src/modules/admin/app'
 import docs from './src/modules/docs/app'
-
 export default defineServer({
   server: { port: 4211 },
   applications: [website, app, admin, docs],
@@ -218,7 +450,6 @@ export default defineServer({
 // src/modules/website/app.ts
 import { defineApplication } from 'vue-ssr-lite'
 import routes from './routes'
-
 export default defineApplication({
   name: 'website',
   render: 'ssr',
@@ -234,7 +465,6 @@ export default defineApplication({
 // src/modules/app/app.ts
 import { defineApplication } from 'vue-ssr-lite'
 import routes from './routes'
-
 export default defineApplication({
   name: 'app',
   render: 'spa',
@@ -250,7 +480,6 @@ export default defineApplication({
 // src/modules/admin/app.ts
 import { defineApplication } from 'vue-ssr-lite'
 import routes from './routes'
-
 export default defineApplication({
   name: 'admin',
   render: 'spa',
@@ -268,7 +497,6 @@ By default every application uses the global `/src/main.ts` and `/src/App.vue`. 
 // src/modules/docs/app.ts
 import { defineApplication } from 'vue-ssr-lite'
 import routes from './routes'
-
 export default defineApplication({
   name: 'docs',
   render: 'ssr',
@@ -298,8 +526,7 @@ defineApplication({
 })
 ```
 
-Use `domain` when routing varies by environment or needs subdomains, local
-aliases, custom domains, additional hosts, or domain params:
+Use `domain` when routing varies by environment or needs subdomains, local aliases, custom domains, additional hosts, or domain params:
 
 ```ts
 defineApplication({
@@ -317,16 +544,9 @@ defineApplication({
 })
 ```
 
-`host` and `domain` are alternatives and cannot be used together on the same
-application. Exact hosts outrank wildcard/subdomain matches, which outrank the
-explicit `customDomains: true` catch-all. With no matching owner and no custom
-domain catch-all, Core returns `421 Misdirected Request` with `No application
-serves this host.`
+`host` and `domain` are alternatives and cannot be used together on the same application. Exact hosts outrank wildcard/subdomain matches, which outrank the explicit `customDomains: true` catch-all. With no matching owner and no custom domain catch-all, Core returns `421 Misdirected Request` with `No application serves this host.`
 
-`customDomains: true` means that the application may receive unmatched/custom
-hosts. The application can then resolve the hostname against its own API or
-database; Core does not impose a business-specific custom-domain verification
-callback.
+`customDomains: true` means that the application may receive unmatched/custom hosts. The application can then resolve the hostname against its own API or database; Core does not impose a business-specific custom-domain verification callback.
 
 # Vue Plugins
 
@@ -344,15 +564,13 @@ Use `defineMiddleware()` for small universal navigation checks and route data:
 
 ```ts
 import { defineMiddleware } from 'vue-ssr-lite'
-
 export const requestMiddleware = defineMiddleware(async (context) => {
   const variant = context.cookies.get('variant')
   return variant ? { props: { variant } } : true
 })
 ```
 
-Application-wide middleware is declared once in `server.ts` for a single app,
-or on the relevant `defineApplication()` in multi-app mode:
+Application-wide middleware is declared once in `server.ts` for a single app, or on the relevant `defineApplication()` in multi-app mode:
 
 ```ts
 export default defineServer({
@@ -370,68 +588,43 @@ Route middleware uses direct function references:
 }
 ```
 
-Global middleware runs on every navigation. Route middleware runs for route
-records entered by the navigation, parent to child. A parent route's middleware
-protects entry into that route branch, but it does not rerun when navigating
-between descendants while the parent remains active. Leaving and later
-re-entering the branch runs it again.
+Global middleware runs on every navigation. Route middleware runs for route records entered by the navigation, parent to child. A parent route's middleware protects entry into that route branch, but it does not rerun when navigating between descendants while the parent remains active. Leaving and later re-entering the branch runs it again.
 
 ```text
 /about → /dashboard
 requestMiddleware runs
-
 /dashboard → /dashboard/nested
 requestMiddleware does not rerun
-
 /dashboard/nested → /about → /dashboard/nested
 requestMiddleware runs again
 ```
 
-The same function runs once per target navigation. Middleware may be synchronous
-or async. Return nothing or `true` to continue, `false` to cancel, a normal Vue
-Router location to redirect, or `{ props }` to add props to the default component
-of the route that declared that middleware. Existing route props are composed,
-with later middleware values winning. Accepted parent middleware props remain
-owned by the parent component while that route record stays active.
+The same function runs once per target navigation. Middleware may be synchronous or async. Return nothing or `true` to continue, `false` to cancel, a normal Vue Router location to redirect, or `{ props }` to add props to the default component of the route that declared that middleware. Existing route props are composed, with later middleware values winning. Accepted parent middleware props remain owned by the parent component while that route record stays active.
 
-On a direct SSR request, a middleware redirect becomes a real HTTP redirect and
-the rejected component tree is not rendered. A direct SPA request still receives
-the SPA shell first; middleware starts with the browser application navigation.
-Use `context.redirect()` only for an explicit redirect status or intentional
-external full-document navigation.
+On a direct SSR request, a middleware redirect becomes a real HTTP redirect and the rejected component tree is not rendered. A direct SPA request still receives the SPA shell first; middleware starts with the browser application navigation.
 
-Middleware receives the current app/router, target and previous route, normalized
-cookies, domain, authoritative origin, public config, environment flag, and an
-abort signal. Middleware that may run during SSR is statically projected into the
-browser definition, so its complete dependency graph must remain universal and
-browser-safe.
+Use `context.redirect()` only for an explicit redirect status or intentional external full-document navigation.
 
-When Core can statically prove that an application declares `render: 'spa'`, its
-middleware can only execute in the browser (SPA route branches cannot opt back
-into SSR). Core still projects the exact middleware binding and protects the
-configuration from mutation, but leaves that middleware's ordinary browser
-dependency graph to Vite. No separate client-middleware API is needed.
+Middleware receives the current app/router, target and previous route, normalized cookies, domain, authoritative origin, public config, environment flag, and an abort signal. Middleware that may run during SSR is statically projected into the browser definition, so its complete dependency graph must remain universal and browser-safe.
 
-Middleware should primarily handle navigation decisions such as authentication,
-authorization, workspace resolution, redirects, and small route prerequisites.
-Normal page data usually belongs in the page's query or data layer. When a valid
-navigation check is async, it automatically participates in navigation loading.
+When Core can statically prove that an application declares `render: 'spa'`, its middleware can only execute in the browser (SPA route branches cannot opt back into SSR). Core still projects the exact middleware binding and protects the configuration from mutation, but leaves that middleware's ordinary browser dependency graph to Vite. No separate client-middleware API is needed.
+
+Middleware should primarily handle navigation decisions such as authentication, authorization, workspace resolution, redirects, and small route prerequisites.
+
+Normal page data usually belongs in the page's query or data layer. When a valid navigation check is async, it automatically participates in navigation loading.
 
 # Navigation Loading
 
-Use the enhanced route outlet to give that part of the page a custom delayed
-fallback:
+Use the enhanced route outlet to give that part of the page a custom delayed fallback:
 
 ```vue
 <script setup lang="ts">
 import { RouterView } from 'vue-ssr-lite'
 </script>
-
 <template>
   <AppLayout>
     <Sidebar />
     <Header />
-
     <RouterView :delay="120">
       <template #fallback>
         <PageSkeleton />
@@ -441,38 +634,19 @@ import { RouterView } from 'vue-ssr-lite'
 </template>
 ```
 
-`RouterView` delegates route matching and component reuse to Vue Router and
-async component readiness to native Vue `<Suspense>`. It follows async
-middleware, redirects, cancellation, other guards, lazy components, async
-`setup()`, and top-level `await` as one loading lifecycle. There is no manual
-pending state and the delay is not restarted when navigation hands off to an
-async page. Nested outlets select the closest enhanced view whose matched route
-record is changing.
+`RouterView` delegates route matching and component reuse to Vue Router and async component readiness to native Vue `<Suspense>`. It follows async middleware, redirects, cancellation, other guards, lazy components, async `setup()`, and top-level `await` as one loading lifecycle. There is no manual pending state and the delay is not restarted when navigation hands off to an async page. Nested outlets select the closest enhanced view whose matched route record is changing.
 
-Internally, router acceptance and page readiness are separate milestones. A
-successful router transaction stays loading until the selected outlet's current
-Suspense generation resolves. Cancellation and errors finish without waiting
-for rejected destination work, and a superseded page generation cannot finish
-the newer navigation's loader. Readiness is acknowledged by the destination
-generation after it is actually mounted or updated inside its Suspense branch;
-it is not inferred from the absence of a `pending` event. Application wrappers
-such as out-in transitions may therefore delay mounting without ending the
-navigation clock early.
+Internally, router acceptance and page readiness are separate milestones. A successful router transaction stays loading until the selected outlet's current Suspense generation resolves. Cancellation and errors finish without waiting for rejected destination work, and a superseded page generation cannot finish the newer navigation's loader. Readiness is acknowledged by the destination generation after it is actually mounted or updated inside its Suspense branch;
 
-The fallback is the route area's normal rendered state while loading. The
-component adds no layout element or fallback CSS: a skeleton can be full-page,
-card-sized, centered, or any other shape entirely through application code.
-While middleware or guards can still cancel, a fully resolved current page may
-be retained outside the document so cancellation can restore the same component
-instance. That retention ends at the router decision; unresolved destinations
-are never retained by it, and it does not become an implicit page cache.
+it is not inferred from the absence of a `pending` event. Application wrappers such as out-in transitions may therefore delay mounting without ending the navigation clock early.
 
-The fallback is optional and entirely application-owned. Quick navigations that
-finish before the delay do not flash it.
+The fallback is the route area's normal rendered state while loading. The component adds no layout element or fallback CSS: a skeleton can be full-page, card-sized, centered, or any other shape entirely through application code.
 
-The native scoped-slot shape is also available for application-owned
-`KeepAlive` or transition composition. `RouterView` does not add a route key, so
-Vue Router's normal component-reuse behavior remains intact:
+While middleware or guards can still cancel, a fully resolved current page may be retained outside the document so cancellation can restore the same component instance. That retention ends at the router decision; unresolved destinations are never retained by it, and it does not become an implicit page cache.
+
+The fallback is optional and entirely application-owned. Quick navigations that finish before the delay do not flash it.
+
+The native scoped-slot shape is also available for application-owned `KeepAlive` or transition composition. `RouterView` does not add a route key, so Vue Router's normal component-reuse behavior remains intact:
 
 ```vue
 <RouterView>
@@ -481,42 +655,33 @@ Vue Router's normal component-reuse behavior remains intact:
       <component :is="Component" />
     </KeepAlive>
   </template>
-
   <template #fallback>
     <PageSkeleton />
   </template>
 </RouterView>
 ```
 
-The scoped `Component` includes the enhanced page Suspense boundary. An
-application-owned `KeepAlive` therefore remains outside page readiness and is
-the only mechanism that keeps accepted pages cached across later navigations.
+The scoped `Component` includes the enhanced page Suspense boundary. An application-owned `KeepAlive` therefore remains outside page readiness and is the only mechanism that keeps accepted pages cached across later navigations.
 
-For a simple global bar, use the optional CSS-animated indicator alone or
-together with a route fallback:
+For a simple global bar, use the optional CSS-animated indicator alone or together with a route fallback:
 
 ```vue
 <script setup lang="ts">
 import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 </script>
-
 <template>
   <LoadingIndicator :delay="120" />
   <RouterView />
 </template>
 ```
 
-`LoadingIndicator` forwards `class` and `style` to its root element, so the
-indicator can be sized or positioned alongside the rest of your application:
+`LoadingIndicator` forwards `class` and `style` to its root element, so the indicator can be sized or positioned alongside the rest of your application:
 
 ```vue
 <LoadingIndicator class="app-loading" :style="{ height: '4px' }" />
 ```
 
-The default color is `#3B82F6` in light mode and `#3B82F6` in dark mode. Dark
-mode is selected automatically when any parent or document element has the
-`dark` or `dark-mode` class. To override the color, set the existing
-`--vssl-loading-indicator-color` variable from application CSS:
+The default color is `#3B82F6` in light mode and `#3B82F6` in dark mode. Dark mode is selected automatically when any parent or document element has the `dark` or `dark-mode` class. To override the color, set the existing `--vssl-loading-indicator-color` variable from application CSS:
 
 ```css
 .app-loading {
@@ -524,8 +689,7 @@ mode is selected automatically when any parent or document element has the
 }
 ```
 
-You can also set the variable globally. An explicit application value remains
-authoritative in both themes:
+You can also set the variable globally. An explicit application value remains authoritative in both themes:
 
 ```css
 :root {
@@ -533,35 +697,23 @@ authoritative in both themes:
 }
 ```
 
-The inner bar uses inline width, height, transform, and animation values while
-navigation is loading. The supported styling surface is the root
-`class`/`style` plus the color variable above.
+The inner bar uses inline width, height, transform, and animation values while navigation is loading. The supported styling surface is the root `class`/`style` plus the color variable above.
 
-SSR renders the accepted route content directly and hydration does not show a
-loader for that already-rendered page. A direct SPA load happens before Vue is
-mounted, so keep a small static shell fallback in `index.html` for initial boot:
+SSR renders the accepted route content directly and hydration does not show a loader for that already-rendered page. A direct SPA load happens before Vue is mounted, so keep a small static shell fallback in `index.html` for initial boot:
 
 ```html
 <div id="app"></div>
 <div class="initial-loader">Loading application…</div>
-
 <style>
-  #app:not(:empty) + .initial-loader {
+#app:not(:empty) + .initial-loader {
     display: none;
   }
 </style>
 ```
 
-After mount, `RouterView` and `LoadingIndicator` use the same subsequent browser
-navigation clock. The indicator remains active after `afterEach` while the
-accepted destination still has unresolved lazy components, async `setup()`, or
-top-level `await` work.
+After mount, `RouterView` and `LoadingIndicator` use the same subsequent browser navigation clock. The indicator remains active after `afterEach` while the accepted destination still has unresolved lazy components, async `setup()`, or top-level `await` work.
 
-Vue Router's default and application-defined `scrollBehavior` run after that
-accepted page generation is ready, so saved positions and hash targets can
-refer to async page content. If a later navigation supersedes the page while an
-asynchronous custom scroll behavior is still running, its eventual position is
-discarded instead of being applied to the newer page.
+Vue Router's default and application-defined `scrollBehavior` run after that accepted page generation is ready, so saved positions and hash targets can refer to async page content. If a later navigation supersedes the page while an asynchronous custom scroll behavior is still running, its eventual position is discarded instead of being applied to the newer page.
 
 # SEO
 
@@ -600,13 +752,11 @@ For multi-application configuration, put `seo` on the relevant `defineApplicatio
 ```ts
 // server.ts
 import { defineServer, type SiteSeoResolution } from 'vue-ssr-lite'
-
 export default defineServer({
   seo: {
     site: {
       resolve: async ({ applicationId, siteOrigin, domain, signal }): Promise<SiteSeoResolution> => {
         const response = await fetch(`https://api.example.com/sites/${domain.hostname}`, { signal })
-
         const site = await response.json()
         if (!site) return { status: 'not-found', responseStatus: 404 }
         return {
@@ -624,8 +774,7 @@ export default defineServer({
 })
 ```
 
-The resolver never runs in the browser. Core supplies `siteOrigin` from the
-selected application's normalized request domain.
+The resolver never runs in the browser. Core supplies `siteOrigin` from the selected application's normalized request domain.
 
 ## Route SEO
 
@@ -648,7 +797,6 @@ selected application's normalized request domain.
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useSeo } from 'vue-ssr-lite'
-
 useSeo(
   computed(() => ({
     title: article.value.title,
@@ -664,17 +812,13 @@ useSeo(
 
 ```ts
 import { redirectTo, setHttpStatus } from 'vue-ssr-lite'
-
 setHttpStatus(404)
 redirectTo('/new-location', { status: 308 })
 ```
 
-`setHttpStatus()` sets the current HTTP/page status. During SSR this controls the
-HTTP response status; browser runtime state remains component-scoped according
-to the existing navigation lifecycle.
+`setHttpStatus()` sets the current HTTP/page status. During SSR this controls the HTTP response status; browser runtime state remains component-scoped according to the existing navigation lifecycle.
 
-`redirectTo()` sets a validated HTTP redirect for the current server-rendered
-request. It does not perform Vue Router or browser-history navigation.
+`redirectTo()` sets a validated HTTP redirect for the current server-rendered request. It does not perform Vue Router or browser-history navigation.
 
 Status precedence is framework/route status, deepest matched route `meta.seo.status`, active `useSeo({ status })` layers, imperative `setHttpStatus()`, then an actual redirect response.
 
@@ -694,7 +838,6 @@ Static Vue Router routes are discovered automatically. SPA / `noindex` branches 
 
 ```ts
 import { defineSitemap, type SitemapContext } from 'vue-ssr-lite/server'
-
 export const sitemap = defineSitemap(async (context: SitemapContext) => {
   const articles = await loadPublishedArticles(context.domain.hostname, {
     signal: context.signal,
@@ -722,11 +865,9 @@ export default defineServer({
 })
 ```
 
-When Core serves an application's sitemap, omitted `sitemaps` advertises that
-sitemap using the authoritative request origin. `sitemaps: [...]` uses exactly
-the supplied values, while `sitemaps: []` suppresses sitemap advertisement.
-Use `resolve` only when tenant or publication policy requires a request-time
-decision; it returns the same configuration shape.
+When Core serves an application's sitemap, omitted `sitemaps` advertises that sitemap using the authoritative request origin. `sitemaps: [...]` uses exactly the supplied values, while `sitemaps: []` suppresses sitemap advertisement.
+
+Use `resolve` only when tenant or publication policy requires a request-time decision; it returns the same configuration shape.
 
 Private mode emits `Disallow: /`. If `public/robots.txt` exists, that file is used instead.
 
@@ -745,7 +886,6 @@ export default defineServer({
 ```vue
 <script setup lang="ts">
 import { usePublicConfig } from 'vue-ssr-lite'
-
 const config = usePublicConfig<{ apiUrl: string }>()
 </script>
 ```
@@ -756,19 +896,12 @@ The factory runs server-side once per request. Returned values must be JSON-safe
 
 ```ts
 import { useOrigin } from 'vue-ssr-lite'
-
 const origin = useOrigin()
 ```
 
-`useOrigin()` reads the authoritative public origin for the current
-application/request.
+`useOrigin()` reads the authoritative public origin for the current application/request.
 
-By default, Core derives the origin from the normalized request domain after
-host selection and trusted-proxy processing. A non-empty result from the
-server-only `resolveSiteUrl()` is authoritative; an undefined, empty, or
-whitespace result falls through to `seo.siteUrl`, then `PUBLIC_URL`, then the
-normalized request origin. Enable `server.trustProxy` only behind a trusted
-reverse proxy.
+By default, Core derives the origin from the normalized request domain after host selection and trusted-proxy processing. A non-empty result from the server-only `resolveSiteUrl()` is authoritative; an undefined, empty, or whitespace result falls through to `seo.siteUrl`, then `PUBLIC_URL`, then the normalized request origin. Enable `server.trustProxy` only behind a trusted reverse proxy.
 
 # Server Configuration
 
@@ -797,18 +930,11 @@ export default defineServer({
 | `onMetrics`                | Render metrics callback                         |
 | `renderError`              | Custom render-error response                    |
 
-Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML,
-custom endpoints, health/readiness checks, Vite responses, and production
-assets bypass it. When both limits are full, the server returns `503 Service
-Unavailable`; queue time remains part of `requestTimeoutMs`. Set
-`maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are
-occupied.
+Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML, custom endpoints, health/readiness checks, Vite responses, and production assets bypass it. When both limits are full, the server returns `503 Service Unavailable`; queue time remains part of `requestTimeoutMs`. Set `maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are occupied.
 
-`PORT` overrides the configured port. A non-empty `HOST` overrides the
-configured bind host; whitespace-only `HOST` is ignored.
+`PORT` overrides the configured port. A non-empty `HOST` overrides the configured bind host; whitespace-only `HOST` is ignored.
 
-Application code supplies business data and policy. `vue-ssr-lite` owns
-SSR, HTTP, domain, origin, head, sitemap, and robots mechanics.
+Application code supplies business data and policy. `vue-ssr-lite` owns SSR, HTTP, domain, origin, head, sitemap, and robots mechanics.
 
 # Production
 
@@ -824,8 +950,7 @@ dist/
     └── SsrRuntime.js
 ```
 
-Production public origins still require HTTPS by default. Set
-`seo.allowHttpOrigin` only for an intentional exception.
+Production public origins still require HTTPS by default. Set `seo.allowHttpOrigin` only for an intentional exception.
 
 # CLI
 
@@ -858,6 +983,7 @@ vue-ssr-lite start
 import {
   defineServer,
   defineApplication,
+  useFetch,
   useSeo,
   usePublicConfig,
   useOrigin,
@@ -876,6 +1002,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | ------------------- | ------------------------------------------------ |
 | `defineServer`      | Configure the server/runtime                     |
 | `defineApplication` | Register an explicit application                 |
+| `useFetch`          | Fetch page data with SSR, hydration, typed refs, and caching |
 | `useSeo`            | Set reactive SEO/head data                       |
 | `usePublicConfig`   | Read browser-safe server config                  |
 | `useOrigin`         | Read the authoritative public origin             |
@@ -928,25 +1055,13 @@ components
 
 `defineApplication()` may mention routes and SEO in `app.ts`. The compiler projects a client graph from `main`, `App.vue`, and the routes module. It does not import the complete server configuration into browser bundles.
 
-Six configuration fields are also projected into the browser: `extensions`,
-`middleware`, `router`, `scrollBehavior`, `createInitialState`, and `cleanup`. Core
-normally requires their dependencies to be universal and browser-safe. The only
-environment-specific exception is middleware on a statically proven default-SPA
-application, which never executes on the server and therefore uses its normal Vite
-browser dependency graph. This boundary keeps SEO, sitemap, robots, endpoints,
-Node APIs, secrets, and other server-only imports out of the browser bundle.
+Six configuration fields are also projected into the browser: `extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, and `cleanup`. Core normally requires their dependencies to be universal and browser-safe. The only environment-specific exception is middleware on a statically proven default-SPA application, which never executes on the server and therefore uses its normal Vite browser dependency graph. This boundary keeps SEO, sitemap, robots, endpoints, Node APIs, secrets, and other server-only imports out of the browser bundle.
 
-Use static inline expressions, direct imports from browser-safe modules, or dedicated
-`const` bindings whose dependencies are also static. A config stored in a `const` and
-the documented function/async export that directly returns `defineServer({...})` are
-supported too.
+Use static inline expressions, direct imports from browser-safe modules, or dedicated `const` bindings whose dependencies are also static. A config stored in a `const` and the documented function/async export that directly returns `defineServer({...})` are supported too.
 
-Core intentionally fails closed when a universal value is reassigned, mutated,
-passed to an unknown call or constructor, returned from an unrelated function,
-stored or exported through an unproven reference, or built through a dynamic factory.
-Keep universal values in dedicated static bindings and keep server-only work outside
-their dependency graph. Unsupported indirection is a configuration error rather than
-a potentially different value after hydration.
+Core intentionally fails closed when a universal value is reassigned, mutated, passed to an unknown call or constructor, returned from an unrelated function, stored or exported through an unproven reference, or built through a dynamic factory.
+
+Keep universal values in dedicated static bindings and keep server-only work outside their dependency graph. Unsupported indirection is a configuration error rather than a potentially different value after hydration.
 
 # Domains
 
@@ -964,20 +1079,15 @@ domain: {
 
 ```ts
 import { useDomain } from 'vue-ssr-lite'
-
 const domain = useDomain()
 ```
 
-`useDomain()` reads the selected application's normalized domain information
-during SSR and after hydration. It exposes the selected application, normalized
-authority/hostname, base domain, subdomain, custom-domain flag, and declared
-domain params.
+`useDomain()` reads the selected application's normalized domain information during SSR and after hydration. It exposes the selected application, normalized authority/hostname, base domain, subdomain, custom-domain flag, and declared domain params.
 
 # Advanced: Custom Extensions
 
 ```ts
 import { defineExtension } from 'vue-ssr-lite'
-
 const analytics = defineExtension({
   name: 'analytics',
   setup(context) {
@@ -989,12 +1099,13 @@ const analytics = defineExtension({
 ```
 
 Register extensions on `defineServer()` or `defineApplication()`, not in `main.ts`.
-Projected fields (`extensions`, `middleware`, `router`, `scrollBehavior`,
-`createInitialState`, `cleanup`) follow the static projection contract above.
+
+Projected fields (`extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, `cleanup`) follow the static projection contract above.
+
 Prefer defining an extension inline or in a dedicated `const`;
-`defineServer(factory())` and mutation-capable reference indirection are rejected
-because the server and browser definitions could silently diverge. The default-SPA
-middleware dependency exception changes only environment-equivalence validation;
+
+`defineServer(factory())` and mutation-capable reference indirection are rejected because the server and browser definitions could silently diverge. The default-SPA middleware dependency exception changes only environment-equivalence validation;
+
 it does not weaken these static identity and mutation checks.
 
 # Common Problems
@@ -1009,8 +1120,7 @@ Install the plugin inside the `main.ts` initializer so Core creates it per Vue a
 
 ## Production origin rejected
 
-Use an HTTPS request origin or configure an explicit HTTPS `PUBLIC_URL` /
-`seo.siteUrl`. HTTP requires the intentional `seo.allowHttpOrigin` exception.
+Use an HTTPS request origin or configure an explicit HTTPS `PUBLIC_URL` / `seo.siteUrl`. HTTP requires the intentional `seo.allowHttpOrigin` exception.
 
 ## Wrong host/protocol behind a proxy
 
