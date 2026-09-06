@@ -18,6 +18,7 @@ const ROOT_RUNTIME_EXPORTS = [
   'redirectTo',
   'setHttpStatus',
   'usePublicConfig',
+  'useFetch',
   'useSeo',
   'useOrigin',
   'useDomain',
@@ -116,6 +117,20 @@ const ROOT_TYPE_EXPORTS = [
   'SsrSiteSeoInput',
   'UseSeoInput',
   'UseSeoSource',
+  'UseFetchDoneContext',
+  'UseFetchError',
+  'UseFetchErrorContext',
+  'UseFetchOptions',
+  'UseFetchOptionsBase',
+  'UseFetchOptionsParameter',
+  'UseFetchPolicy',
+  'UseFetchResult',
+  'UseFetchReturn',
+  'UseFetchVariablePrimitive',
+  'UseFetchVariableShape',
+  'UseFetchVariableValue',
+  'UseFetchVariables',
+  'VariablesOption',
 ]
 
 /** ADVANCED PUBLIC CONTRACT: browser bootstrap and hydration types. */
@@ -214,6 +229,8 @@ const HIDDEN_ROOT_RUNTIME_EXPORTS = [
   'renderSsrApplication',
   'SSR_REQUEST_CONTEXT',
   'useSsrRequestContext',
+  'SSR_FETCH_RUNTIME',
+  'SsrFetchRuntime',
 ]
 
 interface EntrypointSourceSurface {
@@ -341,6 +358,10 @@ describe('public package entrypoint contracts', () => {
       'SsrNormalizedConfig',
       'SsrSingleApplicationConfig',
       'SsrViteApplicationEntry',
+      'FetchEntry',
+      'HookConsumer',
+      'FetchIdentity',
+      'HydratedFetchRecord',
     ]) {
       expect(exportedTypes).not.toContain(name)
     }
