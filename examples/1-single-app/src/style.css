@@ -28,8 +28,13 @@ nav {
   border: 1px solid #ddd;
 }
 
-.product-card img {
-  object-fit: cover;
+.product-mark {
+  display: grid;
+  place-items: center;
+  min-height: 160px;
+  background: #f1f4f3;
+  color: #38514b;
+  font-size: 48px;
 }
 
 .product-card h2 {
