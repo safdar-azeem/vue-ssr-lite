@@ -125,6 +125,7 @@ export const renderSsrApplication = async <
   let routeReadyAt = startedAt
   let renderedAt = startedAt
   let carried: Record<string, unknown> | undefined
+  let carriedReconciliation: Record<string, unknown> | undefined
   let carriedApplication: TApplicationState | undefined
   let carriedResponse: SsrResponseState | undefined
   let created:
@@ -183,6 +184,8 @@ export const renderSsrApplication = async <
         server: true,
         request,
         resumeState: pass === 0 ? undefined : carried,
+        resumeReconciliationState:
+          pass === 0 ? undefined : carriedReconciliation,
         resumeApplicationState:
           pass === 0 ? undefined : carriedApplication,
         resumeResponseState: pass === 0 ? undefined : carriedResponse,
@@ -291,12 +294,16 @@ export const renderSsrApplication = async <
         break
       }
 
-      // The rendered tree was invalidated. Carry plugin state forward and
+      // The rendered tree was invalidated. Carry browser-safe plugin state and
+      // request-local reconciliation history through separate channels, then
       // recreate the application warm for the next bounded pass.
       // Transfer owned snapshots before cleanup. A discarded application's
       // cleanup cannot mutate the state accepted by the next pass.
       carried = snapshotSsrReconciliationState(
         created.hydration.collect()
+      )
+      carriedReconciliation = snapshotSsrReconciliationState(
+        created.hydration.collectReconciliation()
       )
       carriedApplication = snapshotSsrReconciliationState(
         created.context.state
