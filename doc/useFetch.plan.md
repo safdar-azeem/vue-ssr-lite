@@ -341,25 +341,114 @@ data
  ↓
 SSR HTML
  ↓
-hydration payload
+hydration payload (public identity → HydratedFetchRecord: state, optional cache)
 
 
 BROWSER
 
-restore fetch record BEFORE component setup
+read hydration payload BEFORE component setup
  ↓
-useFetch(same identity)
+restore into temporary hydration continuation map:
+HydrationRecordMap
+public identity → HydratedFetchRecord
+(DO NOT create normal FetchEntry yet; runtime fingerprint is unknown)
  ↓
-restore consumer state for initial markup
+component setup runs
  ↓
-seed successful cache independently when present
+useFetch()
+ ├── resolve final URL
+ ├── derive public identity A
+ ├── derive THIS browser consumer's runtime fingerprint F
+ ├── find temporary HydratedFetchRecord by public identity A
+ ├── restore consumer state
+ └── adopt record.cache, if present, into normal runtime entry:
+     FetchEntry[A + F]
  ↓
 no hydration network request
  ↓
 NO callback replay
+ ↓
+initial application hydration completes
+ ↓
+CLEAR HydrationRecordMap completely
 ```
 
-This hydration authority overrides `network-only`.
+Conceptually:
+
+```text
+SSR payload
+
+public-id-A
+  state
+  cache
+       ↓
+
+temporary hydration continuation map
+
+       ↓ component setup
+
+useFetch()
+  publicIdentity = A
+  runtimeFingerprint = F
+       ↓
+
+consumer ← state
+
+FetchEntry[A + F] ← cache
+```
+
+This gives the browser cache its proper normal runtime identity without
+serializing server secrets.
+
+The browser only learns the consumer's runtime fingerprint when `useFetch()`
+evaluates that consumer's:
+
+```text
+headers
+credentials
+mode
+redirect
+referrer
+referrerPolicy
+integrity
+cache
+```
+
+during component setup. This is particularly important for SSR automatic
+credentials; the hydration payload intentionally contains neither `Cookie` nor
+`Authorization` fingerprint material. Therefore the implementation must **not
+pre-seed the normal browser runtime entry map using only the public identity**,
+as that would silently bypass the fingerprint isolation designed in section 15.
+Instead, hydration records are held in the temporary public-identity
+continuation map until the hydrating consumer executes, derives its runtime
+fingerprint, and lazily adopts `record.cache`.
+
+### Hydration authority
+
+**During the initial hydration transaction only**, restored SSR continuation
+state has higher authority than fetch policy:
+
+```text
+hydration record
+>
+fetchPolicy
+>
+normal cache lookup
+```
+
+So even:
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'network-only',
+})
+```
+
+still adopts the SSR continuation and performs zero hydration request.
+
+After initial application hydration completes and `HydrationRecordMap` is
+cleared, `network-only` means network-only again, and all subsequent hook calls
+follow normal fetch policies.
 
 `network-only` must **not** cause:
 
@@ -426,9 +515,97 @@ server:false
 ```
 
 On hydration, the common consumer `state` preserves SSR markup exactly. The
-optional `cache` seeds the browser entry separately and may satisfy a future
-`cache-first` consumer after hydration. Omit `cache` when no successful value
-exists.
+optional `cache`, if present, is adopted into the fingerprinted normal browser
+runtime entry `FetchEntry[public identity + browser runtime fingerprint]`
+separately and may satisfy a future `cache-first` consumer after hydration. Omit
+`cache` when no successful value exists.
+
+### Multiple consumers during hydration
+
+If several hydrating consumers share one public identity, the existing SSR
+collision rule guarantees they had compatible server-side state and runtime
+fingerprints. On the browser, those hydrating consumers must also resolve to a
+compatible normal runtime identity.
+
+Required behavior:
+
+```text
+consumer A
+public = A
+browser fingerprint = F1
+
+consumer B
+public = A
+browser fingerprint = F1
+→ valid
+→ share adopted runtime entry FetchEntry[A + F1]
+```
+
+When consumer A runs during hydration, it derives `F1`, adopts `record.cache`
+into `FetchEntry[A + F1]`, restores its consumer state, and binds the
+continuation record for public identity `A` to `F1`. When consumer B runs with
+public identity `A`, it derives its browser fingerprint, confirms compatibility
+with `F1`, shares `FetchEntry[A + F1]`, and restores its consumer state.
+
+If somehow:
+
+```text
+consumer A → A + F1
+consumer B → A + F2
+```
+
+during hydration, do **not** copy or clone one hydrated cache value into two
+semantically different runtime entries. Treat this as a deterministic
+hydration configuration mismatch and require distinct explicit keys. Do not
+weaken fingerprint isolation just because a hydration record exists.
+
+### Continuation map lifetime and cleanup
+
+The temporary `HydrationRecordMap` has a strict **initial-hydration lifetime**:
+
+```text
+read SSR payload
+ ↓
+create HydrationRecordMap
+ ↓
+initial Vue hydration/setup runs
+ ↓
+all initial hydrating consumers may consume/share records
+ ↓
+initial application hydration completes (or fails / app is disposed)
+ ↓
+CLEAR HydrationRecordMap completely
+```
+
+During initial hydration, multiple components in the initial tree may
+legitimately share the same public identity, so records must not be deleted
+immediately after the first hook consumes them. Instead, records remain
+available throughout the entire initial hydration transaction.
+
+Once initial application hydration completes:
+
+- Discard the entire `HydrationRecordMap` completely.
+- Any unconsumed hydration records are discarded.
+- Clearing `HydrationRecordMap` does **not** remove an already adopted normal
+  fingerprinted `FetchEntry`; adopted successful cache values survive in the
+  normal browser application cache under ordinary cache/LRU rules.
+- Any later hook invocation—such as a new component mount, route transition,
+  `KeepAlive` re-entry requiring new hook creation, or later conditional
+  subtree rendering—must use ordinary runtime behavior (`fetchPolicy` /
+  `nextFetchPolicy` against the normal fingerprinted cache) and must **never**
+  consult SSR continuation records.
+- If hydration fails or application disposal occurs, clear the
+  `HydrationRecordMap` during cleanup.
+
+```text
+HydrationRecordMap
+→ temporary continuation map
+→ always cleared after initial hydration completes, fails, or on disposal
+
+FetchEntry map
+→ normal application cache
+→ survives after hydration under normal cache/LRU rules
+```
 
 ## Hydration identity and collision rule
 
@@ -441,12 +618,58 @@ final normalized request URL (fragment removed, query canonical)
 explicit key namespace
 ```
 
-Before dehydration, group entries and active SSR consumers by this public
-hydration identity. One `HydratedFetchRecord` may be emitted for an identity
-only when both conditions hold:
+Distinguish two independent lifecycle concepts:
+
+```text
+live HookConsumer
+→ exists from hook invocation until component scope disposal or application disposal
+→ participates in hydration snapshot validation and collision accounting
+
+entry attachment
+→ exists only while consumer observes/needs an in-flight physical execution
+→ controls physical-request cancellation and deduplication
+```
+
+A hook does **not** stop being a live consumer simply because it is no longer
+awaiting a physical request. When a consumer times out, is aborted by caller
+signal, completes execution, or hits the cache via `cache-first`, it detaches
+from the physical request (`FetchEntry`), but **remains a live `HookConsumer`**
+whose state affects rendered HTML.
+
+For example:
+
+```text
+component remains in SSR tree
+ ↓
+useFetch starts
+ ↓
+consumer timeout fires (or caller aborts)
+ ↓
+consumer detaches from physical request
+ ↓
+consumer refs become:
+  pending = false
+  error = timeout (or null for non-timeout abort)
+ ↓
+component SSR markup renders timeout/error state
+```
+
+Even though the consumer is no longer attached to the physical request, it is
+still a live hook consumer whose state affects rendered HTML. If dehydration
+interpreted “active” as “currently attached to FetchEntry”, that consumer would
+disappear from hydration collision and state generation, causing browser
+markup to diverge.
+
+Only component scope disposal (or application unmount) removes a consumer from
+hydration accounting.
+
+Before dehydration, group entries and ALL live SSR consumers (not merely
+consumers currently attached to a physical request) by this public hydration
+identity. One `HydratedFetchRecord` may be emitted for an identity only when
+both conditions hold:
 
 1. every entry in the group has the same runtime request fingerprint; and
-2. every active consumer has the same hydration-visible snapshot:
+2. every live consumer has the same hydration-visible snapshot:
    `data`, `pending`, and safe `error`.
 
 Compare consumer snapshots using the same generic hydration serialization used
@@ -458,9 +681,10 @@ must identify the public identity and instruct the developer to provide
 distinct explicit keys, for example `customer-profile` and `admin-profile`.
 
 This also rejects divergent consumers such as a successful parent and a
-failed `network-only` child, or `server:false` and automatic consumers sharing
-one identity. It preserves their final SSR markup by requiring separate keys
-instead of choosing one consumer state to hydrate.
+failed `network-only` child, a timed-out consumer alongside a successful one, or
+`server:false` and automatic consumers sharing one identity. It preserves their
+final SSR markup by requiring separate keys instead of choosing one consumer
+state to hydrate.
 
 Never serialize a private fingerprint, a raw native request option, or a secret
 solely to resolve this collision. An explicit `key` always contributes to the
@@ -494,14 +718,30 @@ HookConsumer
 └── policy progression / identity generation
 ```
 
-Consumers with the same identity share settled successful data, the physical
-in-flight request, and its settled outcome. Each consumer projects that
+As defined above, `HookConsumer` and `entry attachment` are separate
+lifecycles:
+
+```text
+live HookConsumer
+→ exists until component scope disposal / app disposal
+→ participates in hydration snapshot validation
+
+entry attachment
+→ exists only while consumer observes/needs a physical execution
+→ controls physical-request cancellation
+```
+
+Consumers with the same runtime identity share settled successful data, the
+physical in-flight request, and its settled outcome. Each consumer projects that
 outcome into its own `data`, `pending`, and `error` refs and invokes only its
-own callbacks. A consumer's cancellation or timeout detaches that consumer;
-it must not set another consumer's `pending` or `error` state. The physical
-request is aborted only when no consumers remain, the SSR request signal is
-aborted, or the application is disposed. A caller signal and consumer timeout
-are therefore never passed directly as the shared request's cancellation
+own callbacks. A consumer's cancellation or timeout detaches that consumer from
+the physical request; it must not set another consumer's `pending` or `error`
+state. Detaching from the physical request does not remove the consumer from
+live consumer accounting: it remains a live `HookConsumer` until component scope
+disposal, participating in SSR hydration collision checking. The physical
+request is aborted only when no consumers remain attached to it, the SSR request
+signal is aborted, or the application is disposed. A caller signal and consumer
+timeout are therefore never passed directly as the shared request's cancellation
 condition while another consumer is attached.
 
 The server entry map is scoped to one HTTP request. The browser entry map is
@@ -861,6 +1101,40 @@ Consumer policies remain independent. If consumer A starts a `network-only`
 execution while consumer B uses `cache-first` against existing cached data, B
 receives the cached data with `pending=false`. Every active consumer whose
 current identity matches a successful cache commit must receive the new data.
+
+A passive successful cache commit updates that consumer's `data` ref, but does
+**not** alter that consumer's `pending` state, does **not** clear or alter its
+existing execution `error`, and does **not** fire its callbacks:
+
+```text
+passive successful cache commit:
+→ update data
+→ do NOT alter that consumer's pending
+→ do NOT alter that consumer's error
+→ do NOT fire callbacks
+```
+
+Only that consumer's own new logical execution should clear or replace its
+execution error. This preserves the principle that `error` describes that
+hook's own latest execution rather than unrelated shared-cache activity. For
+example:
+
+```text
+consumer A refreshes
+→ refresh fails
+→ consumer A:
+   data = V1
+   error = E
+
+later
+
+consumer B performs successful network request
+→ cache becomes V2
+→ consumer A passively receives V2:
+   data = V2
+   error = E (remains unchanged)
+```
+
 When A's request succeeds, B receives the committed data, remains
 `pending=false`, and does not receive `onDone` because its own logical
 execution did not complete.
@@ -1210,10 +1484,25 @@ one mounted vue-ssr-lite application
 → one fetch cache
 ```
 
+Normal browser `FetchEntry` entries are addressed strictly by `public identity
++ runtime request fingerprint`. Hydrated cache values are never pre-seeded into
+the normal runtime entry map using only the public identity; they are held in a
+temporary continuation map (`HydrationRecordMap`) and adopted into the
+fingerprinted runtime cache only when a hydrating consumer evaluates its runtime
+options during component setup.
+
+`HydrationRecordMap` exists strictly for the initial browser hydration
+transaction. It is cleared completely once initial hydration finishes, fails,
+or on application unmount. Clearing `HydrationRecordMap` does not affect the
+normal `FetchEntry` map: adopted successful cache entries continue to survive in
+the normal application cache according to standard browser cache/LRU rules.
+
 Consumers with the same runtime map key share the entry's settled successful
 data, active physical request, and cache updates. The entry also records the
 active execution's settled outcome, but that outcome is projected into each
-consumer separately.
+consumer separately. A passive successful cache commit updates an active
+consumer's `data` ref without changing its `pending` or `error` refs or firing
+its callbacks.
 Each hook still owns:
 
 - its `data`, `pending`, and `error` refs;
@@ -1311,6 +1600,19 @@ fingerprint. Neither the fingerprint nor raw native request-option values may
 enter hydration state. During SSR, the collision rule in section 4 rejects a
 snapshot where multiple runtime fingerprints would need to occupy one public
 hydration identity.
+
+On the browser, hydration records are initially placed into a temporary
+continuation map (`HydrationRecordMap`) keyed only by public identity. The
+normal browser runtime map key cannot be formed until a hydrating `useFetch()`
+call executes during component setup and derives this browser consumer's runtime
+fingerprint. Only then is `record.cache` adopted into `FetchEntry[public
+identity + runtime fingerprint]`. Hydration never creates or shares a normal
+browser `FetchEntry` solely by public identity and never serializes or
+private-reconstructs credential fingerprint material from server state. If
+multiple hydrating consumers share a public identity but derive incompatible
+browser runtime fingerprints, the runtime raises a deterministic hydration
+configuration error requiring distinct explicit keys rather than cloning the
+hydrated cache into multiple entries.
 
 ---
 
@@ -1437,11 +1739,17 @@ consumer-level observer signal
 ```
 
 The entry-level signal is the only signal passed to the shared native fetch.
-The consumer-level signal only detaches that consumer and settles its own
-state. A consumer abort must not abort a physical request that another
-consumer still needs. When the last consumer detaches, the entry controller
-aborts the orphaned physical request. An aborted SSR request or disposed
-application may abort the entry even while consumers remain attached.
+The consumer-level signal only detaches that consumer from the physical request
+and settles its own state. A consumer abort must not abort a physical request
+that another consumer still needs. When the last consumer detaches, the entry
+controller aborts the orphaned physical request. An aborted SSR request or
+disposed application may abort the entry even while consumers remain attached.
+
+Detaching a consumer from a physical request does not remove it from hydration
+accounting. A timed-out or caller-aborted SSR consumer whose component scope is
+still live remains a live `HookConsumer` participating in SSR hydration
+collision and snapshot validation, ensuring rendered timeout or aborted markup
+is preserved without divergence.
 
 For a non-timeout caller abort or per-consumer lifecycle detach, settle only
 that consumer as follows:
@@ -1500,7 +1808,13 @@ examples/1-single-app/src/pages/ProductsPage.vue
 
 Create/provide the fetch runtime before root component setup.
 
-Reuse the existing hydration controller.
+Reuse the existing hydration controller. Hold restored hydration records in a
+temporary `HydrationRecordMap` (scoped to the runtime instance) keyed by public
+identity until component setup derives the consumer's runtime fingerprint, then
+lazily adopt `record.cache` into the fingerprinted `FetchEntry` map. Clear
+`HydrationRecordMap` completely when the initial application hydration finishes,
+on hydration failure, or upon application disposal, while retaining adopted
+entries in the normal `FetchEntry` map.
 
 Do not implement through the public extension API.
 
@@ -1647,10 +1961,10 @@ Also cover:
     `vue-ssr-lite` runtime throws the descriptive configuration error, and
     callback `ctx.key` is an opaque equality-comparable public identity that
     does not expose a runtime fingerprint or promise a string format.
-34. SSR rejects active consumers sharing a public hydration identity when
+34. SSR rejects live consumers sharing a public hydration identity when
     their `data`, `pending`, or safe `error` snapshots diverge—for example, a
-    successful parent and failed `network-only` child—and requires distinct
-    explicit keys.
+    successful parent and failed `network-only` child, or a timed-out consumer
+    alongside a successful one—and requires distinct explicit keys.
 35. when cached success V1 exists and a `network-only` consumer fails, SSR
     renders and hydration restores that consumer's failure state without a
     browser request, while the independently restored cache lets a later
@@ -1658,6 +1972,32 @@ Also cover:
 36. same-origin relative, absolute, and variables-derived URLs normalize to
     one public identity, while a cross-origin URL includes its origin and
     remains distinct.
+37. Hydration records remain in a temporary public-identity continuation map
+    until a hydrating useFetch call derives its browser runtime fingerprint;
+    only then is record.cache adopted into the normal runtime entry.
+38. Hydration never creates or shares a normal browser FetchEntry solely by
+    public identity and never serializes/private-reconstructs credential
+    fingerprint material.
+39. Two hydrating consumers with one public identity but incompatible browser
+    runtime fingerprints fail deterministically instead of cloning one hydrated
+    cache value into both entries.
+40. A timed-out or caller-aborted SSR consumer that is still mounted remains
+    part of hydration-state/collision accounting after detaching from its
+    physical request.
+41. A passive successful cache commit updates another active consumer's data
+    but does not clear that consumer's existing execution error or fire its
+    callbacks.
+42. HydrationRecordMap exists only for the initial browser hydration
+    transaction. It remains available long enough for every initial hydrating
+    consumer, then is cleared completely when initial hydration finishes.
+43. A component mounted after hydration with the same public identity cannot
+    restore consumer state from the old SSR continuation record. It follows
+    normal fetchPolicy/cache behavior.
+44. Clearing HydrationRecordMap does not remove an already adopted normal
+    fingerprinted FetchEntry; adopted successful cache continues under normal
+    browser cache/LRU semantics.
+45. Unconsumed hydration records and the continuation map are cleared on
+    hydration completion, hydration failure, or application disposal.
 
 ---
 
