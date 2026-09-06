@@ -62,6 +62,42 @@ publicResult
 
 `then()` always resolves with the **non-thenable `baseResult`**.
 
+## Initial execution and the lifetime of `then()`
+
+The thenable represents exactly one thing: this hook instance's **initial
+automatic execution decision**. It captures that decision when `useFetch()` is
+called and never changes what it waits for later.
+
+On SSR, `useFetch()` must start or join the initial execution immediately. The
+same promise is then observed in two ways:
+
+```text
+useFetch()
+ ↓
+start or join initial execution P immediately
+ ├── register `() => P` with onServerPrefetch()
+ └── PromiseLike.then() waits for P on SSR
+```
+
+`onServerPrefetch(() => P)` only registers an already-created promise with Vue.
+It must never be the mechanism that starts the request. This ordering is required
+to avoid a deadlock when async setup is currently waiting in `await
+useFetch()`.
+
+The `then()` behavior is fixed for the lifetime of the hook:
+
+| Situation at hook creation | What `await useFetch()` does |
+| --- | --- |
+| SSR, `server !== false`, `immediate !== false` | waits for this hook's initial execution `P` |
+| hydration with a restored result | resolves the restored non-thenable result immediately |
+| browser with a newly started request | resolves the base result immediately; it never waits for network time |
+| `immediate:false` | resolves the idle base result immediately; it does not call `refresh()` |
+| SSR with `server:false` | resolves the initial base result immediately; no server request is started |
+
+Reactive URL/variable changes and later automatic executions are not what
+`.then()` waits for. A later explicit execution is observed with `await
+refresh()` instead.
+
 ---
 
 # 2. Exact SSR Semantics
@@ -83,9 +119,9 @@ setup()
  ↓
 useFetch()
  ↓
-create/join fetch
+start or join the initial execution immediately
  ↓
-register same execution with onServerPrefetch()
+register `() => P` for that already-created execution with onServerPrefetch()
  ↓
 return refs immediately
  ↓
@@ -133,11 +169,14 @@ The imperative line after `useFetch()` may observe pending data, but the final S
 ## B. With `await`
 
 ```ts
-const { data } = await useFetch<Product[]>('/api/products')
+const { data, error } = await useFetch<Product[]>('/api/products')
 
-// On SSR, data is settled here.
 useSeo({
-  title: `${data.value?.length} Products`,
+  // Reactive in SSR, hydration, and browser navigation.
+  title: () =>
+    data.value && !error.value
+      ? `${data.value.length} Products`
+      : 'Products',
 })
 ```
 
@@ -148,7 +187,7 @@ setup()
  ↓
 useFetch()
  ↓
-native fetch starts / joins existing request
+native fetch starts / joins existing request immediately
  ↓
 await invokes PromiseLike.then()
  ↓
@@ -311,6 +350,48 @@ await useFetch(...)
 
 during hydration, `await` resolves immediately because restored data already exists.
 
+## Shared fetch entries versus hook consumers
+
+The implementation must separate shared cache-entry state from each
+`useFetch()` call's consumer state. A cache entry is an internal record for one
+request identity:
+
+```text
+FetchEntry
+├── settled successful data/cache metadata
+├── physical in-flight promise
+├── physical AbortController
+└── attached consumers
+```
+
+It is never exposed as a shared reactive result. Every hook call creates its
+own consumer record:
+
+```text
+HookConsumer
+├── data ref
+├── pending ref
+├── error ref
+├── initial execution promise
+├── caller signal and timeout
+├── callback subscriptions
+└── policy progression / identity generation
+```
+
+Consumers with the same identity share settled successful data, the physical
+in-flight request, and its settled outcome. Each consumer projects that
+outcome into its own `data`, `pending`, and `error` refs and invokes only its
+own callbacks. A consumer's cancellation or timeout detaches that consumer;
+it must not set another consumer's `pending` or `error` state. The physical
+request is aborted only when no consumers remain, the SSR request signal is
+aborted, or the application is disposed. A caller signal and consumer timeout
+are therefore never passed directly as the shared request's cancellation
+condition while another consumer is attached.
+
+The server entry map is scoped to one HTTP request. The browser entry map is
+scoped to one mounted application. Neither is a module-global cache or a
+cross-request state store.
+
 ---
 
 # 5. Public API
@@ -325,6 +406,14 @@ export type UseFetchVariablePrimitive = string | number | boolean | null | undef
 export type UseFetchVariableValue = UseFetchVariablePrimitive | readonly UseFetchVariablePrimitive[]
 
 export type UseFetchVariables = Record<string, UseFetchVariableValue>
+
+// Keeps concrete interfaces ergonomic while rejecting unsupported property
+// value types in the `variables` option.
+export type UseFetchVariableShape<TVariables extends object> = {
+  [K in keyof TVariables]: TVariables[K] extends UseFetchVariableValue
+    ? TVariables[K]
+    : never
+}
 
 export interface UseFetchError {
   readonly name: 'UseFetchError'
@@ -345,40 +434,88 @@ export interface UseFetchReturn<TData> {
 export type UseFetchResult<TData> = UseFetchReturn<TData> & PromiseLike<UseFetchReturn<TData>>
 ```
 
-Options:
+Define the complete options and callback contexts. `MaybeRefOrGetter` is the
+Vue type; `variables` is required when `TVariables` has required properties:
 
 ```ts
-key?: string
+export interface UseFetchDoneContext<TData, TVariables extends object> {
+  readonly data: TData
+  readonly variables: Readonly<TVariables>
+  readonly key: string
+  readonly server: boolean
+  readonly status: number
+  readonly statusText: string
+}
 
-method?: 'GET' | 'HEAD'
+export interface UseFetchErrorContext<TVariables extends object> {
+  readonly error: UseFetchError
+  readonly variables: Readonly<TVariables>
+  readonly key: string
+  readonly server: boolean
+  readonly status?: number
+  readonly statusText?: string
+}
 
-variables?: MaybeRefOrGetter<TVariables>
+export interface UseFetchOptionsBase<TData, TVariables extends object> {
+  key?: string
+  method?: 'GET' | 'HEAD'
 
-fetchPolicy?: UseFetchPolicy
-nextFetchPolicy?: UseFetchPolicy
+  // Native request semantics that can affect the returned representation.
+  headers?: HeadersInit
+  credentials?: RequestCredentials
+  mode?: RequestMode
+  redirect?: RequestRedirect
+  referrer?: string
+  referrerPolicy?: ReferrerPolicy
+  integrity?: string
+  cache?: RequestCache
 
-server?: boolean
-immediate?: boolean
-timeout?: number
-signal?: AbortSignal
+  fetchPolicy?: UseFetchPolicy
+  nextFetchPolicy?: UseFetchPolicy
 
-onDone?: (
-  ctx: UseFetchDoneContext<TData, TVariables>
-) => void
+  server?: boolean
+  immediate?: boolean
+  timeout?: number
+  signal?: AbortSignal
 
-onError?: (
-  ctx: UseFetchErrorContext<TVariables>
-) => void
+  onDone?: (ctx: UseFetchDoneContext<TData, TVariables>) => void
+  onError?: (ctx: UseFetchErrorContext<TVariables>) => void
+}
+
+export type VariablesOption<TVariables extends object> =
+  {} extends TVariables
+    ? { variables?: MaybeRefOrGetter<UseFetchVariableShape<TVariables>> }
+    : { variables: MaybeRefOrGetter<UseFetchVariableShape<TVariables>> }
+
+export type UseFetchOptions<
+  TData,
+  TVariables extends object,
+> = UseFetchOptionsBase<TData, TVariables> & VariablesOption<TVariables>
+
+export type UseFetchOptionsParameter<
+  TData,
+  TVariables extends object,
+> = {} extends TVariables
+  ? [options?: UseFetchOptions<TData, TVariables>]
+  : [options: UseFetchOptions<TData, TVariables>]
 ```
+
+Callback `variables` is the immutable normalized snapshot captured when the
+execution starts. When the option is omitted, use a readonly empty snapshot;
+never expose a mutable options object or a later reactive value.
 
 Signature concept:
 
 ```ts
-export function useFetch<TData = unknown, TVariables extends UseFetchVariables = UseFetchVariables>(
+export function useFetch<TData = unknown, TVariables extends object = UseFetchVariables>(
   url: MaybeRefOrGetter<string | URL>,
-  options?: UseFetchOptions<TData, TVariables>
+  ...options: UseFetchOptionsParameter<TData, TVariables>
 ): UseFetchResult<TData>
 ```
+
+Equivalent overloads are acceptable, but the public call signature must keep
+the second argument mandatory whenever `TVariables` has required properties;
+an optional `options` parameter would accidentally make `variables` optional.
 
 Defaults:
 
@@ -451,7 +588,28 @@ useFetch<Product[], ProductVariables>('/api/products', {
 })
 ```
 
-If `TVariables` contains required properties, TypeScript must require `variables`.
+The conditional options type is part of the public contract:
+
+```ts
+type VariablesOption<TVariables extends object> =
+  {} extends TVariables
+    ? { variables?: MaybeRefOrGetter<UseFetchVariableShape<TVariables>> }
+    : { variables: MaybeRefOrGetter<UseFetchVariableShape<TVariables>> }
+```
+
+Therefore a type with a required property rejects a call that omits
+`variables`, while an all-optional/open variables type keeps it optional:
+
+```ts
+interface RequiredProductVariables {
+  userId: number
+}
+
+useFetch<unknown, RequiredProductVariables>('/api/user') // must fail
+useFetch<unknown, RequiredProductVariables>('/api/user', {
+  variables: { userId: 1 },
+}) // valid
+```
 
 Incorrect variable names/types must fail at compile time.
 
@@ -608,6 +766,14 @@ const result = useFetch('/api/products', {
 
 No automatic execution.
 
+The initial consumer state is:
+
+```text
+data    undefined
+pending false
+error   null
+```
+
 Therefore:
 
 ```ts
@@ -628,11 +794,24 @@ On SSR:
 
 ```text
 no server network request
+data    undefined
+pending true
+error   null
 ```
 
-`await useFetch(..., { server:false })` resolves immediately.
+With the default `immediate:true`, SSR renders this pending skeleton. `await
+useFetch(..., { server:false })` still resolves immediately because no server
+execution is eligible. The same skeleton state is restored during hydration,
+and the browser starts the request after mount when hydration is safe. This
+preserves identical initial SSR and hydration markup.
 
-The browser starts the request after hydration is safe.
+On a normal client-only mount or later browser navigation, `server:false` with
+`immediate:true` starts during that browser setup as usual; the post-mount
+deferral applies to hydration only.
+
+`immediate:false` takes precedence over `server:false`: the idle state remains
+`data=undefined`, `pending=false`, `error=null`, and no mount-time request is
+started until `refresh()` is called.
 
 Do not create a server-side unresolved Promise.
 
@@ -712,8 +891,14 @@ ctx.data
 ctx.variables
 ctx.key
 ctx.server
-ctx.response
+ctx.status
+ctx.statusText
 ```
+
+Do not expose the raw `Response` in callback contexts in v1. Parsing consumes
+the response body before callbacks run (`bodyUsed` may already be `true`), so
+callbacks receive only safe response metadata (`status` and `statusText`) and
+the parsed data/error.
 
 If two hooks join one physical request:
 
@@ -795,18 +980,20 @@ one mounted vue-ssr-lite application
 → one fetch cache
 ```
 
-Same-key consumers share:
-
-- settled data;
-- in-flight network request;
-- errors while active;
-- cache updates.
-
+Same-key consumers share the entry's settled successful data, active physical
+request, and cache updates. The entry also records the active execution's
+settled outcome, but that outcome is projected into each consumer separately.
 Each hook still owns:
 
+- its `data`, `pending`, and `error` refs;
+- caller cancellation and timeout;
 - callback subscription;
 - reactive identity;
 - fetchPolicy progression.
+
+For example, if consumer A aborts while consumer B remains attached, A becomes
+cancelled/detached while B stays pending on the same physical request. A's
+error state must not overwrite B's state.
 
 Keep successful orphaned browser entries in a small internal LRU:
 
@@ -832,9 +1019,33 @@ Generate deterministic identity from:
 method
 normalized URL
 canonical variables
-safe request semantics
 explicit custom key namespace
 ```
+
+The public identity must also carry a deterministic, non-secret request
+semantics fingerprint. At minimum include:
+
+```text
+headers
+credentials
+mode
+redirect
+referrer
+referrerPolicy
+integrity
+native RequestInit cache mode
+```
+
+Normalize headers by lowercasing each header name and sorting the header names.
+For each name, preserve every non-sensitive header value exactly and preserve
+the original order of duplicate values; do not sort or trim values. Sensitive
+header values (including `Cookie`, `Authorization`, and equivalent
+credentials) are omitted from the public identity and included only in the
+runtime-only fingerprint described below.
+The `signal` is never part of identity: cancellation belongs to the consumer
+or entry lifecycle, not request representation. The library's `fetchPolicy`
+is also not part of identity; it controls whether an identity is read from or
+sent to the cache. The native `cache` request mode is part of the fingerprint.
 
 Same-origin SSR/browser identities must match.
 
@@ -845,14 +1056,30 @@ Never put raw:
 ```text
 Cookie
 Authorization
-credentials
+credential values
 ```
 
 into public cache keys.
 
-Maintain a separate non-serialized fingerprint for sensitive/request-specific options.
+The safe `credentials` mode (`omit`, `same-origin`, or `include`) remains part
+of the public request fingerprint; only the underlying credential material is
+private.
 
-Detect incompatible calls sharing the same public identity rather than silently returning incorrect cached data.
+Maintain a separate runtime-only fingerprint for sensitive/request-specific
+options, including forwarded Cookie/Authorization and any other secret header
+values. This fingerprint may distinguish physical entries on the server but
+must never be serialized into hydration state or exposed as a browser cache
+identifier.
+
+The runtime map key is the public identity plus this private fingerprint. The
+hydration payload carries only the public identity and serializable settled
+data, so a browser can resume the same safe request without receiving server
+credential material.
+
+An explicit `key` is a namespace component, not permission to ignore request
+semantics. If calls share an explicit public key but differ in any fingerprint
+field, keep them in separate physical entries (or report a deterministic
+incompatibility) rather than silently returning the wrong representation.
 
 ---
 
@@ -954,15 +1181,25 @@ During `refresh()` of the same identity, retain old data.
 
 # 19. Cancellation
 
-Compose:
+There are two cancellation layers:
 
 ```text
-SSR request AbortSignal
-explicit caller signal
-entry AbortController
-timeout
-application lifecycle
+entry-level physical request signal
+├── entry AbortController
+├── SSR request AbortSignal
+└── application lifecycle
+
+consumer-level observer signal
+├── explicit caller AbortSignal
+└── consumer timeout
 ```
+
+The entry-level signal is the only signal passed to the shared native fetch.
+The consumer-level signal only detaches that consumer and settles its own
+state. A consumer abort must not abort a physical request that another
+consumer still needs. When the last consumer detaches, the entry controller
+aborts the orphaned physical request. An aborted SSR request or disposed
+application may abort the entry even while consumers remain attached.
 
 Guarantees:
 
@@ -971,7 +1208,7 @@ Guarantees:
 - shared request remains alive while another consumer needs it;
 - orphaned request aborts;
 - stale result cannot win;
-- timeout creates timeout error;
+- consumer timeout creates a timeout error for that consumer;
 - lifecycle cancellation does not trigger `onError`.
 
 ---
@@ -1105,6 +1342,18 @@ Also cover:
 13. concurrent SSR tenant isolation.
 14. browser application/cache isolation.
 15. LRU bounds.
+16. an awaited `useFetch()` during browser-side `RouterView` navigation does
+    not keep enhanced navigation loading for the duration of the HTTP request;
+    only the local hook pending state remains active (a single setup microtask
+    is acceptable).
+17. two same-key consumers keep independent `pending`/`error` state when one
+    caller aborts, while the other continues to use the shared physical
+    request.
+18. SSR starts the initial execution before registering `onServerPrefetch`,
+    and registration observes that same promise without a duplicate request or
+    deadlock.
+19. `immediate:false` and `server:false` expose the exact idle/pending states
+    defined in section 10.
 
 ---
 
@@ -1138,11 +1387,12 @@ import { useFetch, useSeo } from 'vue-ssr-lite'
 
 const { data, error } = await useFetch<Product[]>('/api/products')
 
-if (!error.value) {
-  useSeo({
-    title: `${data.value?.length ?? 0} Products`,
-  })
-}
+useSeo({
+  title: () =>
+    !error.value && data.value
+      ? `${data.value.length} Products`
+      : 'Products',
+})
 </script>
 ```
 
