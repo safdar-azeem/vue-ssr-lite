@@ -1,49 +1,33 @@
 <script setup lang="ts">
-interface Product {
-  id: number
-  title: string
-  description: string
-  price: number
-  thumbnail: string
-}
+import { ref } from 'vue'
+import { useFetch } from 'vue-ssr-lite'
+import type { ProductsResponse } from '../types/products'
 
-interface ProductsResponse {
-  products: Product[]
-}
-
-let products: Product[] = []
-let errorMessage = ''
-
-try {
-  const response = await fetch(
-    'https://dummyjson.com/products?limit=6&select=id,title,description,price,thumbnail',
-  )
-
-  if (!response.ok) {
-    throw new Error(`Products request failed with status ${response.status}`)
-  }
-
-  const data = (await response.json()) as ProductsResponse
-  products = data.products
-} catch {
-  errorMessage = 'Unable to load products right now.'
-}
+const { data, pending, error, refresh } = useFetch<ProductsResponse>('/api/products', {
+  fetchPolicy: 'cache-first',
+})
 </script>
 
 <template>
   <section>
     <h1>Products</h1>
-    <p>Fetched from DummyJSON with native <code>fetch()</code>.</p>
+    <p>Our example catalog, fetched with SSR-aware <code>useFetch()</code>.</p>
+    <button type="button" :disabled="pending" @click="refresh()">Refresh products</button>
 
-    <p v-if="errorMessage">{{ errorMessage }}</p>
+    <p v-if="pending" role="status">Loading products…</p>
+    <p v-if="error" role="alert">
+      Unable to load products right now.<span v-if="error.status"> (HTTP {{ error.status }})</span>
+    </p>
 
-    <div v-else class="products-grid">
-      <article v-for="product in products" :key="product.id" class="product-card">
-        <img :src="product.thumbnail" :alt="product.title" width="160" height="160">
+    <div v-if="data" class="products-grid" :aria-busy="pending">
+      <article v-for="product in data.products" :key="product.id" class="product-card">
+        <div class="product-mark" aria-hidden="true">{{ product.title.charAt(0) }}</div>
         <div>
           <h2>{{ product.title }}</h2>
           <p class="product-description">{{ product.description }}</p>
-          <p><strong>${{ product.price.toFixed(2) }}</strong></p>
+          <p>
+            <strong>${{ product.price.toFixed(2) }}</strong>
+          </p>
         </div>
       </article>
     </div>
