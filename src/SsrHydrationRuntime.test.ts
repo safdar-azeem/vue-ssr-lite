@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+// @vitest-environment-options {"url":"https://ex.test/"}
 import {
   defineComponent,
   h,
@@ -9,7 +11,11 @@ import {
   type Ref,
 } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
-import { SSR_HYDRATION_CONTEXT, type SsrHydrationContext } from './SsrHydrationRuntime'
+import {
+  createSsrHydrationController,
+  SSR_HYDRATION_CONTEXT,
+  type SsrHydrationContext,
+} from './SsrHydrationRuntime'
 import { renderSsrApplication } from './SsrRenderRuntime'
 import { hydrateSsrApplication } from './SsrBrowserRuntime'
 import { getSsrStateElementId } from './SsrSerialization'
@@ -62,6 +68,68 @@ const request = () =>
   createTestRenderRequest('demo.test', { requestId: 'demo' })
 
 describe('generic hydration lifecycle', () => {
+  it('validates final contributions without validating intermediate reactivity checkpoints', () => {
+    const hydration = createSsrHydrationController(undefined, true)
+    hydration.contribute('state', () => ({ value: 1 }))
+    const validate = vi.fn(() => { throw new Error('incompatible snapshots') })
+    hydration.onValidate(validate)
+    expect(hydration.collect(false)).toEqual({ state: { value: 1 } })
+    expect(validate).not.toHaveBeenCalled()
+    expect(() => hydration.collect()).toThrow('incompatible snapshots')
+    hydration.dispose()
+    expect(hydration.collect()).toBeUndefined()
+  })
+
+  it('keeps request-local reconciliation metadata out of serializable hydration state', () => {
+    const first = createSsrHydrationController(undefined, true)
+    first.contribute('public', () => ({ data: 'safe' }))
+    first.contributeReconciliation('private', () => ({ fingerprint: 'secret-fingerprint' }))
+    expect(first.collect()).toEqual({ public: { data: 'safe' } })
+    expect(first.collectReconciliation()).toEqual({
+      private: { fingerprint: 'secret-fingerprint' },
+    })
+
+    const resumed = createSsrHydrationController(
+      first.collect(),
+      true,
+      first.collectReconciliation()
+    )
+    expect(resumed.read('private')).toBeUndefined()
+    expect(resumed.readReconciliation('private')).toEqual({
+      fingerprint: 'secret-fingerprint',
+    })
+    first.dispose()
+    resumed.dispose()
+  })
+
+  it('completes the initial transaction once and forgets only owned continuation state', () => {
+    const restored = { temporary: { value: 1 }, plugin: { value: 2 } }
+    const hydration = createSsrHydrationController(restored, false)
+    const complete = vi.fn(() => hydration.forget('temporary'))
+    hydration.onHydrated(complete)
+    hydration.completeHydration()
+    hydration.completeHydration()
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(hydration.read('temporary')).toBeUndefined()
+    expect(hydration.read('plugin')).toEqual({ value: 2 })
+    expect(restored.temporary).toEqual({ value: 1 })
+    const cleanup = vi.fn(() => expect(hydration.read('plugin')).toEqual({ value: 2 }))
+    hydration.onDispose(cleanup)
+    hydration.dispose()
+    hydration.completeHydration()
+    expect(cleanup).toHaveBeenCalledTimes(1)
+    expect(complete).toHaveBeenCalledTimes(1)
+  })
+
+  it('discards pending hydration completion callbacks on failure or disposal', () => {
+    const hydration = createSsrHydrationController(undefined, false)
+    const complete = vi.fn()
+    hydration.onHydrated(complete)
+    hydration.dispose()
+    hydration.completeHydration()
+    expect(complete).not.toHaveBeenCalled()
+  })
+
   it('waits for a plugin server-prefetch, renders real data, and serializes contributed state', async () => {
     const fetcher = vi.fn(async () => 'prefetched-value')
     const demo = createDemoClient(fetcher)
@@ -89,19 +157,10 @@ describe('generic hydration lifecycle', () => {
   })
 
   it('restores contributed state on the browser without re-running the prefetch', async () => {
-    // @vitest-environment jsdom is not set globally; emulate the DOM the browser
-    // hydration path needs directly.
-    const dom = await import('jsdom')
-    const { window } = new dom.JSDOM(
-      '<!doctype html><html><body><div id="app"><main>prefetched-value</main></div></body></html>',
-      { url: 'https://ex.test/' }
-    )
-    const previous = {
-      window: globalThis.window,
-      document: globalThis.document,
-    }
-    ;(globalThis as any).window = window
-    ;(globalThis as any).document = window.document
+    // The file's environment installs the DOM before Vue is imported, keeping
+    // runtime-dom and its constructor checks in the hydrated nodes' realm.
+    document.body.innerHTML = '<div id="app"><main>prefetched-value</main></div>'
+    let mounted: App | undefined
 
     try {
       const stateElement = window.document.createElement('script')
@@ -131,6 +190,7 @@ describe('generic hydration lifecycle', () => {
         id: 'demo-app',
         root: Root,
         install: ({ app }) => {
+          mounted = app
           app.use(demo)
         },
       })
@@ -142,8 +202,8 @@ describe('generic hydration lifecycle', () => {
       expect(fetcher).not.toHaveBeenCalled()
       expect(window.document.getElementById(stateElement.id)).toBeNull()
     } finally {
-      ;(globalThis as any).window = previous.window
-      ;(globalThis as any).document = previous.document
+      mounted?.unmount()
+      document.body.innerHTML = ''
     }
   })
 })
