@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   bundleSsrConfigModule,
+  bundleSsrConfigModules,
   collectApplicationDeclarationFiles,
   resolveSsrConfigGraphModule,
   resolveApplicationRoutesModule,
@@ -19,6 +20,19 @@ afterEach(async () => {
 })
 
 describe('application source discovery contract', () => {
+  it('accepts type-only modules that esbuild erases from a multi-entry build', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-type-only-discovery-'))
+    const types = join(root, 'products.ts')
+    const application = join(root, 'application.ts')
+    await writeFile(types, 'export interface ProductsResponse { products: string[] }\n')
+    await writeFile(application, 'export default { name: "shop" }\n')
+
+    const bundled = await bundleSsrConfigModules(root, [types, application])
+
+    expect(bundled.codes.get(types)).toBe('export {}\n')
+    expect(bundled.codes.get(application)).toContain('name: "shop"')
+  })
+
   it('records authoritative alias and external-package resolution identities', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-resolution-graph-'))
     await writeFile(
