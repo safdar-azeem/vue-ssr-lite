@@ -1,12 +1,4 @@
-import {
-  Fragment,
-  defineComponent,
-  h,
-  inject,
-  onBeforeUnmount,
-  ref,
-  type PropType,
-} from 'vue'
+import { Fragment, defineComponent, h, inject, onBeforeUnmount, ref, type PropType } from 'vue'
 import { SSR_NAVIGATION_RUNTIME } from './SsrNavigationRuntime'
 import type { SsrNavigationTransaction } from './SsrNavigationTypes'
 
@@ -16,7 +8,7 @@ const ROOT_STYLE = {
   right: '0',
   left: '0',
   zIndex: '2147483647',
-  height: '3px',
+  height: '2.5px',
   overflow: 'hidden',
   pointerEvents: 'none',
 }
@@ -24,13 +16,19 @@ const ROOT_STYLE = {
 const BAR_STYLE = {
   width: '40%',
   height: '100%',
-  background: 'var(--vssl-loading-indicator-color, #42b883)',
+  background: 'var(--vssl-loading-indicator-color, var(--vssl-loading-indicator-default-color, #3B82F6))',
   transform: 'translate3d(-110%, 0, 0)',
   animation: 'vssl-loading-indicator 1s ease-in-out infinite',
   willChange: 'transform',
 }
 
+// Keep the public color variable unset by framework theme rules. A user value
+// inherited from :root must remain authoritative even when a dark ancestor
+// selects the framework's fallback color.
 const KEYFRAMES =
+  '@layer vssl-loading-indicator-defaults{' +
+  ':root{--vssl-loading-indicator-default-color:#3B82F6}' +
+  '.dark,.dark-mode{--vssl-loading-indicator-default-color:#3B82F6}}' +
   '@keyframes vssl-loading-indicator{' +
   '0%{transform:translate3d(-110%,0,0)}' +
   '55%{transform:translate3d(90%,0,0)}' +
@@ -66,10 +64,7 @@ export const LoadingIndicator = defineComponent({
         start(transaction: SsrNavigationTransaction) {
           activeId.value = transaction.id
           if (visible.value || timer !== undefined) return
-          const remaining = Math.max(
-            0,
-            props.delay - (Date.now() - transaction.startedAt)
-          )
+          const remaining = Math.max(0, props.delay - (Date.now() - transaction.startedAt))
           if (remaining === 0) {
             visible.value = true
             return
