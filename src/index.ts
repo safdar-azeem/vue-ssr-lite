@@ -5,6 +5,23 @@ import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 export { defineExtension } from './core/extensions/defineExtension'
 export { defineMiddleware } from './middleware/defineMiddleware'
 export { LoadingIndicator, RouterView } from './navigation/index'
+export { useFetch } from './data/index'
+export type {
+  UseFetchDoneContext,
+  UseFetchError,
+  UseFetchErrorContext,
+  UseFetchOptions,
+  UseFetchOptionsBase,
+  UseFetchOptionsParameter,
+  UseFetchPolicy,
+  UseFetchResult,
+  UseFetchReturn,
+  UseFetchVariablePrimitive,
+  UseFetchVariableShape,
+  UseFetchVariableValue,
+  UseFetchVariables,
+  VariablesOption,
+} from './data/index'
 export type {
   Middleware,
   MiddlewareContext,
