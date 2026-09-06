@@ -506,6 +506,37 @@ import { LoadingIndicator, RouterView } from 'vue-ssr-lite'
 </template>
 ```
 
+`LoadingIndicator` forwards `class` and `style` to its root element, so the
+indicator can be sized or positioned alongside the rest of your application:
+
+```vue
+<LoadingIndicator class="app-loading" :style="{ height: '4px' }" />
+```
+
+The default color is `#3B82F6` in light mode and `#3B82F6` in dark mode. Dark
+mode is selected automatically when any parent or document element has the
+`dark` or `dark-mode` class. To override the color, set the existing
+`--vssl-loading-indicator-color` variable from application CSS:
+
+```css
+.app-loading {
+  --vssl-loading-indicator-color: #000;
+}
+```
+
+You can also set the variable globally. An explicit application value remains
+authoritative in both themes:
+
+```css
+:root {
+  --vssl-loading-indicator-color: #000;
+}
+```
+
+The inner bar uses inline width, height, transform, and animation values while
+navigation is loading. The supported styling surface is the root
+`class`/`style` plus the color variable above.
+
 SSR renders the accepted route content directly and hydration does not show a
 loader for that already-rendered page. A direct SPA load happens before Vue is
 mounted, so keep a small static shell fallback in `index.html` for initial boot:
@@ -841,21 +872,21 @@ import {
 import type { AppContext } from 'vue-ssr-lite'
 ```
 
-| API                 | Purpose                                             |
-| ------------------- | --------------------------------------------------- |
-| `defineServer`      | Configure the server/runtime                        |
-| `defineApplication` | Register an explicit application                    |
-| `useSeo`            | Set reactive SEO/head data                          |
-| `usePublicConfig`   | Read browser-safe server config                     |
-| `useOrigin`         | Read the authoritative public origin                |
-| `useDomain`         | Read the selected normalized application domain     |
-| `setHttpStatus`     | Set the current HTTP/page status                    |
-| `redirectTo`        | Set a validated server-rendered-request redirect    |
-| `defineExtension`   | Create an advanced runtime extension                |
-| `defineMiddleware`  | Create typed universal route middleware             |
-| `RouterView`        | Render routes with an optional delayed fallback     |
-| `LoadingIndicator`  | Show an optional delayed global navigation bar      |
-| `AppContext`        | Type for the `main.ts` initializer                  |
+| API                 | Purpose                                          |
+| ------------------- | ------------------------------------------------ |
+| `defineServer`      | Configure the server/runtime                     |
+| `defineApplication` | Register an explicit application                 |
+| `useSeo`            | Set reactive SEO/head data                       |
+| `usePublicConfig`   | Read browser-safe server config                  |
+| `useOrigin`         | Read the authoritative public origin             |
+| `useDomain`         | Read the selected normalized application domain  |
+| `setHttpStatus`     | Set the current HTTP/page status                 |
+| `redirectTo`        | Set a validated server-rendered-request redirect |
+| `defineExtension`   | Create an advanced runtime extension             |
+| `defineMiddleware`  | Create typed universal route middleware          |
+| `RouterView`        | Render routes with an optional delayed fallback  |
+| `LoadingIndicator`  | Show an optional delayed global navigation bar   |
+| `AppContext`        | Type for the `main.ts` initializer               |
 
 ## `vue-ssr-lite/vite`
 
