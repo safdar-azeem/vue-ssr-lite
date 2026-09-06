@@ -7,8 +7,9 @@ import { renderToString } from 'vue/server-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { completeSsrBrowserHydration, createSsrHydrationController } from '../SsrHydrationRuntime'
 
-// Exercise the actual installed renderer. CI installs both endpoints of the
-// supported Vue range; mocks of renderer internals cannot establish compatibility.
+// Exercise the actual installed renderer. Run this suite manually against the
+// minimum and latest supported Vue 3.5.x releases; mocks of renderer internals
+// cannot establish compatibility.
 const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const dispose of cleanup.splice(0).reverse()) dispose()
