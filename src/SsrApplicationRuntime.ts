@@ -54,6 +54,7 @@ import {
 } from './navigation/SsrNavigationRuntime'
 import type { SsrNavigationRuntime } from './navigation/SsrNavigationTypes'
 import { SSR_FETCH_RUNTIME, SsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntime'
+import { bindSsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntimeScope'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -121,6 +122,11 @@ export interface SsrCreateApplicationOptions<
   resolution?: SsrResolutionController
   /** Server reconciliation only: request-owned middleware result cache. */
   middlewareController?: SsrMiddlewareExecutionController
+  /** @internal Establish request-safe access for non-setup application code. */
+  runWithFetchRuntime?: <T>(
+    runtime: SsrFetchRuntime,
+    execute: () => T
+  ) => T
 }
 
 export const createSsrApplication = async <
@@ -317,100 +323,114 @@ export const createSsrApplication = async <
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
-    app.provide(SSR_FETCH_RUNTIME, new SsrFetchRuntime(
-      options.server, context, hydration, !options.server && Boolean(options.hydrationState) && !options.spa
-    ))
-    if (!options.server) app.onUnmount(() => hydration.dispose())
-    if (router) {
-      // Install the observer before middleware so its transaction surrounds
-      // guards and route resolution. Successful navigation hands its loading
-      // clock to the selected RouterView until native page Suspense resolves;
-      // middleware still owns cancellation and its AbortSignal lifecycle.
-      navigationRuntime = createSsrNavigationRuntime({
-        router,
-        server: options.server,
-        diagnostics: Boolean(
-          (definition as { __vueSsrLiteDevelopment?: boolean })
-            .__vueSsrLiteDevelopment
-        ),
+    const fetchRuntime = new SsrFetchRuntime(
+      options.server,
+      context,
+      hydration,
+      !options.server && Boolean(options.hydrationState) && !options.spa
+    )
+    app.provide(SSR_FETCH_RUNTIME, fetchRuntime)
+    const unbindFetchRuntime = bindSsrFetchRuntime(fetchRuntime, options.server)
+    hydration.onDispose(unbindFetchRuntime)
+    const initialize = async () => {
+      if (!options.server) app.onUnmount(() => hydration.dispose())
+      if (router) {
+        // Install the observer before middleware so its transaction surrounds
+        // guards and route resolution. Successful navigation hands its loading
+        // clock to the selected RouterView until native page Suspense resolves;
+        // middleware still owns cancellation and its AbortSignal lifecycle.
+        navigationRuntime = createSsrNavigationRuntime({
+          router,
+          server: options.server,
+          diagnostics: Boolean(
+            (definition as { __vueSsrLiteDevelopment?: boolean })
+              .__vueSsrLiteDevelopment
+          ),
+        })
+        app.provide(SSR_NAVIGATION_RUNTIME, navigationRuntime)
+        middlewareInstallation = middlewareController!.install({
+          app,
+          router,
+          context,
+          middleware: definition.middleware,
+        })
+        hydration.onDispose(() => {
+          navigationRuntime?.dispose()
+          middlewareInstallation?.dispose()
+          if (ownsMiddlewareController) middlewareController?.dispose()
+        })
+        if (!options.server) {
+          // Bootstrap has no loading transaction, but scrolling still waits for
+          // a mounted app and any registered enhanced outlet's positive readiness.
+          app.mixin({
+            mounted() {
+              if (!this.$parent) navigationRuntime?.appMounted()
+            },
+          })
+          app.onUnmount(() => {
+            navigationRuntime?.dispose()
+            if (ownsMiddlewareController) middlewareController?.dispose()
+          })
+        }
+        if (!options.server) {
+          installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
+        }
+        router.afterEach((to, _from, failure) => {
+          if (failure) return
+          resolveResponseStatusForRoute(context.response, to)
+          const seoState = extensionRuntime.getState<SeoState>('seo')
+          if (seoState) recomputeSeoResponseStatus(seoState, context.response, to)
+          if (!options.server) managedHead.invalidate()
+        })
+      }
+      app.provide(SSR_DOMAIN_CONTEXT, options.request.domain)
+      // Provide the generic hydration and resolution contracts BEFORE the
+      // application installs its own plugins, so a plugin's `install()` can
+      // inject them (via `app.runWithContext`) to restore state ahead of the
+      // first component and register in-flight work.
+      app.provide(SSR_HYDRATION_CONTEXT, hydration)
+      app.provide(SSR_REQUEST_RESOLUTION, resolution)
+      app.provide(SSR_REQUEST_CONTEXT, context)
+      const plugins =
+        typeof definition.plugins === 'function'
+          ? definition.plugins()
+          : definition.plugins ?? []
+      for (const plugin of plugins) app.use(plugin)
+      await app.runWithContext(() =>
+        definition.install?.({
+          app,
+          router,
+          context,
+          hydration,
+          resolution,
+          server: options.server,
+        })
+      )
+      extensionRuntime.setup()
+      // Vue Router starts its initial browser navigation from `install()`. Keep
+      // that installation behind the (possibly async) application initializer so
+      // Consumer middleware is registered before any route-level guard can
+      // observe incomplete application setup.
+      if (router) app.use(router)
+      hydration.onDispose(() => {
+        extensionRuntime.dispose()
+        managedHead.dispose()
       })
-      app.provide(SSR_NAVIGATION_RUNTIME, navigationRuntime)
-      middlewareInstallation = middlewareController!.install({
+
+      return {
         app,
         router,
         context,
-        middleware: definition.middleware,
-      })
-      hydration.onDispose(() => {
-        navigationRuntime?.dispose()
-        middlewareInstallation?.dispose()
-        if (ownsMiddlewareController) middlewareController?.dispose()
-      })
-      if (!options.server) {
-        // Bootstrap has no loading transaction, but scrolling still waits for
-        // a mounted app and any registered enhanced outlet's positive readiness.
-        app.mixin({
-          mounted() {
-            if (!this.$parent) navigationRuntime?.appMounted()
-          },
-        })
-        app.onUnmount(() => {
-          navigationRuntime?.dispose()
-          if (ownsMiddlewareController) middlewareController?.dispose()
-        })
+        hydration,
+        resolution,
+        managedHead,
+        middleware: middlewareController ?? null,
+        fetchRuntime,
       }
-      if (!options.server) {
-        installCrossRenderNavigation(router, definition.defaultRender ?? 'ssr')
-      }
-      router.afterEach((to, _from, failure) => {
-        if (failure) return
-        resolveResponseStatusForRoute(context.response, to)
-        const seoState = extensionRuntime.getState<SeoState>('seo')
-        if (seoState) recomputeSeoResponseStatus(seoState, context.response, to)
-        if (!options.server) managedHead.invalidate()
-      })
     }
-    app.provide(SSR_DOMAIN_CONTEXT, options.request.domain)
-    // Provide the generic hydration and resolution contracts BEFORE the
-    // application installs its own plugins, so a plugin's `install()` can
-    // inject them (via `app.runWithContext`) to restore state ahead of the
-    // first component and register in-flight work.
-    app.provide(SSR_HYDRATION_CONTEXT, hydration)
-    app.provide(SSR_REQUEST_RESOLUTION, resolution)
-    app.provide(SSR_REQUEST_CONTEXT, context)
-    const plugins =
-      typeof definition.plugins === 'function'
-        ? definition.plugins()
-        : definition.plugins ?? []
-    for (const plugin of plugins) app.use(plugin)
-    await definition.install?.({
-      app,
-      router,
-      context,
-      hydration,
-      resolution,
-      server: options.server,
-    })
-    extensionRuntime.setup()
-    // Vue Router starts its initial browser navigation from `install()`. Keep
-    // that installation behind the (possibly async) application initializer so
-    // Consumer middleware is registered before any route-level guard can
-    // observe incomplete application setup.
-    if (router) app.use(router)
-    hydration.onDispose(() => {
-      extensionRuntime.dispose()
-      managedHead.dispose()
-    })
-
-    return {
-      app,
-      router,
-      context,
-      hydration,
-      resolution,
-      managedHead,
-      middleware: middlewareController ?? null,
-    }
+    return await (options.runWithFetchRuntime
+      ? options.runWithFetchRuntime(fetchRuntime, initialize)
+      : initialize())
   } catch (error) {
     navigationRuntime?.dispose()
     if (ownsMiddlewareController) middlewareController?.dispose()
