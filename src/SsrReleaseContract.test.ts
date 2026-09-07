@@ -208,7 +208,7 @@ describe('repository release contract', () => {
     }
   })
 
-  it('ships first-party useFetch through the existing root entry without a separate query-client dependency', async () => {
+  it('ships first-party fetch APIs through the existing root entry without a separate query-client dependency', async () => {
     const [entry, feature, readme, example, artifact] = await Promise.all([
       readFile(join(repositoryRoot, 'src/index.ts'), 'utf8'),
       readFile(join(repositoryRoot, 'src/data/fetch/index.ts'), 'utf8'),
@@ -216,7 +216,8 @@ describe('repository release contract', () => {
       readFile(join(repositoryRoot, 'examples/1-single-app/src/pages/ProductsPage.vue'), 'utf8'),
       readFile(join(repositoryRoot, 'scripts/SsrPackageArtifact.mjs'), 'utf8'),
     ])
-    expect(entry).toContain("export { useFetch } from './data/index'")
+    expect(entry).toContain("export { setContext, useFetch } from './data/index'")
+    expect(feature).toContain("export { setContext } from './context/setContext'")
     expect(feature).toContain("export { useFetch } from './composables/useFetch'")
     expect(feature).not.toContain('SsrFetchRuntime')
     expect(readme).toContain('await useFetch()')
@@ -227,11 +228,39 @@ describe('repository release contract', () => {
     expect(example).not.toContain('dummyjson.com')
     expect(artifact).toContain('UseFetchResult')
     expect(artifact).toContain('RequiredFetchVariables')
+    expect(artifact).toContain('SetContextOptions')
     const manifest = await readJson<PackageManifest>(join(repositoryRoot, 'package.json'))
     for (const dependency of ['@tanstack/vue-query', '@vueuse/core', 'axios']) {
       expect(manifest.dependencies).not.toHaveProperty(dependency)
       expect(manifest.peerDependencies).not.toHaveProperty(dependency)
     }
+  })
+
+  it('keeps the server API example aligned with global useFetch context boundaries', async () => {
+    const exampleRoot = join(
+      repositoryRoot,
+      'examples/4-server-api-app'
+    )
+    const [main, products, product, organization, readme] = await Promise.all([
+      readFile(join(exampleRoot, 'src/main.ts'), 'utf8'),
+      readFile(join(exampleRoot, 'src/pages/ProductsPage.vue'), 'utf8'),
+      readFile(join(exampleRoot, 'src/pages/ProductPage.vue'), 'utf8'),
+      readFile(join(exampleRoot, 'src/pages/OrganizationPage.vue'), 'utf8'),
+      readFile(join(exampleRoot, 'README.md'), 'utf8'),
+    ])
+
+    expect(main).toContain("import { setContext, type AppContext } from 'vue-ssr-lite'")
+    expect(main).toContain('setContext({ headers: memberHeaders })')
+    for (const page of [products, product, organization]) {
+      expect(page).not.toContain('headers: memberHeaders,')
+    }
+    expect(products).toContain("await fetch('/api/products'")
+    expect(products).toContain('...memberHeaders')
+    expect(product).toContain('...memberHeaders')
+    expect(product).toContain('headers: adminHeaders')
+    expect(readme).toContain('Each `setContext()` call replaces')
+    expect(readme).toContain('headers: {}')
+    expect(readme).toContain('does not intercept native requests')
   })
 
   it('keeps the Vue hydration compatibility range and manual coverage explicit', async () => {
