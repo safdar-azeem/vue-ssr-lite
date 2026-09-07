@@ -9,7 +9,7 @@ This example is intentionally separate from `examples/1-single-app`. The single-
 ```text
 Vue page
   ↓
-useFetch() / native fetch()
+setContext() → useFetch() / native fetch()
   ↓
 vue-ssr-lite managed server
   ↓
@@ -44,6 +44,7 @@ Included patterns:
 - standard HTTP status codes
 - a server-only database/repository module
 - `useFetch()` during SSR, hydration, and browser navigation
+- application-wide `useFetch()` headers through `setContext()`
 - native `fetch()` for POST/PATCH/DELETE mutations
 - automatic framework HEAD / OPTIONS / 405 behavior
 
@@ -218,7 +219,27 @@ admin-token
 
 They are demonstration values, not secrets.
 
-The browser pages send `Bearer member-token` for reads and normal mutations. DELETE uses `Bearer admin-token`.
+The universal `src/main.ts` initializer installs `Bearer member-token` as the default for same-origin `useFetch()` reads:
+
+```ts
+import { setContext } from 'vue-ssr-lite'
+
+setContext({
+  headers: {
+    authorization: 'Bearer member-token',
+  },
+})
+```
+
+Each `setContext()` call replaces the previous stored context. A logout can remove the global headers for future `useFetch()` requests:
+
+```ts
+setContext({
+  headers: {},
+})
+```
+
+The pages continue to send `Bearer member-token` explicitly for native POST/PATCH mutations. DELETE explicitly uses `Bearer admin-token`.
 
 A real application should use its normal cookie/session/token architecture instead of hardcoding credentials.
 
@@ -231,7 +252,6 @@ const { data, pending, error, refresh } =
   useFetch<ProductsResponse, { search?: string }>(
     '/api/products',
     {
-      headers: memberHeaders,
       variables: () => ({
         search: search.value.trim() || undefined,
       }),
@@ -245,7 +265,7 @@ A direct `/products` request performs a real same-origin API request during SSR.
 
 ## Mutations use native fetch()
 
-`useFetch()` is intentionally a read-oriented GET/HEAD composable. POST/PATCH/DELETE in this example use normal native `fetch()`:
+`useFetch()` is intentionally a read-oriented GET/HEAD composable. `setContext()` applies only to `useFetch()` and does not intercept native requests, so POST/PATCH/DELETE in this example keep their explicit authentication with normal native `fetch()`:
 
 ```ts
 await fetch('/api/products', {
