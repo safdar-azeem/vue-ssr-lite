@@ -864,6 +864,8 @@ const main = async () => {
       `${pathToFileURL(join(consumerRoot, 'package-import-smoke.mjs')).href}?inspect=${Date.now()}`
     )
     assert(typeof packedRoot.defineServer === 'function', 'defineServer must export from vue-ssr-lite.')
+    assert(typeof packedRoot.defineServerRoutes === 'function', 'defineServerRoutes must export from vue-ssr-lite.')
+    assert(typeof packedRoot.defineServerMiddleware === 'function', 'defineServerMiddleware must export from vue-ssr-lite.')
     assert(
       typeof packedRoot.defineApplication === 'function',
       'defineApplication must export from vue-ssr-lite.'
