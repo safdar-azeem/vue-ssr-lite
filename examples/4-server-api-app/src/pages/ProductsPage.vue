@@ -6,11 +6,7 @@ import type { ProductsResponse } from '../../shared/api'
 
 const search = ref('')
 
-const { data, pending, error, refresh } = useFetch<
-  ProductsResponse,
-  { search?: string }
->('/api/products', {
-  headers: memberHeaders,
+const { data, pending, error, refresh } = useFetch<ProductsResponse, { search?: string }>('/api/products', {
   variables: () => ({
     search: search.value.trim() || undefined,
   }),
@@ -50,7 +46,7 @@ const createProduct = async () => {
       }),
     })
 
-    const body = await response.json() as {
+    const body = (await response.json()) as {
       product?: { title: string }
       error?: string
     }
@@ -77,8 +73,8 @@ const createProduct = async () => {
         <p class="eyebrow">GET /api/products</p>
         <h1>Products</h1>
         <p>
-          This list is read with SSR-aware <code>useFetch()</code>. Search is sent as a
-          normal query parameter through <code>variables</code>.
+          This list is read with SSR-aware <code>useFetch()</code>. Search is sent as a normal query parameter through
+          <code>variables</code>.
         </p>
       </div>
 
@@ -101,8 +97,7 @@ const createProduct = async () => {
           v-for="product in data.products"
           :key="product.id"
           :to="`/products/${product.id}`"
-          class="product-row"
-        >
+          class="product-row">
           <span>
             <strong>{{ product.title }}</strong>
             <small>{{ product.description }}</small>
