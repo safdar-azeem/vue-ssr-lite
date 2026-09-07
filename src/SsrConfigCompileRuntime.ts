@@ -1,3 +1,6 @@
+import { compileServerRoutes, snapshotServerMiddleware } from './server-routes/SsrServerRouteRuntime'
+import type { SsrCompiledServerRoutes } from './server-routes/SsrServerRouteInternalTypes'
+import type { GlobalServerMiddleware } from './server-routes/SsrServerRouteTypes'
 import { randomBytes } from 'node:crypto'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
@@ -123,6 +126,7 @@ export interface SsrCompiledApplication {
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
   endpoints: SsrEndpointDefinition<any>[]
+  serverRoutes?: SsrCompiledServerRoutes
   cookieAllowlist: string[]
   cookieDenylist: string[]
   publicConfig: Record<string, unknown>
@@ -144,6 +148,7 @@ export interface SsrCompiledApplication {
 }
 
 export interface SsrCompiledConfig {
+  serverMiddleware?: readonly GlobalServerMiddleware[]
   name: string
   applications: SsrCompiledApplication[]
   server: SsrResolvedServerOptions
@@ -217,6 +222,7 @@ export interface SsrNormalizedApplicationConfig {
   domain: SsrApplicationDomainConfig
   cookies?: ApplicationConfig['cookies']
   endpoints?: ApplicationConfig['endpoints']
+  serverRoutes?: ApplicationConfig['serverRoutes']
   cacheControl?: string
   responseCache?: ApplicationConfig['responseCache']
   publicConfig?: ApplicationConfig['publicConfig']
@@ -232,6 +238,7 @@ export interface SsrNormalizedApplicationConfig {
 }
 
 export interface SsrNormalizedConfig {
+  serverMiddleware?: SsrConfig['serverMiddleware']
   name: string
   applications: Record<string, SsrNormalizedApplicationConfig>
   server?: SsrConfig['server']
@@ -595,6 +602,9 @@ const normalizeApplication = (
   if (!input || typeof input !== 'object') {
     throw new Error('Application must be an object returned by defineApplication().')
   }
+  if ('serverMiddleware' in input && input.serverMiddleware !== undefined) {
+    throw new Error('serverMiddleware belongs on defineServer(), not defineApplication().')
+  }
   const id = input.name
   if (typeof id !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(id)) {
     throw new Error(
@@ -647,6 +657,7 @@ const normalizeApplication = (
     },
     cookies: input.cookies,
     endpoints: input.endpoints,
+    serverRoutes: input.serverRoutes,
     cacheControl: input.cacheControl,
     responseCache: input.responseCache,
     publicConfig: input.publicConfig,
@@ -686,6 +697,7 @@ const asApplicationList = (
       'domain',
       'cookies',
       'endpoints',
+      'serverRoutes',
       'mount',
       'cacheControl',
       'responseCache',
@@ -711,6 +723,7 @@ const asApplicationList = (
     template: single.template,
     cookies: single.cookies,
     endpoints: single.endpoints,
+    serverRoutes: single.serverRoutes,
     mount: single.mount,
     cacheControl: single.cacheControl,
     responseCache: single.responseCache,
@@ -775,6 +788,7 @@ export const normalizeSsrConfig = (
     name: String(config.name || basename(root) || 'app'),
     applications,
     server: config.server,
+    serverMiddleware: config.serverMiddleware,
     readiness: config.readiness,
     resolveSiteUrl: config.resolveSiteUrl,
   }
@@ -1467,6 +1481,7 @@ export const compileSsrConfig = async (
   const renderApplication = loadedRecord.__vueSsrLiteRenderApplication
   const shells = loadedRecord.__vueSsrLiteShells ?? readBoundShells(loaded) ?? {}
   const resolveSiteUrl = config.resolveSiteUrl ?? loadedRecord.resolveSiteUrl
+  const server = normalizeCompiledServerOptions(config, options, development)
   const applications: SsrCompiledApplication[] = []
   for (const app of Object.values(config.applications)) {
     const templatePath = resolve(options.root || process.cwd(), app.template)
@@ -1497,6 +1512,11 @@ export const compileSsrConfig = async (
       cacheControl: app.cacheControl,
       responseCache: app.responseCache,
       endpoints: app.endpoints ? [...app.endpoints] : [],
+      serverRoutes: compileServerRoutes(app.serverRoutes, {
+        healthPath: server.healthPath,
+        readinessPath: server.readinessPath,
+        endpoints: app.endpoints,
+      }),
       cookieAllowlist: parseCookieList(app.cookies?.allow),
       cookieDenylist: parseCookieList(app.cookies?.deny),
       publicConfig: publicConfigFactory
@@ -1536,6 +1556,7 @@ export const compileSsrConfig = async (
           root: options.root || process.cwd(),
           sitemapProvider,
           existingEndpoints: compiled.endpoints,
+          serverRouteOwnedPaths: compiled.serverRoutes!.ownedPaths,
           siteSeo,
           siteRobots,
           defaultRender: app.render,
@@ -1566,7 +1587,8 @@ export const compileSsrConfig = async (
     renderApplication,
     readiness: config.readiness,
     resolveSiteUrl,
-    server: normalizeCompiledServerOptions(config, options, development),
+    server,
+    serverMiddleware: snapshotServerMiddleware(config.serverMiddleware, 'serverMiddleware') as readonly GlobalServerMiddleware[],
   }
   prepareSsrCompiledMetadata(compiled)
   return compiled
