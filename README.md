@@ -281,6 +281,60 @@ await products.refresh()
 
 `refresh()` always requests fresh data, keeps the current data visible while the request is pending, and can be awaited in both SSR and browser code.
 
+## Global request context
+
+Use `setContext()` to provide application-wide header defaults for future same-origin `useFetch()` executions. A common pattern is to set authentication after login or during application initialization:
+
+```ts
+import { setContext } from 'vue-ssr-lite'
+
+setContext({
+  headers: {
+    authorization: `Bearer ${token}`,
+  },
+})
+```
+
+Pages can then fetch without repeating those headers:
+
+```ts
+const profile = useFetch('/api/profile')
+```
+
+Each call replaces the complete stored context; calls do not merge with earlier values. Supply the complete desired context after a token or workspace change. To remove the previous defaults on logout:
+
+```ts
+setContext({
+  headers: {},
+})
+```
+
+The change affects future executions only. Existing data and in-flight requests are unchanged, and `setContext()` does not automatically refetch mounted hooks. A later `refresh()` or reactive URL/variables execution uses the latest context.
+
+Request-local headers take precedence over context defaults:
+
+```ts
+useFetch('/api/admin', {
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+  },
+})
+```
+
+Context defaults are application scoped and same-origin only, so they are not automatically attached to third-party URLs. SSR applications keep this state isolated per request, and the context itself is never hydrated or serialized into the browser.
+
+For the uncommon request that must skip stored defaults, use `context:false`:
+
+```ts
+useFetch('/api/public-feed', {
+  context: false,
+})
+```
+
+This skips only `setContext()` defaults. It does not suppress the existing same-origin SSR forwarding of incoming cookies or authorization. Use both `context:false` and `credentials:'omit'` for an anonymous SSR request; explicitly supplied request headers still apply. Conversely, `credentials:'omit'` alone suppresses automatic SSR credential forwarding but does not delete headers supplied through `setContext()` or the request itself.
+
+`setContext()` affects only the framework's first-party `useFetch()`. It does not intercept native `fetch()`, Axios, Apollo Client, or other HTTP clients.
+
 ## Client-only requests
 
 Set `server:false` when a request should not run during SSR:
@@ -348,6 +402,7 @@ useFetch('/api/products', {
 Supported request options include:
 
 - `headers`
+- `context`
 - `credentials`
 - `mode`
 - `redirect`
@@ -1116,6 +1171,7 @@ import {
   defineServerRoutes,
   defineServerMiddleware,
   defineApplication,
+  setContext,
   useFetch,
   useSeo,
   usePublicConfig,
@@ -1137,6 +1193,7 @@ import type { AppContext } from 'vue-ssr-lite'
 | `defineApplication` | Register an explicit application                 |
 | `defineServerRoutes` | Declare application HTTP routes with native Request/Response |
 | `defineServerMiddleware` | Declare typed HTTP middleware with Provides/Requires |
+| `setContext`        | Replace same-origin header defaults for future `useFetch` executions |
 | `useFetch`          | Fetch page data with SSR, hydration, typed refs, and caching |
 | `useSeo`            | Set reactive SEO/head data                       |
 | `usePublicConfig`   | Read browser-safe server config                  |
