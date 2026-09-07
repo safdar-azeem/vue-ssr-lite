@@ -207,6 +207,8 @@ export interface SsrCreatedApplication<
   managedHead: import('./SsrManagedHead').ManagedHeadController
   /** @internal Core-owned route middleware lifecycle for this app/request. */
   middleware: import('./middleware/SsrMiddlewareRuntime').SsrMiddlewareExecutionController | null
+  /** @internal Application-owned first-party fetch runtime. */
+  fetchRuntime: import('./data/fetch/runtime/SsrFetchRuntime').SsrFetchRuntime
 }
 
 export interface SsrRenderResult<TApplicationState = unknown, TPublicConfig = unknown> {
