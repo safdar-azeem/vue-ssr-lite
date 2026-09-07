@@ -3,7 +3,12 @@ import { createTestRenderRequest } from '../../../SsrTestFixtures'
 import { resolveFetchIdentity, snapshotFetchVariables } from '../runtime/SsrFetchIdentity'
 import type { UseFetchOptionsBase } from '../types/SsrFetchTypes'
 
-const identity = (url: string, variables?: unknown, options: UseFetchOptionsBase<unknown, object> = {}) =>
+const identity = (
+  url: string,
+  variables?: unknown,
+  options: UseFetchOptionsBase<unknown, object> = {},
+  contextHeaders?: HeadersInit
+) =>
   resolveFetchIdentity(url, variables, options, {
     server: true,
     request: createTestRenderRequest('app.test', {
@@ -11,6 +16,7 @@ const identity = (url: string, variables?: unknown, options: UseFetchOptionsBase
       cookie: 'allowed=selected',
       headers: { cookie: 'secret=unfiltered', authorization: 'Bearer incoming', 'proxy-authorization': 'proxy-secret' },
     }),
+    contextHeaders: new Headers(contextHeaders),
   })
 
 describe('fetch request identity and credentials', () => {
@@ -95,6 +101,88 @@ describe('fetch request identity and credentials', () => {
       credentials: 'omit', headers: { authorization: 'explicit', 'proxy-authorization': 'never' },
     }).init.headers.get('authorization')).toBe('explicit')
     expect(identity('/api/items', undefined, { headers: { 'proxy-authorization': 'never' } }).init.headers.has('proxy-authorization')).toBe(false)
+  })
+
+  it('applies same-origin context defaults before local headers and SSR forwarding', () => {
+    const context = {
+      authorization: 'Bearer context',
+      'x-application': 'erp',
+      'proxy-authorization': 'never',
+    }
+    const relative = identity('/api/items', undefined, {
+      headers: { authorization: 'Bearer local' },
+    }, context).init.headers
+    expect(relative.get('authorization')).toBe('Bearer local')
+    expect(relative.get('x-application')).toBe('erp')
+    expect(relative.get('cookie')).toBe('allowed=selected')
+    expect(relative.has('proxy-authorization')).toBe(false)
+
+    const absolute = identity(
+      'https://app.test/api/items',
+      undefined,
+      {},
+      context
+    ).init.headers
+    expect(absolute.get('authorization')).toBe('Bearer context')
+    expect(absolute.get('x-application')).toBe('erp')
+
+    const external = identity(
+      'https://external.test/api/items',
+      undefined,
+      {},
+      context
+    ).init.headers
+    expect(external.has('authorization')).toBe(false)
+    expect(external.has('x-application')).toBe(false)
+  })
+
+  it('keeps context opt-out separate from automatic SSR credential forwarding', () => {
+    const context = {
+      authorization: 'Bearer context',
+      'x-workspace': 'workspace_1',
+    }
+    const forwarded = identity('/api/public-feed', undefined, {
+      context: false,
+      headers: { 'x-trace': 'trace-123' },
+    }, context).init.headers
+    expect([...forwarded.entries()]).toEqual([
+      ['authorization', 'Bearer incoming'],
+      ['cookie', 'allowed=selected'],
+      ['x-trace', 'trace-123'],
+    ])
+    expect(forwarded.has('x-workspace')).toBe(false)
+
+    const anonymous = identity('/api/public-feed', undefined, {
+      context: false,
+      credentials: 'omit',
+      headers: { 'x-trace': 'trace-123' },
+    }, context).init.headers
+    expect([...anonymous.entries()]).toEqual([['x-trace', 'trace-123']])
+  })
+
+  it('does not treat credentials omit as deletion of explicit context headers', () => {
+    const resolved = identity('/api/items', undefined, {
+      credentials: 'omit',
+    }, {
+      authorization: 'Bearer context',
+      'x-workspace': 'workspace_1',
+    })
+    expect(resolved.init.headers.get('authorization')).toBe('Bearer context')
+    expect(resolved.init.headers.get('x-workspace')).toBe('workspace_1')
+    expect(resolved.init.headers.has('cookie')).toBe(false)
+  })
+
+  it('gives context headers the same private and public identity as local headers', () => {
+    const fromContext = identity('/api/profile', undefined, {}, {
+      authorization: 'Bearer A',
+    })
+    const fromRequest = identity('/api/profile', undefined, {
+      headers: { authorization: 'Bearer A' },
+    })
+    expect(fromContext.fingerprint).toBe(fromRequest.fingerprint)
+    expect(fromContext.runtimeKey).toBe(fromRequest.runtimeKey)
+    expect(fromContext.publicKey).toBe(fromRequest.publicKey)
+    expect(fromContext.publicKey).not.toContain('Bearer A')
   })
 
   it('only authorizes persistent hydration cache reuse for an anonymous baseline', () => {
