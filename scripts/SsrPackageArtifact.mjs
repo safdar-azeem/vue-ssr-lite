@@ -138,7 +138,7 @@ import * as server from 'vue-ssr-lite/server'
 import * as vite from 'vue-ssr-lite/vite'
 
 const expected = [
-  [root, ['defineServerRoutes', 'defineServerMiddleware', 'defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useFetch', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
+  [root, ['defineServerRoutes', 'defineServerMiddleware', 'defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'setContext', 'useFetch', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
   [client, ['hydrateSsrApplication', 'mountSpaApplication']],
   [server, ['defineSitemap', 'createSsrManagedServer', 'createSsrMemoryResponseCache']],
   [vite, ['vueSsrLite']],
@@ -165,6 +165,7 @@ export { root, client, server, vite }
   defineServerMiddleware,
   RouterView,
   LoadingIndicator,
+  setContext,
   useFetch,
   useSeo,
   usePublicConfig,
@@ -180,6 +181,7 @@ export { root, client, server, vite }
   type ServerRouteContext,
   type ServerRoutesDefinition,
   type SiteSeoResolution,
+  type SetContextOptions,
   type UseFetchResult,
   type UseFetchReturn,
   type UseFetchError,
@@ -217,6 +219,7 @@ void [
   defineServerMiddleware,
   RouterView,
   LoadingIndicator,
+  setContext,
   useFetch,
   useSeo,
   usePublicConfig,
@@ -240,6 +243,7 @@ type PublicTypes = [
   ServerRouteContext,
   ServerRoutesDefinition,
   SiteSeoResolution,
+  SetContextOptions,
   SsrHydrateOptions,
   SitemapContext,
   SsrVitePluginOptions,
@@ -279,6 +283,13 @@ defineServer({ serverMiddleware: [serverAuth] })
 interface RequiredFetchVariables { category: string; page?: number }
 interface FetchProduct { id: number; title: string }
 async function fetchTypes() {
+  setContext({})
+  setContext({ headers: {} })
+  setContext({ headers: { authorization: 'Bearer packaged-token' } })
+  setContext({ headers: new Headers({ authorization: 'Bearer packaged-token' }) })
+  setContext({ headers: [['authorization', 'Bearer packaged-token']] })
+  // @ts-expect-error Unknown context properties are rejected.
+  setContext({ headers: {}, unknown: true })
   const result = useFetch<FetchProduct[]>('/api/products')
   const data: ShallowRef<FetchProduct[] | undefined> = result.data
   const awaited = await result
@@ -307,6 +318,7 @@ async function fetchTypes() {
   result.error.value = null
   useFetch<unknown, { page?: number }>('/api/products')
   useFetch('/api/products', { variables: () => ({ page: 2 }) })
+  useFetch('/api/products', { context: false })
   void [data, awaitedData, typed]
 }
 void fetchTypes
