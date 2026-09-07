@@ -230,6 +230,7 @@ export interface SsrHttpRequest<TPublicConfig = unknown> extends SsrRenderReques
 }
 
 export interface SsrHttpResponse {
+  /** Legacy Node transport accepts 100–599; informational responses have no native Web equivalent. */
   statusCode: number
   body?: string | Uint8Array
   /** Header values retain multiplicity for fields such as Set-Cookie. */
@@ -280,6 +281,7 @@ export interface SsrResponseCacheStrategy<TPublicConfig = unknown> {
   shouldCache?: (response: SsrHttpResponse, request: SsrHttpRequest<TPublicConfig>) => boolean
 }
 
+/** Legacy/SEO compatibility. New application HTTP APIs use defineServerRoutes(). */
 export interface SsrEndpointDefinition<TPublicConfig = unknown> {
   id: string
   /**
@@ -289,6 +291,7 @@ export interface SsrEndpointDefinition<TPublicConfig = unknown> {
    */
   ownedPaths?: readonly string[]
   match: (request: SsrHttpRequest<TPublicConfig>) => boolean
+  /** Returning null continues through later endpoints, assets and Vue rendering. */
   handle: (
     request: SsrHttpRequest<TPublicConfig>,
     tools: SsrEndpointTools
