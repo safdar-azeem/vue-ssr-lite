@@ -1,3 +1,15 @@
+export { defineServerRoutes } from './server-routes/defineServerRoutes'
+export { defineServerMiddleware } from './server-routes/defineServerMiddleware'
+export type {
+  GlobalServerMiddleware,
+  ServerMiddleware,
+  ServerMiddlewareHandler,
+  ServerMiddlewareBaseContext,
+  ServerRouteContext,
+  ServerRouteHandler,
+  ServerRouteMethod,
+  ServerRoutesDefinition,
+} from './server-routes/SsrServerRouteTypes'
 import './extensions/seo/types'
 import './middleware/SsrMiddlewareTypes'
 import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
@@ -112,6 +124,9 @@ export const defineApplication = <T extends ApplicationConfig>(config: T): T => 
     throw new Error(
       `Application "${applicationName}" cannot declare both "host" and "domain". Use "host" for simple static host matching or "domain" for environment-aware domain routing.`
     )
+  }
+  if ('serverMiddleware' in config && config.serverMiddleware !== undefined) {
+    throw new Error('serverMiddleware belongs on defineServer(), not defineApplication().')
   }
   if ('port' in config && (config as { port?: unknown }).port != null) {
     throw new Error(
