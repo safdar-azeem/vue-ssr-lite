@@ -15,6 +15,8 @@ const ROOT_RUNTIME_EXPORTS = [
   'defineExtension',
   'defineMiddleware',
   'defineServer',
+  'defineServerRoutes',
+  'defineServerMiddleware',
   'redirectTo',
   'setHttpStatus',
   'usePublicConfig',
@@ -43,6 +45,8 @@ const SERVER_RUNTIME_EXPORTS = [
   'createSsrMemoryResponseCache',
   'createSsrSeoEndpoints',
   'defineServer',
+  'defineServerRoutes',
+  'defineServerMiddleware',
   'defineSitemap',
   'requireSsrEnum',
   'requireSsrEnv',
@@ -66,6 +70,14 @@ const OBSOLETE_RUNTIME_EXPORTS = [
 
 /** PUBLIC CONSUMER CONTRACT: normal universal application types. */
 const ROOT_TYPE_EXPORTS = [
+  'GlobalServerMiddleware',
+  'ServerMiddleware',
+  'ServerMiddlewareHandler',
+  'ServerMiddlewareBaseContext',
+  'ServerRouteContext',
+  'ServerRouteHandler',
+  'ServerRouteMethod',
+  'ServerRoutesDefinition',
   'AppContext',
   'AppInitializer',
   'ApplicationConfig',
@@ -152,6 +164,14 @@ const CLIENT_TYPE_EXPORTS = [
 
 /** ADVANCED PUBLIC CONTRACT: server hosting, endpoint, cache, and SEO types. */
 const SERVER_TYPE_EXPORTS = [
+  'GlobalServerMiddleware',
+  'ServerMiddleware',
+  'ServerMiddlewareHandler',
+  'ServerMiddlewareBaseContext',
+  'ServerRouteContext',
+  'ServerRouteHandler',
+  'ServerRouteMethod',
+  'ServerRoutesDefinition',
   'ApplicationConfig',
   'RobotsConfig',
   'RobotsGroup',
@@ -221,6 +241,13 @@ const SERVER_TYPE_EXPORTS = [
 const VITE_TYPE_EXPORTS = ['SsrVitePluginOptions']
 
 const HIDDEN_ROOT_RUNTIME_EXPORTS = [
+  'compileServerRoutes',
+  'matchServerRoute',
+  'dispatchServerRoute',
+  'createWebRequest',
+  'executeServerMiddleware',
+  'writeWebResponse',
+  'resolveProductionAssetResponse',
   'createManagedHeadController',
   'createSsrApplication',
   'defineSitemap',
@@ -351,6 +378,9 @@ describe('public package entrypoint contracts', () => {
       'RobotsLegacyConfig',
       'SeoInput',
       'SsrCompiledConfig',
+      'SsrCompiledServerRoute',
+      'SsrCompiledServerRoutes',
+      'SsrServerRouteMatch',
       'SsrConfig',
       'SsrConfigExport',
       'SsrConfigShared',
