@@ -952,6 +952,15 @@ Browser:
 
 Use `pending` for browser loading state, or `await refresh()` when you need to wait explicitly.
 
+## Variables and reactive request identity
+
+`variables` are normalized into query parameters. Arrays become repeated query
+parameters, `null` becomes an empty value, and `undefined` is omitted.
+
+The URL and `variables` may each be provided as plain values, refs, or getters.
+When the resolved URL or variables change, the request identity changes and the
+hook automatically switches to the corresponding request and runs it again.
+
 ## Fetch policies
 
 The default policy is `network-only`.
