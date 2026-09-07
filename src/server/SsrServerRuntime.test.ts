@@ -781,6 +781,7 @@ describe('managed SSR server lifecycle', () => {
     const response = () =>
       ({
         writeHead: vi.fn(),
+        setHeader: vi.fn(),
         end: vi.fn(),
       }) as unknown as import('node:http').ServerResponse
     const openFile = vi.fn()
@@ -796,10 +797,9 @@ describe('managed SSR server lifecycle', () => {
       )
     ).resolves.toBe(true)
     expect(openFile).not.toHaveBeenCalled()
-    expect(headResponse.writeHead).toHaveBeenCalledWith(
-      200,
-      expect.objectContaining({ 'content-length': '5', etag: asset.etag })
-    )
+    expect(headResponse.statusCode).toBe(200)
+    expect(headResponse.setHeader).toHaveBeenCalledWith('content-length', '5')
+    expect(headResponse.setHeader).toHaveBeenCalledWith('etag', asset.etag)
 
     const notModifiedResponse = response()
     await expect(
@@ -815,10 +815,8 @@ describe('managed SSR server lifecycle', () => {
       )
     ).resolves.toBe(true)
     expect(openFile).not.toHaveBeenCalled()
-    expect(notModifiedResponse.writeHead).toHaveBeenCalledWith(
-      304,
-      expect.objectContaining({ etag: asset.etag })
-    )
+    expect(notModifiedResponse.statusCode).toBe(304)
+    expect(notModifiedResponse.setHeader).toHaveBeenCalledWith('etag', asset.etag)
 
     const aborted = new AbortController()
     aborted.abort(new Error('cancelled before open'))
@@ -845,7 +843,7 @@ describe('managed SSR server lifecycle', () => {
         openFile as any
       )
     ).resolves.toBe(false)
-    expect(deletedResponse.writeHead).not.toHaveBeenCalled()
+    expect(deletedResponse.setHeader).not.toHaveBeenCalled()
   })
 
   it('destroys the source and closes its handle when streaming is aborted', async () => {
@@ -883,9 +881,11 @@ describe('managed SSR server lifecycle', () => {
     const openFile = vi.fn().mockResolvedValue(file)
     const response = new PassThrough() as PassThrough & {
       writeHead: ReturnType<typeof vi.fn>
+      setHeader: ReturnType<typeof vi.fn>
       end: ReturnType<typeof vi.fn>
     }
     response.writeHead = vi.fn()
+    response.setHeader = vi.fn()
     const originalEnd = response.end.bind(response)
     response.end = vi.fn(originalEnd) as any
     const asset: SsrResolvedProductionAsset = {
@@ -912,7 +912,7 @@ describe('managed SSR server lifecycle', () => {
     expect(handleClosed).toBe(true)
     expect(closeHandle).toHaveBeenCalledTimes(1)
     expect(reads).toBeGreaterThan(0)
-    expect(response.writeHead).toHaveBeenCalledTimes(1)
+    expect(response.setHeader).toHaveBeenCalledWith('content-length', String(asset.size))
     expect(response.end).not.toHaveBeenCalled()
   })
 
