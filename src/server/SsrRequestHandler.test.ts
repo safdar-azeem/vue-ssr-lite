@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, inject, onServerPrefetch } from 'vue'
 import { RouterView } from 'vue-router'
 import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
-import type { SsrEndpointDefinition } from '../SsrRuntimeTypes'
+import type { SsrEndpointDefinition, SsrHttpResponse } from '../SsrRuntimeTypes'
 import { SSR_REQUEST_RESOLUTION } from '../SsrRequestResolution'
 import { renderSsrApplication } from '../SsrRenderRuntime'
 import { defineMiddleware } from '../middleware/defineMiddleware'
@@ -12,12 +12,21 @@ import {
 } from './SsrAdmissionRuntime'
 import {
   createSsrRequestScope,
-  handleSsrRequest,
+  handleSsrRequest as handleNativeSsrRequest,
   SsrRequestCancelledError,
   type SsrNormalizedRequest,
   type SsrRequestHandlerRuntime,
   type SsrRequestScope,
 } from './SsrRequestHandler'
+
+const handleSsrRequest = async (...args: Parameters<typeof handleNativeSsrRequest>): Promise<SsrHttpResponse | undefined> => {
+  const result = await handleNativeSsrRequest(...args)
+  if (!(result instanceof Response)) return result
+  const headers: Record<string, string | string[]> = Object.fromEntries(result.headers)
+  const cookies = result.headers.getSetCookie()
+  if (cookies.length) headers['set-cookie'] = cookies
+  return { statusCode: result.status, headers, body: result.body ? await result.text() : undefined }
+}
 
 const normalizedRequest = (url: string): SsrNormalizedRequest =>
   Object.freeze({
@@ -117,7 +126,7 @@ const handlerRuntime = (
     '<html><head><!--vue-ssr-lite:head--></head><body><!--vue-ssr-lite:teleports--><div id="app"><!--vue-ssr-lite:html--></div><!--vue-ssr-lite:state--></body></html>',
   resolveDevelopmentAssets: async () => [],
   isPrivateProductionAssetPath: () => false,
-  serveProductionAsset: async () => false,
+  resolveProductionAssetResponse: async () => null,
 })
 
 describe('transport-independent SSR request handler', () => {
@@ -491,7 +500,7 @@ describe('transport-independent SSR request handler', () => {
         const runtime = {
           ...handlerRuntime(assetScope, definition, admission),
           production: true,
-          serveProductionAsset: async () => true,
+          resolveProductionAssetResponse: async () => new Response('asset'),
         }
         await handleSsrRequest(normalizedRequest('/asset.js'), runtime)
       } finally {
