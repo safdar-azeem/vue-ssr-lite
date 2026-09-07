@@ -15,8 +15,14 @@ import { RouterView } from '../../../navigation/RouterView'
 import { SSR_NAVIGATION_RUNTIME } from '../../../navigation/SsrNavigationRuntime'
 import { SSR_FETCH_RUNTIME, type SsrFetchRuntime } from '../runtime/SsrFetchRuntime'
 import { FETCH_HYDRATION_KEY, type HydratedFetchRecord } from '../runtime/SsrFetchHydration'
+import { setContext } from '../context/setContext'
 import { useFetch } from '../composables/useFetch'
-import type { UseFetchError, UseFetchResult, UseFetchReturn } from '../types/SsrFetchTypes'
+import type {
+  SetContextOptions,
+  UseFetchError,
+  UseFetchResult,
+  UseFetchReturn,
+} from '../types/SsrFetchTypes'
 import { deferred, jsonResponse } from './helpers'
 
 const disposers: Array<() => void> = []
@@ -689,7 +695,20 @@ async function publicTypeContract() {
   useFetch<unknown, { nested: { value: number } }>('/api/items', { variables: { nested: { value: 1 } } })
   useFetch<unknown, { optional?: number }>('/api/items')
   useFetch('/api/items', { variables: ref({ page: 2 }) })
+  useFetch('/api/items', { context: false })
   // @ts-expect-error Only data is writable.
   sync.pending.value = false
+
+  const setter: (context: SetContextOptions) => void = setContext
+  expectTypeOf<Parameters<typeof setContext>[0]>().toEqualTypeOf<
+    SetContextOptions
+  >()
+  setter({})
+  setter({ headers: {} })
+  setter({ headers: { authorization: 'Bearer token' } })
+  setter({ headers: new Headers({ authorization: 'Bearer token' }) })
+  setter({ headers: [['authorization', 'Bearer token']] })
+  // @ts-expect-error Direct object literals reject unknown context properties.
+  setContext({ headers: {}, unknown: true })
 }
 void publicTypeContract
