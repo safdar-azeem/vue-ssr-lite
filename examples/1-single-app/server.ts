@@ -3,7 +3,9 @@ import { siteSeo } from './src/seo/site'
 import { sitemap } from './src/seo/sitemap'
 import { robots } from './src/seo/robots'
 import { loggerMiddleware } from './src/middleware/loggerMiddleware'
-import { productsEndpoint } from './server/products'
+import { productsRoutes } from './server/products'
+import { loggerMiddleware as serverLoggerMiddleware } from './server/middleware/logger'
+
 export default defineServer({
   render: 'ssr',
 
@@ -18,9 +20,10 @@ export default defineServer({
     robots,
   },
 
-  // Global middleware runs for every route.
+  // Vue navigation middleware runs for every page navigation.
   middleware: [loggerMiddleware],
-  endpoints: [productsEndpoint],
+  serverMiddleware: [serverLoggerMiddleware],
+  serverRoutes: [productsRoutes],
 
   // No `app` config required.
   // Defaults:
