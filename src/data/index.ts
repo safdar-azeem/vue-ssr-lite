@@ -1,5 +1,6 @@
-export { useFetch } from './fetch/index'
+export { setContext, useFetch } from './fetch/index'
 export type {
+  SetContextOptions,
   UseFetchDoneContext,
   UseFetchError,
   UseFetchErrorContext,
