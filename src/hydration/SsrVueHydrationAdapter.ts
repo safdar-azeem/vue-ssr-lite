@@ -4,8 +4,8 @@ import { isVNode, type App, type VNode } from 'vue'
  * VERSION-SENSITIVE: Vue 3.5.x renderer compatibility boundary.
  *
  * Owner: Core's browser hydration lifecycle. Before extending the supported
- * Vue minor, update this adapter and run its compatibility suite against both
- * range endpoints (see doc/hydration-compatibility.md). No fetch logic belongs
+ * Vue minor, update this adapter and run its compatibility suite manually against
+ * both supported range endpoints. No fetch logic belongs
  * here. Unknown structure must fail closed, never imply completed hydration.
  */
 export const createSsrVueHydrationAdapter = (app: App): (() => readonly Promise<unknown>[]) => {
