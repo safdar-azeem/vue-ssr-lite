@@ -5,6 +5,183 @@ import { createFetchHarness, deferred, jsonResponse } from './helpers'
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('fetch runtime execution ownership', () => {
+  it('replaces and snapshots application request context without retaining caller state', () => {
+    const harness = createFetchHarness()
+    const callerHeaders = new Headers({
+      authorization: 'Bearer A',
+      'x-workspace': 'workspace_1',
+    })
+    harness.runtime.setContext({ headers: callerHeaders })
+    callerHeaders.set('authorization', 'Bearer mutated')
+
+    const firstSnapshot = harness.runtime.getContextSnapshot()
+    expect(firstSnapshot.get('authorization')).toBe('Bearer A')
+    firstSnapshot.set('authorization', 'Bearer snapshot-mutation')
+    expect(harness.runtime.getContextSnapshot().get('authorization')).toBe(
+      'Bearer A'
+    )
+
+    harness.runtime.setContext({ headers: { 'x-workspace': 'workspace_2' } })
+    const replaced = harness.runtime.resolve('/api/items', undefined, {})
+    expect(replaced.init.headers.get('x-workspace')).toBe('workspace_2')
+    expect(replaced.init.headers.has('authorization')).toBe(false)
+
+    harness.runtime.setContext({ headers: {} })
+    expect(
+      harness.runtime.resolve('/api/items', undefined, {}).init.headers.has(
+        'x-workspace'
+      )
+    ).toBe(false)
+    harness.runtime.setContext({})
+    expect([...harness.runtime.getContextSnapshot()]).toEqual([])
+    harness.dispose()
+  })
+
+  it('uses the latest context on refresh without refetching when context alone changes', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
+      jsonResponse(new Headers(init?.headers).get('authorization'))
+    )
+    vi.stubGlobal('fetch', fetcher)
+    const harness = createFetchHarness()
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer A' },
+    })
+    const attached = harness.attach()
+    await attached.initial
+    expect(attached.consumer.data.value).toBe('Bearer A')
+
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer B' },
+    })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    harness.runtime.move(
+      attached.consumer,
+      harness.runtime.resolve(
+        '/api/items',
+        undefined,
+        attached.consumer.options
+      )
+    )
+    await harness.runtime.refresh(attached.consumer)
+    expect(attached.consumer.data.value).toBe('Bearer B')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer C' },
+    })
+    await harness.change(attached.consumer, '/api/other')
+    expect(attached.consumer.data.value).toBe('Bearer C')
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    harness.dispose()
+  })
+
+  it('keeps in-flight context immutable and separates authenticated deduplication identities', async () => {
+    const first = deferred<Response>()
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(async (_url, init) =>
+        jsonResponse(new Headers(init?.headers).get('authorization'))
+      )
+    vi.stubGlobal('fetch', fetcher)
+    const harness = createFetchHarness()
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer A' },
+    })
+    const a = harness.attach('/api/profile')
+
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer B' },
+    })
+    const b = harness.attach('/api/profile')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(a.consumer.identity.runtimeKey).not.toBe(
+      b.consumer.identity.runtimeKey
+    )
+    expect(
+      new Headers(fetcher.mock.calls[0]![1]?.headers).get('authorization')
+    ).toBe('Bearer A')
+    expect(
+      new Headers(fetcher.mock.calls[1]![1]?.headers).get('authorization')
+    ).toBe('Bearer B')
+
+    first.resolve(jsonResponse('Bearer A'))
+    await Promise.all([a.initial, b.initial])
+    expect(a.consumer.data.value).toBe('Bearer A')
+    expect(b.consumer.data.value).toBe('Bearer B')
+    harness.dispose()
+  })
+
+  it('keeps context false in force across refresh while preserving local headers', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
+      jsonResponse(Object.fromEntries(new Headers(init?.headers)))
+    )
+    vi.stubGlobal('fetch', fetcher)
+    const harness = createFetchHarness({
+      server: true,
+      request: {
+        cookie: 'session=abc',
+        headers: { authorization: 'Bearer incoming' },
+      },
+    })
+    harness.runtime.setContext({
+      headers: {
+        authorization: 'Bearer context-A',
+        'x-workspace': 'workspace_1',
+      },
+    })
+    const attached = harness.attach('/api/public-feed', {
+      context: false,
+      credentials: 'omit',
+      headers: { 'x-trace': 'trace-123' },
+    })
+    await attached.initial
+    expect(attached.consumer.data.value).toEqual({ 'x-trace': 'trace-123' })
+
+    harness.runtime.setContext({
+      headers: { authorization: 'Bearer context-B' },
+    })
+    harness.runtime.move(
+      attached.consumer,
+      harness.runtime.resolve(
+        '/api/public-feed',
+        undefined,
+        attached.consumer.options
+      )
+    )
+    await harness.runtime.refresh(attached.consumer)
+    expect(attached.consumer.data.value).toEqual({ 'x-trace': 'trace-123' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    harness.dispose()
+  })
+
+  it('matches request-local header identity and browser hydration semantics', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => jsonResponse('profile')))
+    const fromContext = createFetchHarness({ server: true })
+    const fromRequest = createFetchHarness({ server: true })
+    fromContext.runtime.setContext({
+      headers: { authorization: 'Bearer equivalence-secret' },
+    })
+    const contextExecution = fromContext.attach('/api/profile')
+    const requestExecution = fromRequest.attach('/api/profile', {
+      headers: { authorization: 'Bearer equivalence-secret' },
+    })
+    await Promise.all([contextExecution.initial, requestExecution.initial])
+
+    expect(contextExecution.consumer.identity.fingerprint).toBe(
+      requestExecution.consumer.identity.fingerprint
+    )
+    expect(contextExecution.consumer.identity.publicKey).toBe(
+      requestExecution.consumer.identity.publicKey
+    )
+    expect(fromContext.snapshot()).toEqual(fromRequest.snapshot())
+    expect(JSON.stringify(fromContext.snapshot())).not.toContain(
+      'equivalence-secret'
+    )
+    fromContext.dispose()
+    fromRequest.dispose()
+  })
+
   it('does not overflow long timeout durations into immediate cancellation', async () => {
     vi.useFakeTimers()
     const expire = vi.fn()
