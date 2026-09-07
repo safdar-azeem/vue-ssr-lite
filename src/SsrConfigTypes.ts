@@ -1,3 +1,4 @@
+import type { GlobalServerMiddleware, ServerRoutesDefinition } from './server-routes/SsrServerRouteTypes'
 import type { Component } from 'vue'
 import type { Router, RouterHistory, RouterScrollBehavior, RouteRecordRaw } from 'vue-router'
 import type { ExtensionDefinition } from './core/extensions/ExtensionDefinition'
@@ -112,12 +113,16 @@ export type SsrRouterFactory = (options: {
  * Applications are always registered explicitly on `defineServer()`.
  */
 interface ApplicationConfigBase {
+  /** HTTP middleware is global and belongs on defineServer(). */
+  serverMiddleware?: never
   name: string
   render?: SsrRenderMode
   /** Existing Vite HTML entry. Defaults to `./index.html` when present. */
   template?: string
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
+  /** Server-only native HTTP routes owned by this application. */
+  serverRoutes?: readonly ServerRoutesDefinition[]
   mount?: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
@@ -185,6 +190,8 @@ export interface SsrConfigServerOptions {
 }
 
 export interface SsrConfigShared {
+  /** Cross-cutting HTTP middleware wrapping every application-owned response. */
+  serverMiddleware?: readonly GlobalServerMiddleware[]
   name?: string
   server?: SsrConfigServerOptions
   readiness?: SsrReadinessProbe[]
@@ -209,6 +216,8 @@ type SsrSingleApplicationFields = {
   template?: string
   cookies?: SsrApplicationCookiesConfig
   endpoints?: SsrEndpointDefinition<any>[]
+  /** Server-only native HTTP routes owned by this application. */
+  serverRoutes?: readonly ServerRoutesDefinition[]
   mount?: string
   cacheControl?: string
   responseCache?: SsrResponseCacheStrategy<any>
@@ -235,6 +244,7 @@ export type SsrMultiApplicationConfig = SsrConfigShared & {
   domain?: never
   cookies?: never
   endpoints?: never
+  serverRoutes?: never
   mount?: never
   cacheControl?: never
   responseCache?: never
