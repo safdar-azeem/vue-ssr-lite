@@ -2,7 +2,6 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useFetch } from 'vue-ssr-lite'
-import { memberHeaders } from '../demoAuth'
 import type { OrganizationProductResponse } from '../../shared/api'
 
 const route = useRoute()
@@ -11,7 +10,6 @@ const organizationId = computed(() => String(route.params.organizationId))
 const { data, pending, error, refresh } = useFetch<OrganizationProductResponse>(
   () => `/api/organizations/${organizationId.value}/products/1`,
   {
-    headers: memberHeaders,
     fetchPolicy: 'network-only',
     nextFetchPolicy: 'cache-first',
   },
