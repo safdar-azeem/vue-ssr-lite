@@ -9,6 +9,7 @@ import { collectSsrRenderDiagnostics, readSsrPhaseTimings } from './SsrDiagnosti
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
 import { serializeSsrState } from './SsrSerialization'
 import { safeSsrLog } from './SsrObservability'
+import { runWithSsrFetchRuntime } from './data/fetch/runtime/SsrFetchServerRuntimeScope'
 import type { ManagedHeadSnapshot } from './SsrManagedHead'
 import type {
   SsrResolvedApplicationDefinition,
@@ -149,28 +150,30 @@ export const renderSsrApplication = async <
     if (!created) return
     const current = created
     created = undefined
-    try {
-      await definition.cleanup?.(current.context)
-    } catch (error) {
-      reportCleanupFailure(
-        options.logger,
-        'ssr.application.cleanup.failed',
-        request.requestId,
-        definition.id,
-        error
-      )
-    }
-    try {
-      current.hydration.dispose()
-    } catch (error) {
-      reportCleanupFailure(
-        options.logger,
-        'ssr.hydration.cleanup.failed',
-        request.requestId,
-        definition.id,
-        error
-      )
-    }
+    await runWithSsrFetchRuntime(current.fetchRuntime, async () => {
+      try {
+        await definition.cleanup?.(current.context)
+      } catch (error) {
+        reportCleanupFailure(
+          options.logger,
+          'ssr.application.cleanup.failed',
+          request.requestId,
+          definition.id,
+          error
+        )
+      }
+      try {
+        current.hydration.dispose()
+      } catch (error) {
+        reportCleanupFailure(
+          options.logger,
+          'ssr.hydration.cleanup.failed',
+          request.requestId,
+          definition.id,
+          error
+        )
+      }
+    })
   }
 
   try {
@@ -191,217 +194,201 @@ export const renderSsrApplication = async <
         resumeResponseState: pass === 0 ? undefined : carriedResponse,
         resolution,
         middlewareController,
+        runWithFetchRuntime: runWithSsrFetchRuntime,
       })
       finishCreation?.()
-      throwIfRequestAborted(request.signal)
-      if (pass === 0) contextReadyAt = now()
+      const active = created
+      await runWithSsrFetchRuntime(active.fetchRuntime, async () => {
+        throwIfRequestAborted(request.signal)
+        if (pass === 0) contextReadyAt = now()
 
-      if (created.router) {
-        const finishRoute = timings?.start('router navigation')
-        const url = new URL(request.url)
-        await created.router.push(`${url.pathname}${url.search}${url.hash}`)
-        if (
-          created.context.response.redirect ||
-          middlewareController.navigationOutcome()
-        ) {
+        if (active.router) {
+          const finishRoute = timings?.start('router navigation')
+          const url = new URL(request.url)
+          await active.router.push(`${url.pathname}${url.search}${url.hash}`)
+          if (
+            active.context.response.redirect ||
+            middlewareController.navigationOutcome()
+          ) {
+            finishRoute?.()
+            routeReadyAt = now()
+            renderedAt = routeReadyAt
+            middlewareEarlyExit = true
+            finalized = true
+            return
+          }
+          await active.router.isReady()
           finishRoute?.()
-          routeReadyAt = now()
-          renderedAt = routeReadyAt
-          middlewareEarlyExit = true
-          finalized = true
-          break
+          throwIfRequestAborted(request.signal)
+          resolveResponseStatusForRoute(
+            active.context.response,
+            active.router.currentRoute.value
+          )
         }
-        await created.router.isReady()
-        finishRoute?.()
+        if (pass === 0) routeReadyAt = now()
+
+        const ssrContext: {
+          teleports?: Record<string, string>
+          modules?: Set<string>
+        } = {}
+        const finishVue = timings?.start('Vue render')
+        html = await renderToString(active.app, ssrContext)
+        finishVue?.()
+        resolution.completeReactivityObservation()
         throwIfRequestAborted(request.signal)
-        resolveResponseStatusForRoute(
-          created.context.response,
-          created.router.currentRoute.value
-        )
-      }
-      if (pass === 0) routeReadyAt = now()
+        teleports = { ...(ssrContext.teleports ?? {}) }
+        // Replace rather than union: only the pass that produced `html` may own
+        // request assets. Earlier resolution passes are intentionally discarded.
+        renderedModules = [...(ssrContext.modules ?? [])]
+        renderedAt = now()
 
-      const ssrContext: {
-        teleports?: Record<string, string>
-        modules?: Set<string>
-      } = {}
-      const finishVue = timings?.start('Vue render')
-      html = await renderToString(created.app, ssrContext)
-      finishVue?.()
-      resolution.completeReactivityObservation()
-      throwIfRequestAborted(request.signal)
-      teleports = { ...(ssrContext.teleports ?? {}) }
-      // Replace rather than union: only the pass that produced `html` may own
-      // request assets. Earlier resolution passes are intentionally discarded.
-      renderedModules = [...(ssrContext.modules ?? [])]
-      renderedAt = now()
+        const pending = resolution.pendingWork()
+        const isLastPass = pass === maxPasses - 1
+        let resolutionSettled = true
 
-      const pending = resolution.pendingWork()
-      const isLastPass = pass === maxPasses - 1
-      let resolutionSettled = true
+        // Tracked work gates final serialization, but does not by itself
+        // invalidate the HTML. A plugin must explicitly request another pass
+        // when settling that work changes render-visible state. Inspect the
+        // request after draining as work may invalidate the tree asynchronously.
+        if (pending.length > 0) {
+          const fallbackSnapshot =
+            Number.isFinite(deadlineMs) && deadlineMs > 0
+              ? {
+                  application: snapshotSerializable(active.context.state),
+                  plugins: snapshotSerializable(active.hydration.collect()),
+                  head: snapshotSerializable(active.managedHead.collect()),
+                  response: snapshotSerializable(active.context.response),
+                }
+              : undefined
+          resolutionSettled = await resolution.drain(
+            deadlineMs,
+            request.signal
+          )
+          throwIfRequestAborted(request.signal)
+          if (!resolutionSettled) {
+            deadlineSnapshot = fallbackSnapshot
+            reportDiagnostics(options.logger, request.requestId, definition.id, [
+              {
+                code: 'resolution-deadline',
+                message: `Resolution work did not settle within the ${deadlineMs}ms deadline; serializing the latest render.`,
+              },
+            ])
+          }
+        }
 
-      // Tracked work gates final serialization, but does not by itself
-      // invalidate the HTML. A plugin must explicitly request another pass
-      // when settling that work changes render-visible state. Inspect the
-      // request after draining as work may invalidate the tree asynchronously.
-      if (pending.length > 0) {
-        const fallbackSnapshot =
-          Number.isFinite(deadlineMs) && deadlineMs > 0
-            ? {
-                application: snapshotSerializable(created.context.state),
-                plugins: snapshotSerializable(created.hydration.collect()),
-                head: snapshotSerializable(created.managedHead.collect()),
-                response: snapshotSerializable(created.context.response),
-              }
-            : undefined
-        resolutionSettled = await resolution.drain(deadlineMs, request.signal)
-        throwIfRequestAborted(request.signal)
+        // A deadline is terminal for this resolution cycle. Re-rendering before
+        // tracked work settles cannot produce a known-final tree, so serialize
+        // the latest completed render with the diagnostic above. Cancellation
+        // has already propagated through throwIfRequestAborted().
         if (!resolutionSettled) {
-          deadlineSnapshot = fallbackSnapshot
+          finalized = true
+          return
+        }
+
+        resolution.completeReactivityPass()
+
+        if (!resolution.additionalPassRequested()) {
+          finalized = true
+          return
+        }
+
+        if (isLastPass) {
+          finalized = true
           reportDiagnostics(options.logger, request.requestId, definition.id, [
             {
-              code: 'resolution-deadline',
-              message: `Resolution work did not settle within the ${deadlineMs}ms deadline; serializing the latest render.`,
+              code: 'resolution-pass-limit',
+              message: `Resolution did not settle within ${maxPasses} render passes; serializing the last render.`,
             },
           ])
+          return
         }
-      }
 
-      // A deadline is terminal for this resolution cycle. Re-rendering before
-      // tracked work settles cannot produce a known-final tree, so serialize
-      // the latest completed render with the diagnostic above. Cancellation
-      // has already propagated through throwIfRequestAborted().
-      if (!resolutionSettled) {
-        finalized = true
-        break
-      }
-
-      resolution.completeReactivityPass()
-
-      if (!resolution.additionalPassRequested()) {
-        finalized = true
-        break
-      }
-
-      if (isLastPass) {
-        finalized = true
-        reportDiagnostics(options.logger, request.requestId, definition.id, [
-          {
-            code: 'resolution-pass-limit',
-            message: `Resolution did not settle within ${maxPasses} render passes; serializing the last render.`,
-          },
-        ])
-        break
-      }
-
-      // The rendered tree was invalidated. Carry browser-safe plugin state and
-      // request-local reconciliation history through separate channels, then
-      // recreate the application warm for the next bounded pass.
-      // Transfer owned snapshots before cleanup. A discarded application's
-      // cleanup cannot mutate the state accepted by the next pass.
-      carried = snapshotSsrReconciliationState(
-        created.hydration.collect()
-      )
-      carriedReconciliation = snapshotSsrReconciliationState(
-        created.hydration.collectReconciliation()
-      )
-      carriedApplication = snapshotSsrReconciliationState(
-        created.context.state
-      )
-      carriedResponse = snapshotSsrReconciliationState(
-        created.context.response
-      )
-      await disposeCurrent()
+        // The rendered tree was invalidated. Carry browser-safe plugin state and
+        // request-local reconciliation history through separate channels, then
+        // recreate the application warm for the next bounded pass.
+        // Transfer owned snapshots before cleanup. A discarded application's
+        // cleanup cannot mutate the state accepted by the next pass.
+        carried = snapshotSsrReconciliationState(active.hydration.collect())
+        carriedReconciliation = snapshotSsrReconciliationState(
+          active.hydration.collectReconciliation()
+        )
+        carriedApplication = snapshotSsrReconciliationState(
+          active.context.state
+        )
+        carriedResponse = snapshotSsrReconciliationState(
+          active.context.response
+        )
+        await disposeCurrent()
+      })
     }
 
     if (!created) throw new Error('SSR render produced no application instance.')
+    const active = created
+    return await runWithSsrFetchRuntime(active.fetchRuntime, async () => {
+      const head =
+        deadlineSnapshot?.head ??
+        snapshotSsrReconciliationState(active.managedHead.collect())
 
-    const head =
-      deadlineSnapshot?.head ??
-      snapshotSsrReconciliationState(created.managedHead.collect())
+      if (diagnosticsEnabled && !middlewareEarlyExit) {
+        reportDiagnostics(
+          options.logger,
+          request.requestId,
+          definition.id,
+          collectSsrRenderDiagnostics({
+            html,
+            route: active.router?.currentRoute.value ?? null,
+            requestUrl: request.url,
+            applicationId: definition.id,
+          })
+        )
+      }
 
-    if (diagnosticsEnabled && !middlewareEarlyExit) {
-      reportDiagnostics(
-        options.logger,
-        request.requestId,
-        definition.id,
-        collectSsrRenderDiagnostics({
-          html,
-          route: created.router?.currentRoute.value ?? null,
-          requestUrl: request.url,
-          applicationId: definition.id,
-        })
-      )
-    }
-
-    const finishSerialization = timings?.start('serialization')
-    const hydrationState: SsrHydrationState<
-      TApplicationState,
-      TPublicConfig
-    > = {
-      version: 1,
-      applicationId: definition.id,
-      publicConfig: request.publicConfig,
-      domain: request.domain,
-      application:
-        deadlineSnapshot?.application ??
-        snapshotSsrReconciliationState(created.context.state),
-      siteOrigin: created.context.siteOrigin,
-      siteSeo: request.siteSeo,
-      plugins: deadlineSnapshot
-        ? deadlineSnapshot.plugins
-        : snapshotSsrReconciliationState(created.hydration.collect()),
-    }
-    const stateBytes = byteLength(serializeSsrState(hydrationState))
-    finishSerialization?.()
-    const totalAt = now()
-
-    return {
-      html,
-      teleports,
-      renderedModules,
-      head,
-      response:
-        deadlineSnapshot?.response ??
-        snapshotSsrReconciliationState(created.context.response),
-      hydrationState,
-      metrics: {
-        requestId: request.requestId,
+      const finishSerialization = timings?.start('serialization')
+      const hydrationState: SsrHydrationState<
+        TApplicationState,
+        TPublicConfig
+      > = {
+        version: 1,
         applicationId: definition.id,
-        contextDurationMs: contextReadyAt - startedAt,
-        routeDurationMs: routeReadyAt - contextReadyAt,
-        renderDurationMs: renderedAt - routeReadyAt,
-        totalDurationMs: totalAt - startedAt,
-        htmlBytes: byteLength(html),
-        stateBytes,
-        renderPasses: passes,
-      },
-    }
+        publicConfig: request.publicConfig,
+        domain: request.domain,
+        application:
+          deadlineSnapshot?.application ??
+          snapshotSsrReconciliationState(active.context.state),
+        siteOrigin: active.context.siteOrigin,
+        siteSeo: request.siteSeo,
+        plugins: deadlineSnapshot
+          ? deadlineSnapshot.plugins
+          : snapshotSsrReconciliationState(active.hydration.collect()),
+      }
+      const stateBytes = byteLength(serializeSsrState(hydrationState))
+      finishSerialization?.()
+      const totalAt = now()
+
+      return {
+        html,
+        teleports,
+        renderedModules,
+        head,
+        response:
+          deadlineSnapshot?.response ??
+          snapshotSsrReconciliationState(active.context.response),
+        hydrationState,
+        metrics: {
+          requestId: request.requestId,
+          applicationId: definition.id,
+          contextDurationMs: contextReadyAt - startedAt,
+          routeDurationMs: routeReadyAt - contextReadyAt,
+          renderDurationMs: renderedAt - routeReadyAt,
+          totalDurationMs: totalAt - startedAt,
+          htmlBytes: byteLength(html),
+          stateBytes,
+          renderPasses: passes,
+        },
+      }
+    })
   } finally {
-    if (created) {
-      try {
-        await definition.cleanup?.(created.context)
-      } catch (error) {
-        reportCleanupFailure(
-          options.logger,
-          'ssr.application.cleanup.failed',
-          request.requestId,
-          definition.id,
-          error
-        )
-      }
-      try {
-        created.hydration.dispose()
-      } catch (error) {
-        reportCleanupFailure(
-          options.logger,
-          'ssr.hydration.cleanup.failed',
-          request.requestId,
-          definition.id,
-          error
-        )
-      }
-    }
+    await disposeCurrent()
     resolution.dispose()
     middlewareController.dispose()
   }
