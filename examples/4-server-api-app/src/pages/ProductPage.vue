@@ -12,7 +12,6 @@ const id = computed(() => String(route.params.id))
 const { data, pending, error, refresh } = useFetch<ProductResponse>(
   () => `/api/products/${id.value}`,
   {
-    headers: memberHeaders,
     fetchPolicy: 'network-only',
     nextFetchPolicy: 'cache-first',
   },
