@@ -294,7 +294,7 @@ setContext({
 })
 ```
 
-Future requests must no longer contain the previous authorization/workspace headers.
+Future requests must no longer contain authorization/workspace headers originating from the stored setContext state.
 
 # Existing Requests Must Not Be Mutated
 
@@ -392,19 +392,19 @@ authorization: Bearer admin-token
 x-application: erp
 ```
 
-Therefore merge order should conceptually be:
+Therefore the authoritative resolution precedence order is:
 
 ```text
-stored setContext headers
-        ↓
-per-useFetch headers
-        ↓
-existing normalization/security rules
-        ↓
-automatic SSR credential forwarding only when still absent
-        ↓
-final request identity
-        ↓
+if context !== false && sameOrigin:
+    copy setContext headers
+
+apply request-local headers
+
+if SSR && sameOrigin && credentials !== 'omit':
+    forward incoming cookie/authorization only where still absent
+
+normalize
+fingerprint
 fetch
 ```
 
@@ -514,13 +514,112 @@ cross-origin      → explicit per-request headers
 
 # `credentials: 'omit'`
 
-Preserve the existing native request semantics.
+Preserve native semantics.
 
-`credentials: 'omit'` must continue to suppress Core's automatic forwarding of incoming SSR credentials.
+`credentials: 'omit'` must continue to suppress Core's automatic forwarding of incoming SSR credentials (`cookie` and `authorization` from the incoming SSR request).
 
-Do not invent custom credential semantics outside normal request/header behavior.
+It MUST NOT silently delete ordinary headers supplied through `setContext()` or through `useFetch({ headers })`.
 
-The important invariant is that `setContext()` must flow through the same normalization/security pipeline as ordinary request headers rather than creating a privileged bypass.
+Example:
+
+```ts
+setContext({
+  headers: {
+    authorization: 'Bearer token',
+  },
+})
+
+useFetch('/api/products', {
+  credentials: 'omit',
+})
+```
+
+The outgoing request MUST still contain the explicitly configured `authorization: 'Bearer token'` header.
+
+`credentials: 'omit'` should suppress Core's automatic credential forwarding; it should NOT silently delete ordinary headers supplied through `setContext()` or through `useFetch({ headers })`.
+
+If the caller wants to skip stored context entirely, use:
+
+```ts
+useFetch('/api/products', {
+  context: false,
+})
+```
+
+Do not overload `credentials: 'omit'` into a vue-ssr-lite-specific "disable context" mechanism.
+
+# Per-Request Context Opt-Out
+
+Global context acts as defaults for same-origin requests. However, an application may need a request that does not inherit stored setContext defaults:
+
+```ts
+useFetch('/api/public-feed', {
+  context: false,
+})
+```
+
+or a request where global tenant/auth context must not be attached.
+
+Add `context?: boolean` to `UseFetchOptions`:
+
+```ts
+export interface UseFetchOptionsBase<TData, TVariables extends object> {
+  ...
+  context?: boolean
+}
+```
+
+Semantics:
+
+- `undefined` or `true` (default): apply current global `setContext()` defaults for same-origin requests.
+- `false`: completely skip stored `setContext()` defaults for this execution.
+
+### Distinction: `context: false` vs `credentials: 'omit'`
+
+It is essential to distinguish stored context defaults from automatic SSR credential forwarding:
+
+- `context: false`: skips **ONLY** stored `setContext()` defaults. It DOES NOT suppress Core's automatic forwarding of incoming SSR credentials (`cookie` and `authorization`).
+- `credentials: 'omit'`: suppresses Core's automatic incoming SSR credential forwarding. It DOES NOT remove explicit headers configured through `setContext()` or `useFetch({ headers })`.
+- `context: false` + `credentials: 'omit'`: produces a genuinely anonymous same-origin request on SSR that receives neither stored context defaults nor automatically forwarded SSR credentials.
+
+Example for a genuinely anonymous same-origin request:
+
+```ts
+useFetch('/api/public-feed', {
+  context: false,
+  credentials: 'omit',
+})
+```
+
+Explicit request-local headers still apply:
+
+```ts
+useFetch('/api/public-feed', {
+  context: false,
+  credentials: 'omit',
+  headers: {
+    'x-trace': 'trace-123',
+  },
+})
+```
+
+This request sends `x-trace: trace-123`, but receives neither `setContext` defaults nor automatically forwarded SSR `cookie` or `authorization`.
+
+It must NOT disable:
+- normal request-local headers (e.g. `useFetch('/api/public-feed', { context: false, headers: { 'x-trace': '1' } })` still sends `x-trace`)
+- browser-native cookie behavior
+- unrelated native fetch semantics
+
+Document it as an escape hatch, not something users normally need.
+
+This is evaluated on every execution and `refresh()`. If `refresh()` is called on a hook initialized with `context: false`, the refresh execution continues to skip stored context defaults.
+
+This option is preferable to:
+- empty Authorization values (e.g. `authorization: ''`)
+- null header values
+- custom delete-header syntax
+- overloading `credentials`
+- custom `Headers` types
 
 # Runtime Ownership & SSR Safety
 
@@ -835,6 +934,39 @@ If authentication uses HttpOnly cookies, the application may not need to call `s
 
 Hydration should continue serializing only the existing safe fetch result/cache structures.
 
+## Hydration Equivalence With Request-Local Headers
+
+A header supplied through `setContext()` must be indistinguishable to the `useFetch` request/cache/hydration pipeline from the same effective header supplied directly through `useFetch({ headers })`.
+
+Do NOT invent a second context-specific hydration identity system.
+
+Invariants:
+- Final private fingerprint uses the effective resolved headers.
+- Existing public hydration-key rules remain unchanged (public keys depend only on method, location, and caller-supplied `key`).
+- Raw context values never enter public hydration keys.
+- Do not serialize the complete context.
+- Do not add a context revision, context token, or context version into hydration merely for this feature.
+- Initial SSR hydration continues using the existing `useFetch` hydration contract.
+- A `setContext()` change after initial hydration affects only subsequent physical executions/refreshes.
+- No separate context-specific hydration identity or protocol is introduced.
+
+Regression coverage must explicitly verify equivalence between:
+
+```ts
+setContext({ headers: { authorization: 'Bearer A' } })
+useFetch('/api/profile')
+```
+
+and:
+
+```ts
+useFetch('/api/profile', {
+  headers: { authorization: 'Bearer A' },
+})
+```
+
+Both enter identical downstream request-identity and hydration semantics.
+
 # Context Update and Existing Cache
 
 Changing context does not require globally deleting the entire fetch cache.
@@ -883,9 +1015,26 @@ setContext({
 })
 ```
 
-Invalid context properties should be rejected by TypeScript.
+Standard TypeScript excess-property checking for direct `setContext()` object literals is sufficient:
 
-Do not add `any` to the public API.
+```ts
+setContext({
+  headers: {},
+  unknown: true, // Error: Object literal may only specify known properties
+})
+```
+
+Do NOT implement complicated `Exact<T>`, `NoExtraProperties<T>`, generic conditional types, or custom exact-object type systems. The public API should remain simply:
+
+```ts
+export interface SetContextOptions {
+  headers?: HeadersInit
+}
+
+export function setContext(context: SetContextOptions): void
+```
+
+Do not increase learning curve or type-system complexity. Do not add `any` to the public API.
 
 # Explicit Non-Goals
 
@@ -978,11 +1127,16 @@ Inspect the repository first and adapt paths if the current implementation has m
 
 ## `src/data/fetch/types/SsrFetchTypes.ts`
 
-Add the public context input type:
+Add the public context input type and extend `UseFetchOptionsBase`:
 
 ```ts
 export interface SetContextOptions {
   headers?: HeadersInit
+}
+
+export interface UseFetchOptionsBase<TData, TVariables extends object> {
+  // ... existing options ...
+  context?: boolean
 }
 ```
 
@@ -1019,16 +1173,22 @@ Do not make context ownership a separate application singleton detached from the
 
 ## `src/data/fetch/runtime/SsrFetchIdentity.ts`
 
-Integrate stored context before final header/request fingerprint creation.
+Integrate stored context before final header/request fingerprint creation according to the authoritative resolution precedence:
+
+1. If `sameOrigin && options.context !== false`, copy stored `setContext` headers.
+2. Apply request-local `options.headers` (overriding stored context defaults).
+3. If `environment.server && sameOrigin && options.credentials !== 'omit'`, forward incoming request `cookie` and `authorization` only where still absent.
+4. Delete `proxy-authorization`.
+5. Compute private fingerprint from effective resolved headers and options.
 
 Preserve:
 
 - native `Headers`
 - proxy-authorization sanitization
 - existing same-origin forwarding
-- existing `credentials`
+- existing `credentials` (`credentials: 'omit'` suppresses automatic SSR forwarding, not explicit context/local headers)
 - existing cache identity behavior
-- existing public/private identity split
+- existing public/private identity split (public hydration key remains unchanged; private fingerprint includes effective resolved headers)
 
 ## New public `setContext()` entry
 
@@ -1343,6 +1503,79 @@ local useFetch authorization = override
 final request = override
 ```
 
+## Per-Request Context Opt-Out
+
+Test 1 (`context: false` alone):
+
+```text
+Incoming SSR request contains:
+- Cookie: session=abc
+- Authorization: Bearer ssr-token
+
+setContext({
+  headers: {
+    authorization: 'Bearer context-token',
+    'x-workspace': 'workspace_1',
+  },
+})
+
+useFetch('/api/public-feed', {
+  context: false,
+  headers: {
+    'x-trace': 'trace-123',
+  },
+})
+
+final outgoing request contains:
+- x-trace: trace-123
+- cookie: session=abc (from existing SSR forwarding)
+- authorization: Bearer ssr-token (from existing SSR forwarding)
+
+final outgoing request does NOT contain:
+- authorization: Bearer context-token (stored context skipped)
+- x-workspace (stored context skipped)
+```
+
+Test 2 (`context: false` + `credentials: 'omit'` for genuinely anonymous request):
+
+```text
+Incoming SSR request contains:
+- Cookie: session=abc
+- Authorization: Bearer ssr-token
+
+setContext({
+  headers: {
+    authorization: 'Bearer context-token',
+    'x-workspace': 'workspace_1',
+  },
+})
+
+useFetch('/api/public-feed', {
+  context: false,
+  credentials: 'omit',
+  headers: {
+    'x-trace': 'trace-123',
+  },
+})
+
+final outgoing request contains:
+- x-trace: trace-123
+
+final outgoing request does NOT contain:
+- authorization: Bearer context-token (stored context skipped)
+- x-workspace (stored context skipped)
+- cookie (SSR forwarding suppressed by credentials: 'omit')
+- authorization: Bearer ssr-token (SSR forwarding suppressed by credentials: 'omit')
+```
+
+Also test `refresh()` on a `context: false` request:
+
+```text
+setContext(token B)
+refresh()
+request still does not contain token B
+```
+
 ## Same-Origin
 
 Verify context applies to:
@@ -1368,6 +1601,27 @@ Ensure existing forwarding behavior remains intact when:
 - context authorization exists
 - per-request authorization exists
 - credentials are omitted
+
+## `credentials: 'omit'` with `setContext` Authorization
+
+Test:
+
+```text
+setContext({
+  headers: {
+    authorization: 'Bearer token',
+  },
+})
+
+useFetch('/api/products', {
+  credentials: 'omit',
+})
+
+final request contains:
+- authorization: Bearer token
+```
+
+Ensure automatic SSR cookies/incoming authorization are suppressed, but explicit setContext headers remain intact.
 
 ## Refresh
 
@@ -1445,6 +1699,31 @@ Bearer secret-token
 ```
 
 do not appear in the hydration payload merely because they were registered through `setContext()`.
+
+## Hydration Equivalence
+
+Verify that a header supplied through `setContext()` enters the downstream request identity and hydration pipeline identically to the same effective header supplied directly through `useFetch({ headers })`.
+
+Regression test compares:
+
+```ts
+setContext({ headers: { authorization: 'Bearer A' } })
+useFetch('/api/profile')
+```
+
+against:
+
+```ts
+useFetch('/api/profile', {
+  headers: { authorization: 'Bearer A' },
+})
+```
+
+Assert:
+- Both produce identical private request fingerprints.
+- Both produce identical public hydration keys.
+- Neither serializes the context into hydration state.
+- No context revision or custom hydration protocol is introduced.
 
 ## Browser Lifecycle
 
@@ -1659,9 +1938,42 @@ The task is complete only when all of the following are true:
 
 31. No unrelated Server Routes, Server Middleware, SEO, routing, hydration, or application architecture is redesigned.
 
+32. `useFetch` supports `context?: boolean` with default inheritance.
+
+33. `context: false` skips stored `setContext` headers for that execution.
+
+34. `context: false` does not remove explicitly supplied local headers.
+
+35. `credentials: 'omit'` does not strip `setContext` or local `Authorization` headers; it only preserves the existing suppression of automatic SSR credential forwarding.
+
+36. Context-provided headers use the same downstream private identity/hydration semantics as equivalent per-request headers.
+
+37. No context-specific public hydration key, serialized context, context revision, or alternate hydration protocol is introduced.
+
+38. Standard TypeScript excess-property checking is sufficient; do not implement a custom exact-object type system.
+
+39. `doc/setcontext.plan.md` is removed when implementation is complete so the previous `doc/` cleanup is preserved.
+
+40. `context: false` skips only stored `setContext` defaults; it does not disable existing automatic SSR credential forwarding.
+
+41. A request that must skip both stored context and automatic SSR credentials uses:
+
+    ```ts
+    {
+      context: false,
+      credentials: 'omit',
+    }
+    ```
+
+42. `context: false` + `credentials: 'omit'` still preserves explicitly supplied request-local headers.
+
+43. `setContext({ headers: {} })` removes headers originating from stored context only; it does not change the existing SSR forwarding policy.
+
 # Implementation Instruction
 
 Focus strictly on writing/generating the implementation code, tests, types, documentation, and example changes.
+
+Before completing task-008, delete `doc/setcontext.plan.md` and ensure the repository contains no permanent implementation-plan `doc/` directory.
 
 DO NOT run:
 
