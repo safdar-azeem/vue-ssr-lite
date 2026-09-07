@@ -53,11 +53,11 @@ const diagnostics = (source: string): string[] => {
   )
 }
 
-describe('approved server route TypeScript contracts', () => {
-  it('accepts the unchanged approved example blueprint against the current public exports', () => {
+describe('server route public TypeScript contracts', () => {
+  it('accepts the canonical server API example against the current public exports', () => {
     expect(diagnostics(`
-import server from '../../doc/server-api-plan/server-api-example/server'
-const approved = server
+import server from '../../examples/4-server-api-app/server'
+const canonical = server
 `)).toEqual([])
   })
 
