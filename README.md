@@ -32,10 +32,10 @@ pnpm add vue-ssr-lite vue-router
 
 See [`examples/`](./examples) for small, practical examples showing recommended `vue-ssr-lite` patterns and architecture.
 
-- [`1-single-app`](./examples/1-single-app/) — minimal single-application SSR
-- [`2-hybrid-route-app`](./examples/2-hybrid-route-app/) — route-level SSR and SPA rendering
-- [`3-multi-domain-apps`](./examples/3-multi-domain-apps/) — multiple applications and host routing
-- [`4-server-api-app`](./examples/4-server-api-app/) — complete Server Routes, Server Middleware, and `useFetch()` example
+- [`single-app`](./examples/1-single-app/) — minimal single-application SSR
+- [`hybrid-route-app`](./examples/2-hybrid-route-app/) — route-level SSR and SPA rendering
+- [`multi-domain-apps`](./examples/3-multi-domain-apps/) — multiple applications and host routing
+- [`server-api-app`](./examples/4-server-api-app/) — complete Server Routes, Server Middleware, and `useFetch()` example
 - [`middleware-example`](./examples/middleware-example/) — Vue navigation middleware
 
 # Minimal Setup
@@ -82,13 +82,68 @@ export default defineServer({
 ## 4. Use your existing Vue application
 
 ```text
-project/
+/
 ├── server.ts
 └── src/
     ├── main.ts
     ├── App.vue
     ├── routes.ts
+    ├── style.css
+    ├── middleware/
+    │   └── authMiddleware.ts
     └── pages/
+```
+
+```ts
+// src/routes.ts
+import type { RouteRecordRaw } from 'vue-router'
+import { authMiddleware } from './middleware/authMiddleware'
+
+const routes: RouteRecordRaw[] = [
+  {
+    path: '/',
+    component: PublicHomePage,
+    meta: {
+      seo: {
+        title: 'Home',
+        description: 'Public home page rendered with SSR.',
+      },
+    },
+  },
+  {
+    path: '/dashboard',
+    component: DashboardPage,
+    meta: {
+      render: 'spa', // this route and its children are SPA only
+      middleware: [authMiddleware],
+      seo: {
+        title: 'Dashboard',
+        description: 'Private dashboard rendered as a client-side SPA.',
+      },
+    },
+    children: [
+      {
+        path: 'nested',
+        component: DashboardNestedPage,
+      },
+    ],
+  },
+]
+
+export default routes
+```
+
+```ts
+// src/middleware/authMiddleware.ts
+import { defineMiddleware } from 'vue-ssr-lite'
+
+export const authMiddleware = defineMiddleware(async (context) => {
+  const token = context.cookies.get('auth-token')
+  if (!token) return context.redirect('/login')
+  const user = await fetchUserFromToken(token)
+  if (!user) return context.redirect('/login')
+  return { props: { user } }
+})
 ```
 
 Update your standard Vue `main.ts`:
@@ -128,15 +183,13 @@ Keep a standard Vite `index.html` at the project root.
 npm run dev
 ```
 
-Your Vue application is now SSR. You are ready to go. If you need extra configuration or other features, continue below.
+> Your Vue application is now SSR. You are ready to go. If you need extra configuration or other features, continue below.
 
-# Data Fetching
+# Part 2: Make the small application useful
 
-Once your application is running, use the built-in `useFetch()` composable for normal page data.
+## Data Fetching
 
-It works in SSR, hydration, and client-side navigation while keeping the API close to normal Vue code.
-
-## Basic usage
+Once your application is running, use the built-in `useFetch()` composable for normal page data. It works in SSR, hydration, and client-side navigation while keeping the API close to normal Vue code.
 
 ```vue
 <script setup lang="ts">
@@ -151,12 +204,7 @@ interface ProductsResponse {
   products: Product[]
 }
 
-const {
-  data,
-  pending,
-  error,
-  refresh,
-} = useFetch<ProductsResponse>('/api/products')
+const { data, pending, error, refresh } = useFetch<ProductsResponse>('/api/products')
 </script>
 
 <template>
@@ -169,57 +217,38 @@ const {
     </article>
   </template>
 
-  <button :disabled="pending" @click="refresh()">
-    Refresh
-  </button>
+  <button :disabled="pending" @click="refresh()">Refresh</button>
 </template>
 ```
 
-That is enough for most pages.
-
-On a direct SSR request, `useFetch()` starts the request during setup and the final server-rendered HTML contains the fetched data. During hydration, the server result is restored without repeating the same initial request. On client-side navigation, the page renders with `pending=true` while the browser request is running.
+That is enough for most pages. On a direct SSR request, `useFetch()` starts the request during setup and the final server-rendered HTML contains the fetched data. During hydration, the server result is restored without repeating the same initial request. On client-side navigation, the page renders with `pending=true` while the browser request is running.
 
 ## `await` is optional
 
-Normally, do not `await` `useFetch()`:
+Usually, don't `await useFetch()`:
 
 ```ts
 const { data, pending, error } = useFetch<ProductsResponse>('/api/products')
 ```
 
-Use `await` only when later setup code itself needs the settled SSR result, for example when generating SEO from fetched data:
+Use `await` only when SSR setup needs the result immediately, such as for SEO:
 
 ```ts
-import { useFetch, useSeo } from 'vue-ssr-lite'
-
-const { data, error } = await useFetch<ProductsResponse>('/api/products')
+const { data } = await useFetch<ProductsResponse>('/api/products')
 
 useSeo({
-  title: () =>
-    !error.value && data.value
-      ? `${data.value.products.length} Products`
-      : 'Products',
+  title: () => `${data.value?.products.length ?? 0} Products`,
 })
 ```
 
-On the server, `await useFetch()` waits for the initial request.
-
-In the browser, `await useFetch()` does **not** wait for the network request. The component continues on the next microtask and `pending` remains the source of truth for browser loading. Use `await refresh()` when browser code explicitly needs to wait for a fresh request to finish.
+On SSR, `await useFetch()` waits for the initial request. In the browser, it does not wait for the network. Use `pending` for loading, or `await refresh()` when you need to wait explicitly.
 
 ## Query variables
 
-Use `variables` for query parameters:
+Use `variables` for query params:
 
 ```ts
-import { ref } from 'vue'
-
-const category = ref('phones')
-const page = ref(1)
-
-const products = useFetch<
-  ProductsResponse,
-  { category: string; page?: number }
->('/api/products', {
+const products = useFetch('/api/products', {
   variables: () => ({
     category: category.value,
     page: page.value,
@@ -227,15 +256,11 @@ const products = useFetch<
 })
 ```
 
-This produces a URL such as:
+Produces:
 
 ```text
 /api/products?category=phones&page=1
 ```
-
-Variable keys are normalized automatically. Arrays become repeated query parameters, `null` becomes an empty value, and `undefined` is omitted.
-
-The URL and `variables` may be plain values, refs, or getters. When their resolved request identity changes, `useFetch()` automatically switches to the new request unless `immediate:false` is enabled.
 
 ## Fetch policies
 
@@ -265,21 +290,6 @@ useFetch('/api/products', {
 ```
 
 Identical in-flight requests are deduplicated even with `network-only`.
-
-## Manual fetching and refresh
-
-Disable the automatic request with `immediate:false`:
-
-```ts
-const products = useFetch<ProductsResponse>('/api/products', {
-  immediate: false,
-})
-
-// Later
-await products.refresh()
-```
-
-`refresh()` always requests fresh data, keeps the current data visible while the request is pending, and can be awaited in both SSR and browser code.
 
 ## Global request context
 
@@ -766,7 +776,7 @@ SSR renders the accepted route content directly and hydration does not show a lo
 <div id="app"></div>
 <div class="initial-loader">Loading application…</div>
 <style>
-#app:not(:empty) + .initial-loader {
+  #app:not(:empty) + .initial-loader {
     display: none;
   }
 </style>
@@ -885,14 +895,12 @@ const loggerMiddleware = defineServerMiddleware(async (request, context, next) =
   return response
 })
 
-const authMiddleware = defineServerMiddleware<{ user: { id: string } }>(
-  async (request, context, next) => {
-    const user = await authenticate(request) // your normal server-side import
-    if (!user) return new Response(null, { status: 401 })
-    context.user = user
-    return next()
-  }
-)
+const authMiddleware = defineServerMiddleware<{ user: { id: string } }>(async (request, context, next) => {
+  const user = await authenticate(request) // your normal server-side import
+  if (!user) return new Response(null, { status: 401 })
+  context.user = user
+  return next()
+})
 
 const productsRoutes = defineServerRoutes({
   prefix: '/api/products',
@@ -1187,25 +1195,25 @@ import {
 import type { AppContext } from 'vue-ssr-lite'
 ```
 
-| API                 | Purpose                                          |
-| ------------------- | ------------------------------------------------ |
-| `defineServer`      | Configure the server/runtime                     |
-| `defineApplication` | Register an explicit application                 |
-| `defineServerRoutes` | Declare application HTTP routes with native Request/Response |
-| `defineServerMiddleware` | Declare typed HTTP middleware with Provides/Requires |
-| `setContext`        | Replace same-origin header defaults for future `useFetch` executions |
-| `useFetch`          | Fetch page data with SSR, hydration, typed refs, and caching |
-| `useSeo`            | Set reactive SEO/head data                       |
-| `usePublicConfig`   | Read browser-safe server config                  |
-| `useOrigin`         | Read the authoritative public origin             |
-| `useDomain`         | Read the selected normalized application domain  |
-| `setHttpStatus`     | Set the current HTTP/page status                 |
-| `redirectTo`        | Set a validated server-rendered-request redirect |
-| `defineExtension`   | Create an advanced runtime extension             |
-| `defineMiddleware`  | Create typed universal route middleware          |
-| `RouterView`        | Render routes with an optional delayed fallback  |
-| `LoadingIndicator`  | Show an optional delayed global navigation bar   |
-| `AppContext`        | Type for the `main.ts` initializer               |
+| API                      | Purpose                                                              |
+| ------------------------ | -------------------------------------------------------------------- |
+| `defineServer`           | Configure the server/runtime                                         |
+| `defineApplication`      | Register an explicit application                                     |
+| `defineServerRoutes`     | Declare application HTTP routes with native Request/Response         |
+| `defineServerMiddleware` | Declare typed HTTP middleware with Provides/Requires                 |
+| `setContext`             | Replace same-origin header defaults for future `useFetch` executions |
+| `useFetch`               | Fetch page data with SSR, hydration, typed refs, and caching         |
+| `useSeo`                 | Set reactive SEO/head data                                           |
+| `usePublicConfig`        | Read browser-safe server config                                      |
+| `useOrigin`              | Read the authoritative public origin                                 |
+| `useDomain`              | Read the selected normalized application domain                      |
+| `setHttpStatus`          | Set the current HTTP/page status                                     |
+| `redirectTo`             | Set a validated server-rendered-request redirect                     |
+| `defineExtension`        | Create an advanced runtime extension                                 |
+| `defineMiddleware`       | Create typed universal route middleware                              |
+| `RouterView`             | Render routes with an optional delayed fallback                      |
+| `LoadingIndicator`       | Show an optional delayed global navigation bar                       |
+| `AppContext`             | Type for the `main.ts` initializer                                   |
 
 ## `vue-ssr-lite/vite`
 
