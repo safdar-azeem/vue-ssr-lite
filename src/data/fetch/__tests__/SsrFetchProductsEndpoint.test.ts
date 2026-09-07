@@ -1,73 +1,74 @@
-import { createServer } from 'node:http'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { defineComponent, h } from 'vue'
 import { describe, expect, it } from 'vitest'
-import { productsEndpoint } from '../../../../examples/1-single-app/server/products'
+import { productsRoutes } from '../../../../examples/1-single-app/server/products'
 import type { ProductsResponse } from '../../../../examples/1-single-app/src/types/products'
 import { renderSsrApplication } from '../../../SsrRenderRuntime'
-import type { SsrHttpRequest } from '../../../SsrRuntimeTypes'
 import { createTestRenderRequest } from '../../../SsrTestFixtures'
+import { defineServerMiddleware } from '../../../server-routes/defineServerMiddleware'
+import { createSsrManagedServer, type SsrManagedServer } from '../../../server/SsrServerRuntime'
 import { useFetch } from '../composables/useFetch'
 
-const request = (path = '/api/products', method = 'GET'): SsrHttpRequest => {
-  const url = new URL(path, 'http://products.test')
-  return {
-    ...createTestRenderRequest(url.host, { url: url.href, protocol: 'http', method }),
-    pathname: url.pathname, search: url.search, entryId: 'products',
+const withProductsServer = async (run: (origin: string, count: () => number) => Promise<void>) => {
+  const root = await mkdtemp(join(tmpdir(), 'ssr-fetch-products-'))
+  let server: SsrManagedServer | undefined
+  let requests = 0
+  try {
+    await writeFile(join(root, 'index.html'), '<html><body><div id="app"></div></body></html>')
+    server = await createSsrManagedServer({ production: false, root, loadRuntime: async () => ({
+      render: 'spa', server: { port: 0, host: '127.0.0.1' },
+      serverRoutes: [productsRoutes],
+      serverMiddleware: [defineServerMiddleware((_request, _context, next) => { requests++; return next() })],
+    }) })
+    await server.listen()
+    await run(`http://127.0.0.1:${server.address().port}`, () => requests)
+  } finally {
+    await server?.close()
+    await rm(root, { recursive: true, force: true })
   }
 }
 
-describe('the repository-owned products endpoint', () => {
-  it('serves stable public data, an empty HEAD, a repeatable HTTP error and a method boundary', async () => {
-    const tools = { signal: new AbortController().signal }
-    expect(productsEndpoint.ownedPaths).toEqual(['/api/products'])
-    expect(productsEndpoint.match(request())).toBe(true)
-    expect(productsEndpoint.match(request('/api/products-extra'))).toBe(false)
-    const first = await productsEndpoint.handle(request(), tools)
-    const second = await productsEndpoint.handle(request(), tools)
-    expect(first).toEqual(second)
-    expect(first?.statusCode).toBe(200)
-    expect(first?.headers?.['cache-control']).toBe('no-store')
-    const body = JSON.parse(first!.body as string) as ProductsResponse
-    expect(body.products).toHaveLength(6)
-    expect(body.products[0]).toMatchObject({ title: 'Pocket notebook', price: 8 })
-    expect(await productsEndpoint.handle(request('/api/products', 'HEAD'), tools)).toMatchObject({ statusCode: 200, body: undefined })
-    expect(await productsEndpoint.handle(request('/api/products?fail=true'), tools)).toMatchObject({ statusCode: 503 })
-    expect(await productsEndpoint.handle(request('/api/products?fail=true', 'HEAD'), tools)).toMatchObject({ statusCode: 503, body: undefined })
-    expect(await productsEndpoint.handle(request('/api/products', 'POST'), tools)).toMatchObject({
-      statusCode: 405, headers: { allow: 'GET, HEAD' },
+describe('the repository-owned products server route', () => {
+  it('serves stable public data with Core HEAD, OPTIONS and 405 semantics', async () => {
+    await withProductsServer(async (origin) => {
+      const response = await fetch(`${origin}/api/products`)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      const body = await response.json() as ProductsResponse
+      expect(body.products).toHaveLength(6)
+      expect(body.products[0]).toMatchObject({ title: 'Pocket notebook', price: 8 })
+      expect(await (await fetch(`${origin}/api/products`)).json()).toEqual(body)
+      const head = await fetch(`${origin}/api/products`, { method: 'HEAD' })
+      expect(head.status).toBe(200)
+      expect(await head.text()).toBe('')
+      expect((await fetch(`${origin}/api/products?fail=true`)).status).toBe(503)
+      const failedHead = await fetch(`${origin}/api/products?fail=true`, { method: 'HEAD' })
+      expect(failedHead.status).toBe(503)
+      expect(await failedHead.text()).toBe('')
+      const method = await fetch(`${origin}/api/products`, { method: 'POST' })
+      expect(method.status).toBe(405)
+      expect(method.headers.get('allow')).toBe('GET, HEAD, OPTIONS')
+      expect(await method.text()).toBe('')
+      const options = await fetch(`${origin}/api/products`, { method: 'OPTIONS' })
+      expect(options.status).toBe(204)
+      expect(options.headers.get('allow')).toBe('GET, HEAD, OPTIONS')
     })
   })
 
-  it('renders the public catalog through one real same-origin HTTP fetch', async () => {
-    let requests = 0
-    const server = createServer((incoming, outgoing) => {
-      requests++
-      const input = request(incoming.url, incoming.method)
-      void Promise.resolve(productsEndpoint.handle(input, { signal: input.signal! })).then((response) => {
-        outgoing.writeHead(response?.statusCode ?? 404, response?.headers)
-        outgoing.end(response?.body)
-      }, () => { outgoing.writeHead(500); outgoing.end() })
-    })
-    try {
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject)
-        server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve() })
-      })
-      const address = server.address() as { port: number }
-      const host = `127.0.0.1:${address.port}`
+  it('renders the catalog through one real same-origin useFetch request to the managed server', async () => {
+    await withProductsServer(async (origin, count) => {
       const root = defineComponent({ setup() {
         const result = useFetch<ProductsResponse>('/api/products', { credentials: 'omit', fetchPolicy: 'cache-first' })
         return () => h('main', result.pending.value ? 'pending' : result.data.value?.products.map((product) => product.title).join(', '))
       } })
-      const rendered = await renderSsrApplication({ id: 'local-products', root }, createTestRenderRequest(host, {
-        url: `http://${host}/products`, protocol: 'http',
+      const rendered = await renderSsrApplication({ id: 'local-products', root }, createTestRenderRequest(new URL(origin).host, {
+        url: `${origin}/products`, protocol: 'http',
       }))
       expect(rendered.html).toContain('Pocket notebook')
       expect(rendered.html).toContain('Plant pot')
-      expect(requests).toBe(1)
-    } finally {
-      server.closeAllConnections()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+      expect(count()).toBe(1)
+    })
   })
 })
