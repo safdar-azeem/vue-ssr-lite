@@ -1,4 +1,4 @@
-import type { SsrEndpointDefinition } from 'vue-ssr-lite/server'
+import { defineServerRoutes } from 'vue-ssr-lite'
 
 // Public, deterministic fixture data. No third-party service or credentials are needed.
 const products = [
@@ -10,22 +10,17 @@ const products = [
   { id: 6, title: 'Plant pot', description: 'A small stoneware pot for a desk or windowsill.', price: 12 },
 ] satisfies Array<{ id: number; title: string; description: string; price: number }>
 
-export const productsEndpoint: SsrEndpointDefinition = {
-  id: 'example-products',
-  ownedPaths: ['/api/products'],
-  match: (request) => request.pathname === '/api/products',
-  handle(request) {
-    const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      return { statusCode: 405, headers: { ...headers, allow: 'GET, HEAD' }, body: JSON.stringify({ error: 'Method not allowed.' }) }
-    }
-    const failure = new URLSearchParams(request.search).get('fail') === 'true'
-    return {
-      statusCode: failure ? 503 : 200,
-      headers,
-      body: request.method === 'HEAD' ? undefined : JSON.stringify(
-        failure ? { error: 'This is the example’s simulated failure.' } : { products }
-      ),
-    }
+export const productsRoutes = defineServerRoutes({
+  prefix: '/api/products',
+  routes: {
+    '/': {
+      GET(request) {
+        const failure = new URL(request.url).searchParams.get('fail') === 'true'
+        return Response.json(failure ? { error: 'This is the example’s simulated failure.' } : { products }, {
+          status: failure ? 503 : 200,
+          headers: { 'cache-control': 'no-store' },
+        })
+      },
+    },
   },
-}
+})
