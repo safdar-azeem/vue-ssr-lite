@@ -1,3 +1,7 @@
+import { createWebRequest, isFetchForbiddenMethod, SsrLegacyInformationalResponse, ssrHttpResponseToWebResponse } from './SsrWebHttpRuntime'
+import { normalizeServerResponse } from '../server-routes/SsrServerResponseRuntime'
+import { executeServerMiddleware } from '../server-routes/SsrServerMiddlewareRuntime'
+import { dispatchServerRoute, matchServerRoute, SsrServerRouteBadRequest } from '../server-routes/SsrServerRouteRuntime'
 import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
@@ -144,6 +148,8 @@ export interface SsrNormalizedRequest {
   readonly url: string
   readonly headers: SsrHeaders
   readonly protocol: 'http' | 'https'
+  /** Lazy transport-owned source, absent for GET/HEAD and opened once after host selection. */
+  readonly openBody?: () => ReadableStream<Uint8Array>
 }
 
 export interface SsrRequestHandlerRuntime {
@@ -181,18 +187,20 @@ export interface SsrRequestHandlerRuntime {
     applicationId: string,
     modules: readonly string[]
   ) => Promise<readonly SsrRenderedApplicationAsset[]>
-  /** Static streaming remains an outer-transport operation. */
+  /** Assets resolve to native Responses so global middleware can unwind around them. */
   readonly isPrivateProductionAssetPath: (pathname: string) => boolean
-  readonly serveProductionAsset: (
+  readonly resolveProductionAssetResponse: (
     pathname: string,
     protectedTemplates: readonly string[],
+    requestHeaders: SsrHeaders,
+    requestMethod: string,
     signal: AbortSignal
-  ) => Promise<boolean>
+  ) => Promise<Response | null>
   /** Vite owns its Node middleware response in development. */
   readonly serveViteRequest?: () => Promise<boolean>
 }
 
-export type SsrRequestHandlerResult = SsrHttpResponse | undefined
+export type SsrRequestHandlerResult = Response | SsrHttpResponse | undefined
 
 const htmlSecurityHeaders = {
   'referrer-policy': 'strict-origin-when-cross-origin',
@@ -270,8 +278,8 @@ const injectSpaDomainState = (
 
 /**
  * Process one normalized request without access to Node request/response
- * objects. The two optional transport callbacks are deliberately limited to
- * byte streaming and Vite middleware, whose lifecycle remains Node-owned.
+ * objects. Assets become native Responses; Vite alone can directly own the
+ * transport response. Application middleware wraps the Section 25 continuation.
  */
 export const handleSsrRequest = async (
   request: SsrNormalizedRequest,
@@ -289,6 +297,7 @@ export const handleSsrRequest = async (
     : undefined
   let timingDetails: Record<string, unknown> | undefined
   let applicationRequest = false
+  let applicationFailure: { error: unknown } | undefined
 
   try {
     // Vite's custom middleware stack owns development modules and public files.
@@ -392,339 +401,383 @@ export const handleSsrRequest = async (
       request.protocol,
       serverOptions.trustProxy
     )
-    const domain = snapshotRequestDomain(
-      resolveSsrDomainContext(incomingHost, entry, definition.development, protocol)
-    )
-    const cookie = metadata.applications.get(entry)!.filterCookie(headerValue(request.headers, 'cookie'))
-    const url = new URL(
-      `${requestUrl.pathname}${requestUrl.search}`,
-      `${protocol}://${incomingHost}`
-    ).href
-    const publicConfigRequest: SsrPublicConfigRequest = Object.freeze({
-      requestId: request.requestId,
-      url,
-      host: incomingHost,
-      protocol,
-      method: request.method,
-      headers: request.headers,
-      cookie,
-      domain,
-      signal,
-      pathname,
-      search: requestUrl.search,
-      entryId: entry.id,
-    })
+    const url = new URL(`${protocol}://${incomingHost}${requestUrl.pathname}${requestUrl.search}`).href
     timings?.mark('host')
-    const publicConfig = await scope.run(() =>
-      resolvePublicConfigValue(entry.publicConfigFactory ?? entry.publicConfig, publicConfigRequest)
-    )
-    timings?.mark('publicConfig')
-    const renderRequest: SsrHttpRequest<any> = {
-      requestId: request.requestId,
-      url,
-      host: incomingHost,
-      protocol,
-      method: request.method,
-      headers: request.headers,
-      cookie,
-      publicConfig,
-      signal,
-      domain,
-      pathname,
-      search: requestUrl.search,
-      entryId: entry.id,
-    }
-    activeRenderRequest = renderRequest
-    if (timings) attachSsrPhaseTimings(renderRequest, timings)
-    renderRequest.siteOrigin = await scope.run(() =>
-      resolveServerSiteOrigin({
-        siteUrl: entry.application?.seo?.siteUrl,
-        publicUrl: readPublicUrl(),
-        resolveSiteUrl: definition.resolveSiteUrl,
-        request: renderRequest,
-        production: runtime.production,
-        requireProductionOrigin: requiresProductionSeoOrigin(
-          entry.kind === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
-          entry.application?.seo
-        ),
-        allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
-      })
-    )
-    const needsSiteSeo =
-      isHtmlNavigation(request, pathname) ||
-      pathname === '/robots.txt' ||
-      pathname === '/sitemap.xml' ||
-      /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
-    if (needsSiteSeo) {
-      const resolution = await scope.run(() =>
-        resolveSiteSeoForRequest(renderRequest, entry.id, renderRequest.siteOrigin!, entry.siteSeo)
+    const context = Object.defineProperty({}, 'requestId', {
+      value: request.requestId, enumerable: true, writable: false, configurable: false,
+    }) as { readonly requestId: string }
+
+    // Preserve the existing application lifecycle, including cache/admission
+    // ownership, inside the unmatched-route continuation (plan Section 25).
+    const applicationFallback = async (): Promise<SsrHttpResponse | Response> => {
+      const domain = snapshotRequestDomain(
+        resolveSsrDomainContext(incomingHost, entry, definition.development, protocol)
       )
-      if (resolution?.status === 'not-found') {
-        timings?.mark('seo')
-        return {
-          statusCode: resolution.responseStatus ?? 404,
-          headers: { 'cache-control': 'private, no-store' },
+      const cookie = metadata.applications.get(entry)!.filterCookie(headerValue(request.headers, 'cookie'))
+      const publicConfigRequest: SsrPublicConfigRequest = Object.freeze({
+        requestId: request.requestId,
+        url,
+        host: incomingHost,
+        protocol,
+        method: request.method,
+        headers: request.headers,
+        cookie,
+        domain,
+        signal,
+        pathname,
+        search: requestUrl.search,
+        entryId: entry.id,
+      })
+      const publicConfig = await scope.run(() =>
+        resolvePublicConfigValue(entry.publicConfigFactory ?? entry.publicConfig, publicConfigRequest)
+      )
+      timings?.mark('publicConfig')
+      const renderRequest: SsrHttpRequest<any> = {
+        requestId: request.requestId,
+        url,
+        host: incomingHost,
+        protocol,
+        method: request.method,
+        headers: request.headers,
+        cookie,
+        publicConfig,
+        signal,
+        domain,
+        pathname,
+        search: requestUrl.search,
+        entryId: entry.id,
+      }
+      activeRenderRequest = renderRequest
+      if (timings) attachSsrPhaseTimings(renderRequest, timings)
+      renderRequest.siteOrigin = await scope.run(() =>
+        resolveServerSiteOrigin({
+          siteUrl: entry.application?.seo?.siteUrl,
+          publicUrl: readPublicUrl(),
+          resolveSiteUrl: definition.resolveSiteUrl,
+          request: renderRequest,
+          production: runtime.production,
+          requireProductionOrigin: requiresProductionSeoOrigin(
+            entry.kind === 'spa' && !entry.hasRouteRenderOverrides ? 'spa' : 'ssr',
+            entry.application?.seo
+          ),
+          allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
+        })
+      )
+      const needsSiteSeo =
+        isHtmlNavigation(request, pathname) ||
+        pathname === '/robots.txt' ||
+        pathname === '/sitemap.xml' ||
+        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
+      if (needsSiteSeo) {
+        const resolution = await scope.run(() =>
+          resolveSiteSeoForRequest(renderRequest, entry.id, renderRequest.siteOrigin!, entry.siteSeo)
+        )
+        if (resolution?.status === 'not-found') {
+          timings?.mark('seo')
+          return {
+            statusCode: resolution.responseStatus ?? 404,
+            headers: { 'cache-control': 'private, no-store' },
+          }
         }
       }
-    }
 
-    timings?.mark('seo')
-    const endpointTools: SsrEndpointTools = {
-      signal,
-      logger: createSafeSsrLogger(serverOptions.logger),
-    }
-    for (const endpoint of entry.endpoints) {
-      if (!endpoint.match(renderRequest)) continue
-      const result = await scope.run(() => endpoint.handle(renderRequest, endpointTools))
-      if (result) {
-        timings?.mark('endpoints')
-        return validateSsrHttpResponse(result)
+      timings?.mark('seo')
+      const endpointTools: SsrEndpointTools = {
+        signal,
+        logger: createSafeSsrLogger(serverOptions.logger),
       }
-    }
-    timings?.mark('endpoints')
+      for (const endpoint of entry.endpoints) {
+        if (!endpoint.match(renderRequest)) continue
+        const result = await scope.run(() => endpoint.handle(renderRequest, endpointTools))
+        if (result) {
+          timings?.mark('endpoints')
+          return validateSsrHttpResponse(result)
+        }
+      }
+      timings?.mark('endpoints')
 
-    if (runtime.production && (request.method === 'GET' || request.method === 'HEAD')) {
-      if (
-        await scope.run(() =>
-          runtime.serveProductionAsset(
+      if (runtime.production && (request.method === 'GET' || request.method === 'HEAD')) {
+        const assetResponse = await scope.run(() =>
+          runtime.resolveProductionAssetResponse(
             rawAssetPathname,
             metadata.protectedTemplates,
+            request.headers,
+            request.method,
             signal
           )
         )
-      ) {
-        return undefined
+        if (assetResponse) return assetResponse
       }
-    }
 
-    if (!isHtmlNavigation(request, pathname)) {
-      return jsonResponse(404, {
-        status: 'error',
-        service: definition.name,
-        message: 'Resource not found.',
-      })
-    }
-
-    timings?.mark('static assets')
-    const requestRender = entry.resolveRouteRender
-      ? await scope.run(() => entry.resolveRouteRender!(`${pathname}${requestUrl.search}`))
-      : entry.kind
-    timings?.mark('route classification')
-
-    const privateSeoHtml = requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
-    const responseCache = requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
-    let responseCacheKey: string | null = null
-    try {
-      responseCacheKey = await scope.run(() =>
-        resolveSsrResponseCacheKey(entry.id, renderRequest, responseCache)
-      )
-    } catch (error) {
-      scope.throwIfAborted()
-      safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.key.failed', {
-        entryId: entry.id,
-        requestId: renderRequest.requestId,
-        error: error instanceof Error ? error.message : 'Unknown cache error',
-      })
-    }
-    if (responseCache && responseCacheKey) {
-      let cachedResponse: SsrHttpResponse | null = null
-      try {
-        cachedResponse = await scope.run(() =>
-          responseCache.store.get(responseCacheKey!, { signal })
-        )
-      } catch (error) {
-        scope.throwIfAborted()
-        safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.read.failed', {
-          entryId: entry.id,
-          requestId: renderRequest.requestId,
-          error: error instanceof Error ? error.message : 'Unknown cache error',
-        })
-      }
-      if (cachedResponse) {
-        return validateSsrHttpResponse({
-          ...cachedResponse,
-          headers: { ...cachedResponse.headers, 'server-timing': 'cache;desc="hit"' },
-        })
-      }
-    }
-
-    timings?.mark('response cache')
-    if (requestRender === 'spa') {
-      const template = await scope.run(() =>
-        runtime.loadTemplate(definition, entry, request.url || '/', signal, timings)
-      )
-      timings?.mark('template')
-      const body = injectSpaDomainState(template, entry.id, domain, publicConfig)
-      timings?.mark('serialization / HTML injection')
-      return {
-        statusCode: 200,
-        body,
-        headers: {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': entry.cacheControl || 'private, no-store',
-          vary: 'Host, X-Forwarded-Host',
-          ...htmlSecurityHeaders,
-        },
-      }
-    }
-
-    const application = entry.application!
-    if (timings) timingDetails = runtime.takeRenderTimingDetails?.()
-    const template = await scope.run(() =>
-      runtime.loadPreparedSsrTemplate(definition, entry, request.url || '/', signal, timings)
-    )
-    timings?.mark('template')
-    const admission = await runtime.ssrAdmission
-      .acquire({
-        signal,
-        requestId: renderRequest.requestId,
-        entryId: entry.id,
-      })
-      .then(
-        (lease) => ({ status: 'admitted' as const, lease }),
-        (error: unknown) => ({ status: 'rejected' as const, error })
-      )
-    if (admission.status === 'rejected') {
-      if (admission.error instanceof SsrAdmissionUnavailableError) {
-        return jsonResponse(503, {
+      if (!isHtmlNavigation(request, pathname)) {
+        return jsonResponse(404, {
           status: 'error',
           service: definition.name,
-          message: 'Service temporarily unavailable.',
+          message: 'Resource not found.',
         })
       }
-      throw admission.error
-    }
-    const admissionLease = admission.lease
-    timings?.mark('admission')
 
-    // The request may stop awaiting promptly when its canonical signal aborts,
-    // but admission ownership follows the actual Vue SSR promise. Converting
-    // both render outcomes into a fulfilled completion record prevents a late
-    // render rejection from becoming unhandled after the request has exited.
-    const ownedRenderWork = (async () => {
+      timings?.mark('static assets')
+      const requestRender = entry.resolveRouteRender
+        ? await scope.run(() => entry.resolveRouteRender!(`${pathname}${requestUrl.search}`))
+        : entry.kind
+      timings?.mark('route classification')
+
+      const privateSeoHtml = requestRender === 'ssr' && isPrivateSeoMode(entry.application?.seo)
+      const responseCache = requestRender === 'ssr' && !privateSeoHtml ? entry.responseCache : undefined
+      let responseCacheKey: string | null = null
       try {
-        // Admission waiting consumes the existing request deadline. Calculate
-        // the resolution allowance only after capacity is acquired; no fresh
-        // timeout budget is created here.
-        const remainingRequestMs = scope.remainingMs()
-        const configuredResolutionMs = serverOptions.resolutionDeadlineMs
-        const resolutionDeadlineMs =
-          remainingRequestMs > 0
-            ? Math.min(configuredResolutionMs, remainingRequestMs)
-            : configuredResolutionMs
-        const renderApplication =
-          definition.renderApplication ?? renderSsrApplication
-        const value = await renderApplication(application, renderRequest, {
-          maxResolutionPasses: serverOptions.maxResolutionPasses,
-          resolutionDeadlineMs,
-          diagnostics: serverOptions.diagnostics,
-          logger: serverOptions.logger,
-        })
-        return { status: 'fulfilled' as const, value }
-      } catch (error) {
-        return { status: 'rejected' as const, error }
-      } finally {
-        // One lease spans application creation, routing, plugins, every bounded
-        // resolution pass, final hydration/head collection, and the actual
-        // settlement of cancelled or failed render work.
-        admissionLease.release()
-      }
-    })()
-    const renderCompletion = await scope.run(() => ownedRenderWork)
-    if (renderCompletion.status === 'rejected') throw renderCompletion.error
-    const rendered = renderCompletion.value
-    timings?.mark('renderer')
-    if (rendered.response.redirect) {
-      const redirect = rendered.response.redirect
-      const target = new URL(redirect.location, renderRequest.url)
-      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-        throw new Error('SSR redirects must use HTTP or HTTPS.')
-      }
-      if (target.username || target.password || /[\u0000-\u001f\u007f]/.test(redirect.location)) {
-        throw new Error('SSR redirects must not contain credentials or control characters.')
-      }
-      if (!redirect.allowExternal && target.origin !== new URL(renderRequest.url).origin) {
-        throw new Error('Cross-origin redirect requires allowExternal: true.')
-      }
-      return {
-        statusCode: redirect.statusCode ?? 302,
-        headers: {
-          ...rendered.response.headers,
-          location: target.href,
-          'cache-control': 'no-store',
-        },
-      }
-    }
-    const renderedAssets = runtime.production
-      ? runtime.resolveProductionAssets?.(application.id, rendered.renderedModules) ??
-        resolveRenderedApplicationAssets({
-          applicationId: application.id,
-          moduleIds: rendered.renderedModules,
-          base: runtime.viteBase,
-          manifest: runtime.ssrManifest!,
-        })
-      : await scope.run(() =>
-          runtime.resolveDevelopmentAssets(application.id, rendered.renderedModules)
-        )
-    timings?.mark('asset resolution')
-    const injection = {
-      applicationId: application.id,
-      html: rendered.html,
-      teleports: rendered.teleports,
-      head: rendered.head,
-      state: rendered.hydrationState,
-      assets: renderedAssets,
-    }
-    if (timings) attachSsrPhaseTimings(injection, timings)
-    const document = injectSsrHtml(template, injection)
-    timings?.mark('HTML injection')
-    safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
-    safeSsrLog(serverOptions.logger, 'info', 'ssr.render.complete', rendered.metrics as any)
-    const responseHeaders: Record<string, string | string[]> = {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': entry.cacheControl || 'private, no-store',
-      vary: 'Host, X-Forwarded-Host',
-      'server-timing': [
-        `context;dur=${rendered.metrics.contextDurationMs.toFixed(1)}`,
-        `route;dur=${rendered.metrics.routeDurationMs.toFixed(1)}`,
-        `render;dur=${rendered.metrics.renderDurationMs.toFixed(1)}`,
-      ].join(', '),
-      ...rendered.response.headers,
-      ...htmlSecurityHeaders,
-    }
-    if (privateSeoHtml) {
-      for (const name of Object.keys(responseHeaders)) {
-        if (name.toLowerCase() === 'cache-control') delete responseHeaders[name]
-      }
-      responseHeaders['cache-control'] = 'private, no-store'
-    }
-    const result: SsrHttpResponse = {
-      statusCode: rendered.response.statusCode,
-      body: document,
-      headers: responseHeaders,
-    }
-    if (responseCache && responseCacheKey && isSsrResponseCacheable(result, renderRequest, responseCache)) {
-      try {
-        const consumerTags = await scope.run(() => responseCache.tags?.(renderRequest) ?? [])
-        const tags = [...consumerTags, ...(renderRequest.siteSeoMeta?.cacheTags ?? [])]
-        await scope.run(() =>
-          responseCache.store.set(responseCacheKey!, result, {
-            ttlMs: responseCache.ttlMs,
-            tags,
-            signal,
-          })
+        responseCacheKey = await scope.run(() =>
+          resolveSsrResponseCacheKey(entry.id, renderRequest, responseCache)
         )
       } catch (error) {
         scope.throwIfAborted()
-        safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.write.failed', {
+        safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.key.failed', {
           entryId: entry.id,
           requestId: renderRequest.requestId,
           error: error instanceof Error ? error.message : 'Unknown cache error',
         })
       }
+      if (responseCache && responseCacheKey) {
+        let cachedResponse: SsrHttpResponse | null = null
+        try {
+          cachedResponse = await scope.run(() =>
+            responseCache.store.get(responseCacheKey!, { signal })
+          )
+        } catch (error) {
+          scope.throwIfAborted()
+          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.read.failed', {
+            entryId: entry.id,
+            requestId: renderRequest.requestId,
+            error: error instanceof Error ? error.message : 'Unknown cache error',
+          })
+        }
+        if (cachedResponse) {
+          return validateSsrHttpResponse({
+            ...cachedResponse,
+            headers: { ...cachedResponse.headers, 'server-timing': 'cache;desc="hit"' },
+          })
+        }
+      }
+
+      timings?.mark('response cache')
+      if (requestRender === 'spa') {
+        const template = await scope.run(() =>
+          runtime.loadTemplate(definition, entry, request.url || '/', signal, timings)
+        )
+        timings?.mark('template')
+        const body = injectSpaDomainState(template, entry.id, domain, publicConfig)
+        timings?.mark('serialization / HTML injection')
+        return {
+          statusCode: 200,
+          body,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': entry.cacheControl || 'private, no-store',
+            vary: 'Host, X-Forwarded-Host',
+            ...htmlSecurityHeaders,
+          },
+        }
+      }
+
+      const application = entry.application!
+      if (timings) timingDetails = runtime.takeRenderTimingDetails?.()
+      const template = await scope.run(() =>
+        runtime.loadPreparedSsrTemplate(definition, entry, request.url || '/', signal, timings)
+      )
+      timings?.mark('template')
+      const admission = await runtime.ssrAdmission
+        .acquire({
+          signal,
+          requestId: renderRequest.requestId,
+          entryId: entry.id,
+        })
+        .then(
+          (lease) => ({ status: 'admitted' as const, lease }),
+          (error: unknown) => ({ status: 'rejected' as const, error })
+        )
+      if (admission.status === 'rejected') {
+        if (admission.error instanceof SsrAdmissionUnavailableError) {
+          return jsonResponse(503, {
+            status: 'error',
+            service: definition.name,
+            message: 'Service temporarily unavailable.',
+          })
+        }
+        throw admission.error
+      }
+      const admissionLease = admission.lease
+      timings?.mark('admission')
+
+      // The request may stop awaiting promptly when its canonical signal aborts,
+      // but admission ownership follows the actual Vue SSR promise. Converting
+      // both render outcomes into a fulfilled completion record prevents a late
+      // render rejection from becoming unhandled after the request has exited.
+      const ownedRenderWork = (async () => {
+        try {
+          // Admission waiting consumes the existing request deadline. Calculate
+          // the resolution allowance only after capacity is acquired; no fresh
+          // timeout budget is created here.
+          const remainingRequestMs = scope.remainingMs()
+          const configuredResolutionMs = serverOptions.resolutionDeadlineMs
+          const resolutionDeadlineMs =
+            remainingRequestMs > 0
+              ? Math.min(configuredResolutionMs, remainingRequestMs)
+              : configuredResolutionMs
+          const renderApplication =
+            definition.renderApplication ?? renderSsrApplication
+          const value = await renderApplication(application, renderRequest, {
+            maxResolutionPasses: serverOptions.maxResolutionPasses,
+            resolutionDeadlineMs,
+            diagnostics: serverOptions.diagnostics,
+            logger: serverOptions.logger,
+          })
+          return { status: 'fulfilled' as const, value }
+        } catch (error) {
+          return { status: 'rejected' as const, error }
+        } finally {
+          // One lease spans application creation, routing, plugins, every bounded
+          // resolution pass, final hydration/head collection, and the actual
+          // settlement of cancelled or failed render work.
+          admissionLease.release()
+        }
+      })()
+      const renderCompletion = await scope.run(() => ownedRenderWork)
+      if (renderCompletion.status === 'rejected') throw renderCompletion.error
+      const rendered = renderCompletion.value
+      timings?.mark('renderer')
+      if (rendered.response.redirect) {
+        const redirect = rendered.response.redirect
+        const target = new URL(redirect.location, renderRequest.url)
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+          throw new Error('SSR redirects must use HTTP or HTTPS.')
+        }
+        if (target.username || target.password || /[\u0000-\u001f\u007f]/.test(redirect.location)) {
+          throw new Error('SSR redirects must not contain credentials or control characters.')
+        }
+        if (!redirect.allowExternal && target.origin !== new URL(renderRequest.url).origin) {
+          throw new Error('Cross-origin redirect requires allowExternal: true.')
+        }
+        return {
+          statusCode: redirect.statusCode ?? 302,
+          headers: {
+            ...rendered.response.headers,
+            location: target.href,
+            'cache-control': 'no-store',
+          },
+        }
+      }
+      const renderedAssets = runtime.production
+        ? runtime.resolveProductionAssets?.(application.id, rendered.renderedModules) ??
+          resolveRenderedApplicationAssets({
+            applicationId: application.id,
+            moduleIds: rendered.renderedModules,
+            base: runtime.viteBase,
+            manifest: runtime.ssrManifest!,
+          })
+        : await scope.run(() =>
+            runtime.resolveDevelopmentAssets(application.id, rendered.renderedModules)
+          )
+      timings?.mark('asset resolution')
+      const injection = {
+        applicationId: application.id,
+        html: rendered.html,
+        teleports: rendered.teleports,
+        head: rendered.head,
+        state: rendered.hydrationState,
+        assets: renderedAssets,
+      }
+      if (timings) attachSsrPhaseTimings(injection, timings)
+      const document = injectSsrHtml(template, injection)
+      timings?.mark('HTML injection')
+      safeSsrMetrics(serverOptions.onMetrics, rendered.metrics)
+      safeSsrLog(serverOptions.logger, 'info', 'ssr.render.complete', rendered.metrics as any)
+      const responseHeaders: Record<string, string | string[]> = {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': entry.cacheControl || 'private, no-store',
+        vary: 'Host, X-Forwarded-Host',
+        'server-timing': [
+          `context;dur=${rendered.metrics.contextDurationMs.toFixed(1)}`,
+          `route;dur=${rendered.metrics.routeDurationMs.toFixed(1)}`,
+          `render;dur=${rendered.metrics.renderDurationMs.toFixed(1)}`,
+        ].join(', '),
+        ...rendered.response.headers,
+        ...htmlSecurityHeaders,
+      }
+      if (privateSeoHtml) {
+        for (const name of Object.keys(responseHeaders)) {
+          if (name.toLowerCase() === 'cache-control') delete responseHeaders[name]
+        }
+        responseHeaders['cache-control'] = 'private, no-store'
+      }
+      const result: SsrHttpResponse = {
+        statusCode: rendered.response.statusCode,
+        body: document,
+        headers: responseHeaders,
+      }
+      if (responseCache && responseCacheKey && isSsrResponseCacheable(result, renderRequest, responseCache)) {
+        try {
+          const consumerTags = await scope.run(() => responseCache.tags?.(renderRequest) ?? [])
+          const tags = [...consumerTags, ...(renderRequest.siteSeoMeta?.cacheTags ?? [])]
+          await scope.run(() =>
+            responseCache.store.set(responseCacheKey!, result, {
+              ttlMs: responseCache.ttlMs,
+              tags,
+              signal,
+            })
+          )
+        } catch (error) {
+          scope.throwIfAborted()
+          safeSsrLog(serverOptions.logger, 'warn', 'ssr.cache.write.failed', {
+            entryId: entry.id,
+            requestId: renderRequest.requestId,
+            error: error instanceof Error ? error.message : 'Unknown cache error',
+          })
+        }
+      }
+      return result
     }
-    return result
+
+    const fallback = async (): Promise<SsrHttpResponse | Response> => {
+      try {
+        const result = await applicationFallback()
+        return result instanceof Response ? normalizeServerResponse(result) : validateSsrHttpResponse(result)
+      } catch (error) {
+        applicationFailure = { error }
+        throw error
+      }
+    }
+    // Fetch cannot represent these methods. Preserve path ownership without
+    // inventing a Request method; unmatched traffic retains the legacy fallback.
+    // Neither branch enters native middleware or opens the request body bridge.
+    if (isFetchForbiddenMethod(request.method)) {
+      let match
+      try { match = matchServerRoute(entry.serverRoutes, pathname) } catch (error) {
+        if (error instanceof SsrServerRouteBadRequest) return { statusCode: 400 }
+        throw error
+      }
+      if (match) return { statusCode: 405, headers: { Allow: match.route.allow } }
+      return await scope.run(fallback)
+    }
+
+    const webRequest = createWebRequest(request, url, signal)
+    const terminal = async (): Promise<SsrHttpResponse | Response> => {
+      let match
+      try { match = matchServerRoute(entry.serverRoutes, pathname) } catch (error) {
+        if (error instanceof SsrServerRouteBadRequest) return new Response(null, { status: 400 })
+        throw error
+      }
+      return match ? dispatchServerRoute(match, webRequest, context) : fallback()
+    }
+    const middleware = definition.serverMiddleware ?? []
+    // Preserve the legacy transport contract exactly when there is no Web onion.
+    if (!middleware.length) return await scope.run(terminal)
+    return await scope.run(() => executeServerMiddleware(middleware, webRequest, context, async () => {
+      const result = await terminal()
+      return result instanceof Response ? result : ssrHttpResponseToWebResponse(result)
+    }))
   } catch (error) {
+    if (error instanceof SsrLegacyInformationalResponse) return error.response
     if (error instanceof SsrRequestCancelledError) throw error
     const definition = activeDefinition
     safeSsrLog(definition.server.logger, 'error', 'ssr.request.failed', {
@@ -736,11 +789,14 @@ export const handleSsrRequest = async (
     let timeout =
       error instanceof SsrRequestTimeoutError ||
       signal.reason instanceof SsrRequestTimeoutError
-    const seoProviderFailure =
-      error instanceof SeoProviderFailure ||
-      pathname === '/robots.txt' ||
-      pathname === '/sitemap.xml' ||
-      /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
+    const seoProviderFailure = Boolean(
+      applicationFailure && applicationFailure.error === error && (
+        error instanceof SeoProviderFailure ||
+        pathname === '/robots.txt' ||
+        pathname === '/sitemap.xml' ||
+        /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
+      )
+    )
     let statusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
     if (definition.server.renderError) {
       try {
