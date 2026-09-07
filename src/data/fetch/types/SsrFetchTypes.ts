@@ -8,6 +8,11 @@ export type UseFetchVariableShape<TVariables extends object> = {
   [K in keyof TVariables]: TVariables[K] extends UseFetchVariableValue ? TVariables[K] : never
 }
 
+/** Application request defaults consumed only by first-party useFetch. */
+export interface SetContextOptions {
+  headers?: HeadersInit
+}
+
 export interface UseFetchError {
   readonly name: 'UseFetchError'
   readonly kind: 'http' | 'network' | 'parse' | 'timeout'
@@ -49,6 +54,8 @@ export interface UseFetchOptionsBase<TData, TVariables extends object> {
   key?: string
   method?: 'GET' | 'HEAD'
   headers?: HeadersInit
+  /** Skip stored defaults only; automatic SSR credential forwarding is separate. */
+  context?: boolean
   credentials?: RequestCredentials
   mode?: RequestMode
   redirect?: RequestRedirect
