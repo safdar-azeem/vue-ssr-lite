@@ -32,6 +32,12 @@ pnpm add vue-ssr-lite vue-router
 
 See [`examples/`](./examples) for small, practical examples showing recommended `vue-ssr-lite` patterns and architecture.
 
+- [`1-single-app`](./examples/1-single-app/) — minimal single-application SSR
+- [`2-hybrid-route-app`](./examples/2-hybrid-route-app/) — route-level SSR and SPA rendering
+- [`3-multi-domain-apps`](./examples/3-multi-domain-apps/) — multiple applications and host routing
+- [`4-server-api-app`](./examples/4-server-api-app/) — complete Server Routes, Server Middleware, and `useFetch()` example
+- [`middleware-example`](./examples/middleware-example/) — Vue navigation middleware
+
 # Minimal Setup
 
 ## 1. Add the Vite plugin
@@ -930,7 +936,7 @@ not acquire an implicit Content-Type.
 `defineMiddleware()` remains **Vue navigation middleware**. HTTP middleware uses
 `defineServerMiddleware()`. `serverRoutes` and `serverMiddleware` are server-only
 and can import databases and Node modules; they never enter browser projection.
-See the [approved server API example](doc/server-api-plan/server-api-example/) for
+See the [complete server API example](./examples/4-server-api-app/) for
 group, path, and method middleware together.
 
 # HTTP Status Codes
