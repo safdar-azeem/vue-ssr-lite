@@ -138,7 +138,7 @@ import * as server from 'vue-ssr-lite/server'
 import * as vite from 'vue-ssr-lite/vite'
 
 const expected = [
-  [root, ['defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useFetch', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
+  [root, ['defineServerRoutes', 'defineServerMiddleware', 'defineServer', 'defineApplication', 'defineMiddleware', 'RouterView', 'LoadingIndicator', 'useFetch', 'useSeo', 'usePublicConfig', 'useOrigin', 'useDomain', 'setHttpStatus', 'redirectTo', 'defineExtension']],
   [client, ['hydrateSsrApplication', 'mountSpaApplication']],
   [server, ['defineSitemap', 'createSsrManagedServer', 'createSsrMemoryResponseCache']],
   [vite, ['vueSsrLite']],
@@ -147,6 +147,9 @@ for (const [entry, names] of expected) {
   for (const name of names) {
     if (!(name in entry)) throw new Error('missing packaged export: ' + name)
   }
+}
+for (const name of ['defineServerRoutes', 'defineServerMiddleware']) {
+  if (name in server) throw new Error('HTTP configuration helpers belong only to the root package: ' + name)
 }
 export { root, client, server, vite }
 `,
@@ -158,6 +161,8 @@ export { root, client, server, vite }
   defineServer,
   defineApplication,
   defineMiddleware,
+  defineServerRoutes,
+  defineServerMiddleware,
   RouterView,
   LoadingIndicator,
   useFetch,
@@ -170,6 +175,10 @@ export { root, client, server, vite }
   defineExtension,
   type AppContext,
   type ApplicationConfig,
+  type GlobalServerMiddleware,
+  type ServerMiddleware,
+  type ServerRouteContext,
+  type ServerRoutesDefinition,
   type SiteSeoResolution,
   type UseFetchResult,
   type UseFetchReturn,
@@ -204,6 +213,8 @@ void [
   defineServer,
   defineApplication,
   defineMiddleware,
+  defineServerRoutes,
+  defineServerMiddleware,
   RouterView,
   LoadingIndicator,
   useFetch,
@@ -224,6 +235,10 @@ void [
 type PublicTypes = [
   AppContext,
   ApplicationConfig,
+  GlobalServerMiddleware,
+  ServerMiddleware,
+  ServerRouteContext,
+  ServerRoutesDefinition,
   SiteSeoResolution,
   SsrHydrateOptions,
   SitemapContext,
@@ -243,6 +258,24 @@ type PublicTypes = [
   UseFetchVariableValue,
   VariablesOption<UseFetchVariables>,
 ]
+const serverLogger = defineServerMiddleware(async (_request, _context, next) => next())
+const serverAuth = defineServerMiddleware<{ user: { id: string } }>((_request, context, next) => {
+  context.user = { id: 'packaged-user' }
+  return next()
+})
+const packagedRoutes = defineServerRoutes({
+  prefix: '/api',
+  middleware: [serverAuth],
+  routes: { '/products/:id': { GET(request, context) {
+    const id: string = context.params.id
+    const userId: string = context.user.id
+    return Response.json({ id, userId })
+  } } },
+})
+const packagedCollection: readonly ServerRoutesDefinition[] = [packagedRoutes]
+defineServer({ serverMiddleware: [serverLogger], serverRoutes: packagedCollection })
+// @ts-expect-error Global HTTP middleware cannot provide route business state.
+defineServer({ serverMiddleware: [serverAuth] })
 interface RequiredFetchVariables { category: string; page?: number }
 interface FetchProduct { id: number; title: string }
 async function fetchTypes() {
