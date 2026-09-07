@@ -1,8 +1,13 @@
+import {
+  createSsrRequestBodySource,
+  productionAssetToWebResponse,
+  resolveProductionAssetResponse,
+  writeWebResponse,
+} from './SsrWebHttpRuntime'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { existsSync } from 'node:fs'
 import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { pipeline } from 'node:stream/promises'
 import type { ViteDevServer } from 'vite'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import { safeSsrLog } from '../SsrObservability'
@@ -19,11 +24,8 @@ import {
 import {
   isExpectedUnavailableAssetError,
   isSsrPrivateProductionAssetPath,
-  isSsrProductionAssetNotModified,
   parseSsrClientAssetManifest,
-  resolveSsrProductionAsset,
   resolveSsrImmutableAssetPaths,
-  updateSsrProductionAssetMetadata,
   type SsrResolvedProductionAsset,
 } from './SsrAssetRuntime'
 import {
@@ -156,24 +158,7 @@ const sendResponse = (
   endResponse(request, response, result.body ?? '')
 }
 
-const productionAssetHeaders = (asset: SsrResolvedProductionAsset) => ({
-  'content-type': asset.contentType,
-  'content-length': String(asset.size),
-  'cache-control': asset.cacheControl,
-  etag: asset.etag,
-  'last-modified': asset.lastModified,
-})
-
-const isUnavailableAssetError = (error: unknown): boolean => {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code
-  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR'
-}
-
-/**
- * Execute static-file HTTP semantics directly against ServerResponse. This is
- * intentionally separate from SsrHttpResponse so streams never acquire cache
- * or custom-endpoint ownership semantics.
- */
+/** Internal compatibility adapter; managed requests use native asset Responses. */
 export const writeSsrProductionAsset = async (
   request: IncomingMessage,
   response: ServerResponse,
@@ -181,61 +166,9 @@ export const writeSsrProductionAsset = async (
   signal: AbortSignal,
   openFile: typeof open = open
 ): Promise<boolean> => {
-  let asset = resolvedAsset
-  if (isSsrProductionAssetNotModified(asset, request.headers)) {
-    response.writeHead(304, productionAssetHeaders(asset))
-    response.end()
-    return true
-  }
-  if (request.method === 'HEAD') {
-    response.writeHead(200, productionAssetHeaders(asset))
-    response.end()
-    return true
-  }
-
-  signal.throwIfAborted()
-  let file
-  try {
-    // Open before committing headers so a deletion between resolution and body
-    // delivery can still fall through to the controlled not-found path.
-    file = await openFile(asset.filePath, 'r')
-    const information = await file.stat()
-    if (!information.isFile()) {
-      await file.close()
-      return false
-    }
-    asset = updateSsrProductionAssetMetadata(asset, information)
-  } catch (error) {
-    await file?.close().catch(() => undefined)
-    if (isUnavailableAssetError(error)) return false
-    throw error
-  }
-
-  if (signal.aborted) {
-    await file.close()
-    signal.throwIfAborted()
-  }
-  // Metadata may have changed between resolver stat and open. Re-evaluate the
-  // validator against the opened representation before sending any headers.
-  if (isSsrProductionAssetNotModified(asset, request.headers)) {
-    await file.close()
-    response.writeHead(304, productionAssetHeaders(asset))
-    response.end()
-    return true
-  }
-
-  let source: ReturnType<typeof file.createReadStream> | undefined
-  try {
-    response.writeHead(200, productionAssetHeaders(asset))
-    source = file.createReadStream()
-    // pipeline owns source/destination error propagation, backpressure, and
-    // AbortSignal teardown. FileHandle.createReadStream closes its descriptor.
-    await pipeline(source, response, { signal })
-  } catch (error) {
-    if (source) source.destroy()
-    else await file.close().catch(() => undefined)
-    throw error
-  }
+  const result = await productionAssetToWebResponse(resolvedAsset, request.headers, request.method ?? 'GET', signal, openFile)
+  if (!result) return false
+  await writeWebResponse(request, response, result, signal)
   return true
 }
 
@@ -676,6 +609,7 @@ export const createSsrManagedServer = async (
       String(request.headers['x-request-id'] || '').trim() ||
       startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
     const scope = createSsrRequestScope(lastDefinition.server.requestTimeoutMs)
+    const bodySource = createSsrRequestBodySource(request, scope.signal)
     const cancelDisconnectedRequest = () => scope.cancel()
     const cancelClosedResponse = () => {
       if (!response.writableEnded) scope.cancel()
@@ -695,6 +629,7 @@ export const createSsrManagedServer = async (
         requestId,
         startedAt,
         method: request.method || 'GET',
+        openBody: bodySource.openBody,
         url: request.url || '/',
         headers: snapshotRequestHeaders(request),
         protocol: (request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
@@ -722,19 +657,15 @@ export const createSsrManagedServer = async (
             : Promise.resolve([]),
         isPrivateProductionAssetPath: (pathname) =>
           isSsrPrivateProductionAssetPath(pathname, viteBase),
-        serveProductionAsset: async (pathname, protectedTemplates, signal) => {
-          const asset = await resolveSsrProductionAsset({
+        resolveProductionAssetResponse: (pathname, protectedTemplates, headers, method, signal) =>
+          resolveProductionAssetResponse({
             clientRoot,
             pathname,
             protectedTemplates,
             viteBase,
             immutableAssetPaths,
             signal,
-          })
-          return asset
-            ? writeSsrProductionAsset(request, response, asset, signal)
-            : false
-        },
+          }, headers, method, signal),
         serveViteRequest: options.vite
           ? async () => {
               const originalUrl = request.url
@@ -749,7 +680,10 @@ export const createSsrManagedServer = async (
             }
           : undefined,
       })
-      if (result && !response.writableEnded) sendResponse(request, response, result)
+      if (result && !response.writableEnded) {
+        if (result instanceof Response) await writeWebResponse(request, response, result, scope.signal)
+        else sendResponse(request, response, result)
+      }
     } catch (error) {
       if (error instanceof SsrRequestCancelledError) {
         if (!response.destroyed) response.destroy()
@@ -761,6 +695,13 @@ export const createSsrManagedServer = async (
       })
       if (!response.destroyed) response.destroy()
     } finally {
+      // Detach the pull bridge before resuming Node, otherwise an unread Web
+      // body could pause the socket again. This invariant covers every exit.
+      bodySource.release()
+      if (!request.readableEnded) {
+        if (!response.destroyed && !request.destroyed && !scope.signal.aborted) request.resume()
+        else request.destroy()
+      }
       request.off('aborted', cancelDisconnectedRequest)
       response.off('close', cancelClosedResponse)
       scope.dispose()
