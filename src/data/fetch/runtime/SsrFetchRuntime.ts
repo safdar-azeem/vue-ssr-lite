@@ -1,8 +1,13 @@
 import { shallowRef, type InjectionKey, type ShallowRef } from 'vue'
 import type { SsrHydrationController } from '../../../SsrHydrationRuntime'
 import type { SsrRequestContext } from '../../../SsrRuntimeTypes'
-import type { UseFetchError, UseFetchOptionsBase } from '../types/SsrFetchTypes'
+import type {
+  SetContextOptions,
+  UseFetchError,
+  UseFetchOptionsBase,
+} from '../types/SsrFetchTypes'
 import { SsrFetchCache, type FetchEntry } from './SsrFetchCache'
+import { SsrFetchContext } from './SsrFetchContext'
 import {
   cancelPhysicalExecution,
   createPhysicalExecution,
@@ -21,7 +26,9 @@ import {
 } from './SsrFetchHydration'
 import { resolveFetchIdentity, type FetchIdentity } from './SsrFetchIdentity'
 
-export const SSR_FETCH_RUNTIME: InjectionKey<SsrFetchRuntime> = Symbol('vue-ssr-lite:fetch-runtime')
+export const SSR_FETCH_RUNTIME = Symbol.for(
+  'vue-ssr:fetch-runtime'
+) as InjectionKey<SsrFetchRuntime>
 
 interface LogicalExecution extends FetchExecutionObserver {
   cancel(): void
@@ -49,6 +56,7 @@ export class SsrFetchRuntime {
   readonly cache: SsrFetchCache
   readonly consumers = new Set<HookConsumer>()
   readonly continuation: SsrFetchHydration
+  private readonly requestContext = new SsrFetchContext()
   private disposed = false
   private aborted = false
   private contributing = false
@@ -100,7 +108,24 @@ export class SsrFetchRuntime {
   }
 
   resolve(input: string | URL, variables: unknown, options: UseFetchOptionsBase<unknown, object>): FetchIdentity {
-    return resolveFetchIdentity(input, variables, options, { server: this.server, request: this.context.request })
+    return resolveFetchIdentity(input, variables, options, {
+      server: this.server,
+      request: this.context.request,
+      contextHeaders: this.getContextSnapshot(),
+    })
+  }
+
+  setContext(context: SetContextOptions): void {
+    if (this.disposed) {
+      throw new Error(
+        'setContext() requires an active vue-ssr-lite application.'
+      )
+    }
+    this.requestContext.replace(context)
+  }
+
+  getContextSnapshot(): Headers {
+    return this.requestContext.snapshot()
   }
 
   createConsumer(
@@ -336,5 +361,6 @@ export class SsrFetchRuntime {
     this.continuation.clear()
     this.hydration.forget(FETCH_HYDRATION_KEY)
     this.cache.clear()
+    this.requestContext.clear()
   }
 }
