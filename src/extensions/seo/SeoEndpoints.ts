@@ -39,6 +39,7 @@ export interface SeoEndpointOptions {
   sitemapProvider?: SitemapProvider
   defaultRender?: SsrRenderMode
   resolveSiteUrl: (request: SsrHttpRequest<any>) => string | Promise<string>
+  serverRouteOwnedPaths?: readonly string[]
   existingEndpoints: readonly SsrEndpointDefinition<any>[]
 }
 
@@ -225,7 +226,7 @@ export const createSeoEndpoints = async (
   if (
     !privateMode &&
     !hasPhysicalSitemap &&
-    !ownedEndpoint(options.existingEndpoints, '/sitemap.xml')
+    !(options.serverRouteOwnedPaths?.includes('/sitemap.xml') || ownedEndpoint(options.existingEndpoints, '/sitemap.xml'))
   ) {
     endpoints.push({
       id: sitemapId,
@@ -273,6 +274,7 @@ export const createSeoEndpoints = async (
 
   if (
     (privateMode || !(await physicalFileExists(options.root, 'robots.txt'))) &&
+    !options.serverRouteOwnedPaths?.includes('/robots.txt') &&
     !ownedEndpoint(
       [...options.existingEndpoints, ...endpoints],
       '/robots.txt'
