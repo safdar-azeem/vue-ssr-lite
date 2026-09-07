@@ -1,6 +1,9 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 const sharedResolve = {
+  // Repository examples exercise the current public helpers before a package build.
+  alias: [{ find: /^vue-ssr-lite$/, replacement: fileURLToPath(new URL('./src/index.ts', import.meta.url)) }],
   // The package renders with the Vue framework only. It is API-client
   // neutral, so no GraphQL/Apollo packages are aliased or deduplicated here.
   dedupe: ['@vue/server-renderer', 'vue', 'vue-router'],
