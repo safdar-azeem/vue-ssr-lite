@@ -1,5 +1,7 @@
+export { setContext } from './context/setContext'
 export { useFetch } from './composables/useFetch'
 export type {
+  SetContextOptions,
   UseFetchDoneContext,
   UseFetchError,
   UseFetchErrorContext,
