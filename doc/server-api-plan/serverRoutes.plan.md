@@ -1326,6 +1326,47 @@ If middleware returns a `Response` without calling `next()`, downstream middlewa
 
 This section is the **single authoritative source of truth** for request processing in `vue-ssr-lite`. All components must adhere strictly to this sequence.
 
+Native Web compatibility clarification from `task-006/review/007`:
+
+- After host selection and protocol normalization, TRACE/TRACK/CONNECT reaching
+  the managed request handler bypass native Request construction and all server
+  middleware. Method-blind matching still owns the path: matched server routes
+  return 405 with their compiled `Allow`; unmatched requests retain the existing
+  application/legacy fallback. The Web body bridge stays unopened and transport
+  cleanup still drains the incoming body. Node CONNECT/tunnel events are outside
+  this request-handler pipeline.
+- Native responses crossing a handler/middleware boundary must have final HTTP
+  status 200–599 and an unused, unlocked body. Core rewraps their original stream
+  with mutable headers before upstream middleware resumes, preserving status,
+  status text and cookies without buffering/teeing. Invalid responses enter normal
+  framework error handling.
+- Legacy responses retain the accepted 100–599 status contract and use the original
+  Node transport when no global middleware is configured. A legacy 1xx result has
+  no native Response equivalent: with global middleware, an internal transport
+  transfer rejects `next()` and unwinds to Core, which sends the original legacy
+  result. `finally` blocks run; ordinary response decoration does not. Middleware
+  may catch that transfer and replace it with its own native Response. Unchanged
+  legacy headers retain wire multiplicity through Web adaptation, and string
+  bodies are encoded as bytes so no implicit Content-Type is added.
+
+Fetch passthrough clarification from `task-006/review/008` through `/010`: Core
+captures fetched Response provenance before rewrapping it, retaining it on the
+Response and original body stream. Decoded gzip/x-gzip, deflate and Brotli fetch
+bodies drop stale Content-Encoding/Content-Length and encoded-representation
+validators (unchanged strong ETag and unchanged integrity fields, including
+Content-MD5, Content-Digest, Repr-Digest and Digest); middleware replacement
+validators, weak ETags and other end-to-end metadata remain. A decoded fetched status 206 or response carrying
+Content-Range is rejected before transport and enters normal framework error handling;
+Core cannot recalculate byte offsets for an arbitrary decoded partial representation.
+Connection,
+Connection-nominated headers, Keep-Alive, Proxy-Connection, TE, Trailer,
+Transfer-Encoding, Upgrade and proxy authentication headers are stripped from
+fetch-derived responses, with a final check after middleware at Node transport.
+No body is buffered or teed. Fetched HEAD/304 responses have no decoded stream;
+their representation metadata remains intact. This policy does not remove correct
+Content-Length/encoding/validators from locally constructed or production asset
+Responses.
+
 ```text
 =============================================================================
 1. TRANSPORT & FRAMEWORK CONTROL PLANE (Bypasses user serverMiddleware)
