@@ -39,6 +39,7 @@ const examples = [
   '1-single-app',
   '2-hybrid-route-app',
   '3-multi-domain-apps',
+  '4-server-api-app',
 ] as const
 
 const readJson = async <T>(path: string): Promise<T> =>
@@ -233,21 +234,17 @@ describe('repository release contract', () => {
     }
   })
 
-  it('documents the Vue hydration compatibility range and manual coverage', async () => {
+  it('keeps the Vue hydration compatibility range and manual coverage explicit', async () => {
     const manifest = await readJson<PackageManifest>(join(repositoryRoot, 'package.json'))
-    const compatibility = await readFile(
-      join(repositoryRoot, 'doc/hydration-compatibility.md'),
-      'utf8'
-    )
     const suite = await readFile(
       join(repositoryRoot, 'src/hydration/SsrVueHydrationCompatibility.test.ts'),
       'utf8'
     )
     expect(manifest.peerDependencies?.vue).toBe('~3.5.0')
     expect(manifest.devDependencies?.vue).toBe('~3.5.40')
-    expect(compatibility).toContain('manual')
-    expect(compatibility).toContain('3.5.x')
-    expect(compatibility).not.toMatch(/github actions|workflow_dispatch|runs? .*\bCI\b|CI .*runs?|CI definition/i)
+    expect(suite).toContain('manually')
+    expect(suite).toContain('3.5.x')
+    expect(suite).not.toMatch(/github actions|workflow_dispatch|runs? .*\bCI\b|CI .*runs?|CI definition/i)
     expect(suite).toContain('@vitest-environment jsdom')
   })
 })
