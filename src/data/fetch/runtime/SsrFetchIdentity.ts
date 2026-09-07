@@ -47,7 +47,11 @@ export const resolveFetchIdentity = (
   input: string | URL,
   variablesInput: unknown,
   options: UseFetchOptionsBase<unknown, object>,
-  environment: { server: boolean; request: SsrRenderRequest }
+  environment: {
+    server: boolean
+    request: SsrRenderRequest
+    contextHeaders?: Headers
+  }
 ): FetchIdentity => {
   const method = options.method ?? 'GET'
   if (method !== 'GET' && method !== 'HEAD') {
@@ -84,8 +88,13 @@ export const resolveFetchIdentity = (
   const sameOrigin = url.origin === origin
   const location = `${sameOrigin ? '' : url.origin}${url.pathname}${url.search}`
   const publicKey = JSON.stringify([method, location, options.key ?? null])
-  const headers = new Headers(options.headers)
-  headers.delete('proxy-authorization')
+  const headers = new Headers(
+    sameOrigin && options.context !== false
+      ? environment.contextHeaders
+      : undefined
+  )
+  const localHeaders = new Headers(options.headers)
+  for (const [name, value] of localHeaders) headers.set(name, value)
   let forwardedCredentials = false
   if (environment.server && sameOrigin && options.credentials !== 'omit') {
     if (!headers.has('cookie') && environment.request.cookie) {
@@ -98,6 +107,7 @@ export const resolveFetchIdentity = (
       forwardedCredentials = true
     }
   }
+  headers.delete('proxy-authorization')
   const init: FetchIdentity['init'] = {
     method,
     headers,
