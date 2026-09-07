@@ -4,6 +4,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readFile, stat } from 'node:fs/promises'
 import { transformSync } from 'esbuild'
 
+/** serverRoutes and serverMiddleware are deliberately excluded: only Vue navigation
+ * middleware belongs to the universal graph. HTTP dependencies remain server-only. */
 export const SSR_UNIVERSAL_RUNTIME_FIELDS = [
   'extensions',
   'middleware',
@@ -70,6 +72,7 @@ type UnwrapResult = {
 const OBJECT_MUTATORS = new Set(['assign', 'defineProperty', 'defineProperties'])
 
 const CONFIG_HELPER_EXPORTS = new Set(['defineServer', 'defineApplication'])
+const SERVER_IDENTITY_HELPER_EXPORTS = new Set(['defineServerRoutes', 'defineServerMiddleware'])
 
 const LIBRARY_CONFIG_DIRECTORY = dirname(fileURLToPath(import.meta.url)).replaceAll('\\', '/')
 
@@ -104,6 +107,7 @@ const isLibraryConfigSpecifier = (
 
 type ConfigHelpers = {
   calls: WeakSet<EstreeNode>
+  serverIdentityCalls: WeakSet<EstreeNode>
   scopes: LexicalScopes
 }
 
@@ -869,7 +873,7 @@ const isolateDeclaratorInit = (declarator: EstreeNode, name: string, filePath: s
 type ScopeBinding = {
   name: string
   tracked?: string
-  configHelper?: 'helper' | 'namespace'
+  configHelper?: 'helper' | 'server-identity' | 'namespace'
 }
 
 type ScopeKind = 'module' | 'function' | 'block'
@@ -1253,11 +1257,13 @@ const configHelperFromExpression = (
   if (node.type !== 'MemberExpression' || node.computed) return undefined
   const object = asNode(node.object)
   const property = asNode(node.property)
-  return configHelperFromExpression(object, scope) === 'namespace' &&
-    property?.type === 'Identifier' &&
-    CONFIG_HELPER_EXPORTS.has(property.name as string)
-    ? 'helper'
-    : undefined
+  if (configHelperFromExpression(object, scope) !== 'namespace' || property?.type !== 'Identifier') {
+    return undefined
+  }
+  const name = property.name as string
+  if (CONFIG_HELPER_EXPORTS.has(name)) return 'helper'
+  if (SERVER_IDENTITY_HELPER_EXPORTS.has(name)) return 'server-identity'
+  return undefined
 }
 
 const collectConfigHelpers = (
@@ -1282,6 +1288,9 @@ const collectConfigHelpers = (
       }
       const exported = importedExportName(item)
       if (exported && CONFIG_HELPER_EXPORTS.has(exported)) binding.configHelper = 'helper'
+      else if (exported && SERVER_IDENTITY_HELPER_EXPORTS.has(exported)) {
+        binding.configHelper = 'server-identity'
+      }
     }
   }
   let changed = true
@@ -1300,11 +1309,14 @@ const collectConfigHelpers = (
     }
   }
   const calls = new WeakSet<EstreeNode>()
+  const serverIdentityCalls = new WeakSet<EstreeNode>()
   const collectCalls = (node: EstreeNode | undefined) => {
     if (!node) return
     if (node.type === 'CallExpression') {
       const scope = scopes.nodeScope.get(node) ?? scopes.moduleScope
-      if (configHelperFromExpression(asNode(node.callee), scope) === 'helper') calls.add(node)
+      const helper = configHelperFromExpression(asNode(node.callee), scope)
+      if (helper === 'helper') calls.add(node)
+      else if (helper === 'server-identity') serverIdentityCalls.add(node)
     }
     for (const value of Object.values(node)) {
       if (Array.isArray(value)) {
@@ -1315,7 +1327,7 @@ const collectConfigHelpers = (
     }
   }
   collectCalls(program)
-  return { calls, scopes }
+  return { calls, serverIdentityCalls, scopes }
 }
 
 /**
@@ -1662,17 +1674,22 @@ const assertStaticUniversalGraph = (
       const callee = asNode(node.callee)
       const args = asNodes(node.arguments)
       const configHelper = isConfigHelperCall(node, helpers)
+      // A projected import can protect the entire package namespace. Calling a
+      // Core HTTP identity helper does not mutate that namespace or make its
+      // result universal. Only exempt the callee: arguments and callback bodies
+      // still undergo the ordinary tracked-reference checks below.
+      const identityHelper = helpers.serverIdentityCalls.has(node)
       if (isObjectMutator(callee)) {
         const field = trackedRefFromExpression(args[0], scope)
         if (field) throwMutated(field)
       } else if (callee?.type === 'MemberExpression') {
         const object = asNode(callee.object)
         const field = trackedRefFromExpression(object, scope)
-        if (field && !isConfigHelperCall(node, helpers)) {
+        if (field && !configHelper && !identityHelper) {
           const binding = object?.type === 'Identifier' ? (object.name as string) : undefined
           throwMutated(field, binding)
         }
-      } else if (!configHelper) {
+      } else if (!configHelper && !identityHelper) {
         const calleeField = trackedRefFromExpression(callee, scope)
         if (calleeField && !projected) {
           throw unsupportedReferenceEscapeError(
