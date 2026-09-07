@@ -187,9 +187,9 @@ npm run dev
 
 # Part 2: Make the small application useful
 
-## Data Fetching
+## Data Fetching Basics
 
-Once your application is running, use the built-in `useFetch()` composable for normal page data. It works in SSR, hydration, and client-side navigation while keeping the API close to normal Vue code.
+Once your application is running, `useFetch()` is the built-in way to load page data without leaving the Vue SSR flow.
 
 ```vue
 <script setup lang="ts">
@@ -221,34 +221,17 @@ const { data, pending, error, refresh } = useFetch<ProductsResponse>('/api/produ
 </template>
 ```
 
-That is enough for most pages. On a direct SSR request, `useFetch()` starts the request during setup and the final server-rendered HTML contains the fetched data. During hydration, the server result is restored without repeating the same initial request. On client-side navigation, the page renders with `pending=true` while the browser request is running.
+- Direct SSR requests include the fetched result in the rendered HTML.
+- Hydration restores the server result without repeating the first request.
+- Browser navigation shows `pending` while the request is running.
+- `refresh()` fetches fresh data on demand.
 
-## `await` is optional
+## Variables
 
-Usually, don't `await useFetch()`:
-
-```ts
-const { data, pending, error } = useFetch<ProductsResponse>('/api/products')
-```
-
-Use `await` only when SSR setup needs the result immediately, such as for SEO:
+Use `variables` for query params. They can be reactive:
 
 ```ts
-const { data } = await useFetch<ProductsResponse>('/api/products')
-
-useSeo({
-  title: () => `${data.value?.products.length ?? 0} Products`,
-})
-```
-
-On SSR, `await useFetch()` waits for the initial request. In the browser, it does not wait for the network. Use `pending` for loading, or `await refresh()` when you need to wait explicitly.
-
-## Query variables
-
-Use `variables` for query params:
-
-```ts
-const products = useFetch('/api/products', {
+useFetch('/api/products', {
   variables: () => ({
     category: category.value,
     page: page.value,
@@ -256,44 +239,9 @@ const products = useFetch('/api/products', {
 })
 ```
 
-Produces:
+## Global Request Context
 
-```text
-/api/products?category=phones&page=1
-```
-
-## Fetch policies
-
-The default policy is `network-only`.
-
-```ts
-useFetch('/api/products', {
-  fetchPolicy: 'network-only',
-})
-```
-
-Use `cache-first` when an existing successful value may be reused:
-
-```ts
-useFetch('/api/products', {
-  fetchPolicy: 'cache-first',
-})
-```
-
-For a hook that should fetch initially and prefer cache after its reactive identity changes:
-
-```ts
-useFetch('/api/products', {
-  fetchPolicy: 'network-only',
-  nextFetchPolicy: 'cache-first',
-})
-```
-
-Identical in-flight requests are deduplicated even with `network-only`.
-
-## Global request context
-
-Use `setContext()` to provide application-wide header defaults for future same-origin `useFetch()` executions. A common pattern is to set authentication after login or during application initialization:
+Use `setContext()` for application-wide defaults such as auth headers:
 
 ```ts
 import { setContext } from 'vue-ssr-lite'
@@ -303,148 +251,18 @@ setContext({
     authorization: `Bearer ${token}`,
   },
 })
-```
 
-Pages can then fetch without repeating those headers:
-
-```ts
 const profile = useFetch('/api/profile')
 ```
 
-Each call replaces the complete stored context; calls do not merge with earlier values. Supply the complete desired context after a token or workspace change. To remove the previous defaults on logout:
+- Each `setContext()` call replaces the previous context.
+- Clear defaults with `setContext({ headers: {} })`.
+- Request-local headers override the stored context.
+- Context applies only to same-origin `useFetch()` requests.
+- Native `fetch()` and other clients are unaffected.
+- For a one-off request, `context:false` skips stored defaults only.
 
-```ts
-setContext({
-  headers: {},
-})
-```
-
-The change affects future executions only. Existing data and in-flight requests are unchanged, and `setContext()` does not automatically refetch mounted hooks. A later `refresh()` or reactive URL/variables execution uses the latest context.
-
-Request-local headers take precedence over context defaults:
-
-```ts
-useFetch('/api/admin', {
-  headers: {
-    authorization: `Bearer ${adminToken}`,
-  },
-})
-```
-
-Context defaults are application scoped and same-origin only, so they are not automatically attached to third-party URLs. SSR applications keep this state isolated per request, and the context itself is never hydrated or serialized into the browser.
-
-For the uncommon request that must skip stored defaults, use `context:false`:
-
-```ts
-useFetch('/api/public-feed', {
-  context: false,
-})
-```
-
-This skips only `setContext()` defaults. It does not suppress the existing same-origin SSR forwarding of incoming cookies or authorization. Use both `context:false` and `credentials:'omit'` for an anonymous SSR request; explicitly supplied request headers still apply. Conversely, `credentials:'omit'` alone suppresses automatic SSR credential forwarding but does not delete headers supplied through `setContext()` or the request itself.
-
-`setContext()` affects only the framework's first-party `useFetch()`. It does not intercept native `fetch()`, Axios, Apollo Client, or other HTTP clients.
-
-## Client-only requests
-
-Set `server:false` when a request should not run during SSR:
-
-```ts
-const result = useFetch('/api/browser-only', {
-  server: false,
-})
-```
-
-During SSR the hook exposes its pending state without making the request. After hydration, the browser starts it normally.
-
-If `immediate:false` is also set, the request stays idle until `refresh()` is called.
-
-## Errors, timeout, and cancellation
-
-Expected HTTP, network, parse, and timeout failures are exposed through `error`:
-
-```ts
-const { data, pending, error } = useFetch('/api/products', {
-  timeout: 5_000,
-})
-```
-
-`error.value.kind` is one of:
-
-```text
-http
-network
-parse
-timeout
-```
-
-Normal request failures do not require `try/catch` around `useFetch()` or `refresh()`. Check `error` before relying on the result.
-
-Use a normal `AbortSignal` when the caller needs cancellation:
-
-```ts
-const controller = new AbortController()
-
-const result = useFetch('/api/products', {
-  signal: controller.signal,
-})
-
-controller.abort()
-```
-
-Cancelling one hook does not cancel a shared physical request that another active hook still needs.
-
-## Request options
-
-`useFetch()` supports GET and HEAD requests plus the common native fetch options:
-
-```ts
-useFetch('/api/products', {
-  method: 'GET',
-  headers: {
-    'x-workspace': 'acme',
-  },
-  credentials: 'include',
-  cache: 'no-store',
-})
-```
-
-Supported request options include:
-
-- `headers`
-- `context`
-- `credentials`
-- `mode`
-- `redirect`
-- `referrer`
-- `referrerPolicy`
-- `integrity`
-- native `cache`
-
-`fetchPolicy` controls the `useFetch()` application cache. Native `cache` controls the browser/server HTTP fetch behavior. They are separate concepts.
-
-## Callbacks
-
-Use `onDone` and `onError` when an individual request execution needs a side effect:
-
-```ts
-useFetch<ProductsResponse>('/api/products', {
-  onDone(ctx) {
-    console.log(ctx.data, ctx.status)
-  },
-  onError(ctx) {
-    console.log(ctx.error.kind, ctx.status)
-  },
-})
-```
-
-Callbacks belong to the requesting hook. They do not replay for hydration or cache hits.
-
-## Other API clients
-
-`useFetch()` is optional. Native `fetch()`, GraphQL/Apollo, Axios, and other API clients continue to work normally.
-
-Use `useFetch()` when you want the built-in SSR, hydration, reactive request state, deduplication, and lightweight cache behavior without adding another data-fetching library.
+For advanced useFetch behavior including await semantics, caching policies, manual/client-only execution, cancellation, request options, callbacks, context opt-out, and detailed request behavior, see [Advanced useFetch](#advanced-usefetch).
 
 # Application Shell
 
@@ -1097,6 +915,239 @@ const origin = useOrigin()
 
 By default, Core derives the origin from the normalized request domain after host selection and trusted-proxy processing. A non-empty result from the server-only `resolveSiteUrl()` is authoritative; an undefined, empty, or whitespace result falls through to `seo.siteUrl`, then `PUBLIC_URL`, then the normalized request origin. Enable `server.trustProxy` only behind a trusted reverse proxy.
 
+# Domains
+
+```ts
+domain: {
+  development: 'app.localhost',
+  production: 'app.example.com',
+  mode: 'root-and-subdomains',
+  customDomains: true,
+  params: {
+    workspace: { source: 'last-subdomain-label' },
+  },
+}
+```
+
+```ts
+import { useDomain } from 'vue-ssr-lite'
+const domain = useDomain()
+```
+
+`useDomain()` reads the selected application's normalized domain information during SSR and after hydration. It exposes the selected application, normalized authority/hostname, base domain, subdomain, custom-domain flag, and declared domain params.
+
+# Advanced useFetch
+
+## `await useFetch()`
+
+```ts
+const { data } = await useFetch<ProductsResponse>('/api/products')
+```
+
+SSR:
+`await useFetch()` waits for the initial request.
+
+Browser:
+`await useFetch()` does not wait for the network request.
+
+Use `pending` for browser loading state, or `await refresh()` when you need to wait explicitly.
+
+## Fetch policies
+
+The default policy is `network-only`.
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'network-only',
+})
+```
+
+Use `cache-first` when an existing successful value may be reused:
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'cache-first',
+})
+```
+
+For a hook that should fetch initially and prefer cache after its reactive identity changes:
+
+```ts
+useFetch('/api/products', {
+  fetchPolicy: 'network-only',
+  nextFetchPolicy: 'cache-first',
+})
+```
+
+Identical in-flight requests are deduplicated even with `network-only`.
+
+## Manual Fetching
+
+```ts
+const result = useFetch('/api/browser-only', {
+  immediate: false,
+})
+
+await result.refresh()
+```
+
+Use `immediate: false` when you want to control when the first request runs.
+
+## Client-only Requests
+
+Set `server: false` when a request should not run during SSR:
+
+```ts
+const result = useFetch('/api/browser-only', {
+  server: false,
+})
+```
+
+During SSR the hook exposes its pending state without making the request. After hydration, the browser starts it normally. If `immediate: false` is also set, the request stays idle until `refresh()` is called.
+
+## Full `setContext()` Behavior
+
+Use `setContext()` to provide application-wide header defaults for future same-origin `useFetch()` executions. A common pattern is to set authentication after login or during application initialization:
+
+```ts
+import { setContext } from 'vue-ssr-lite'
+
+setContext({
+  headers: {
+    authorization: `Bearer ${token}`,
+  },
+})
+```
+
+Pages can then fetch without repeating those headers:
+
+```ts
+const profile = useFetch('/api/profile')
+```
+
+Each call replaces the complete stored context; calls do not merge with earlier values. Supply the complete desired context after a token or workspace change. To remove the previous defaults on logout:
+
+```ts
+setContext({
+  headers: {},
+})
+```
+
+The change affects future executions only. Existing data and in-flight requests are unchanged, and `setContext()` does not automatically refetch mounted hooks. A later `refresh()` or reactive URL/variables execution uses the latest context. In-flight requests keep the context they started with.
+
+Request-local headers take precedence over context defaults:
+
+```ts
+useFetch('/api/admin', {
+  headers: {
+    authorization: `Bearer ${adminToken}`,
+  },
+})
+```
+
+Context defaults are application scoped and same-origin only, so they are not automatically attached to third-party URLs. SSR applications keep this state isolated per request, and the context itself is never hydrated or serialized into the browser. Native clients remain unaffected.
+
+## `context:false`
+
+Use `context: false` when a request should skip stored defaults:
+
+```ts
+useFetch('/api/public-feed', {
+  context: false,
+})
+```
+
+This skips only `setContext()` defaults. It does not suppress the existing same-origin SSR forwarding of incoming cookies or authorization. Use both `context:false` and `credentials:'omit'` for an anonymous SSR request; explicitly supplied request headers still apply. Conversely, `credentials:'omit'` alone suppresses automatic SSR credential forwarding but does not delete headers supplied through `setContext()` or the request itself.
+
+## Errors
+
+Expected HTTP, network, parse, and timeout failures are exposed through `error`:
+
+```ts
+const { data, pending, error } = useFetch('/api/products', {
+  timeout: 5_000,
+})
+```
+
+`error.value.kind` is one of:
+
+```text
+http
+network
+parse
+timeout
+```
+
+Normal request failures do not require `try/catch` around `useFetch()` or `refresh()`. Check `error` before relying on the result.
+
+## Timeout and Cancellation
+
+Use a normal `AbortSignal` when the caller needs cancellation:
+
+```ts
+const controller = new AbortController()
+
+const result = useFetch('/api/products', {
+  signal: controller.signal,
+})
+
+controller.abort()
+```
+
+Cancelling one hook does not cancel a shared physical request that another active hook still needs.
+
+## Request Options
+
+`useFetch()` supports GET and HEAD requests plus the common native fetch options:
+
+```ts
+useFetch('/api/products', {
+  method: 'GET',
+  headers: {
+    'x-workspace': 'acme',
+  },
+  credentials: 'include',
+  cache: 'no-store',
+})
+```
+
+Supported request options include:
+
+- `headers`
+- `context`
+- `credentials`
+- `mode`
+- `redirect`
+- `referrer`
+- `referrerPolicy`
+- `integrity`
+- native `cache`
+
+`fetchPolicy` controls the `useFetch()` application cache. Native `cache` controls the browser/server HTTP fetch behavior. They are separate concepts.
+
+## Callbacks
+
+Use `onDone` and `onError` when an individual request execution needs a side effect:
+
+```ts
+useFetch<ProductsResponse>('/api/products', {
+  onDone(ctx) {
+    console.log(ctx.data, ctx.status)
+  },
+  onError(ctx) {
+    console.log(ctx.error.kind, ctx.status)
+  },
+})
+```
+
+Callbacks belong to the requesting hook. They do not replay for hydration or cache hits.
+
+## Other API Clients
+
+`useFetch()` is optional. Native `fetch()`, Axios, Apollo / GraphQL, and other API clients continue to work normally.
+
+Use `useFetch()` when you want the built-in SSR, hydration, reactive request state, deduplication, and lightweight cache behavior without adding another data-fetching library.
+
 # Server Configuration
 
 ```ts
@@ -1264,27 +1315,6 @@ Use static inline expressions, direct imports from browser-safe modules, or dedi
 Core intentionally fails closed when a universal value is reassigned, mutated, passed to an unknown call or constructor, returned from an unrelated function, stored or exported through an unproven reference, or built through a dynamic factory.
 
 Keep universal values in dedicated static bindings and keep server-only work outside their dependency graph. Unsupported indirection is a configuration error rather than a potentially different value after hydration.
-
-# Domains
-
-```ts
-domain: {
-  development: 'app.localhost',
-  production: 'app.example.com',
-  mode: 'root-and-subdomains',
-  customDomains: true,
-  params: {
-    workspace: { source: 'last-subdomain-label' },
-  },
-}
-```
-
-```ts
-import { useDomain } from 'vue-ssr-lite'
-const domain = useDomain()
-```
-
-`useDomain()` reads the selected application's normalized domain information during SSR and after hydration. It exposes the selected application, normalized authority/hostname, base domain, subdomain, custom-domain flag, and declared domain params.
 
 # Advanced: Custom Extensions
 
