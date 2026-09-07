@@ -808,6 +808,131 @@ useSeo(
 
 `useSeo()` accepts a plain object, `Ref`, computed ref, or getter. Active layers are scoped to their component. Reactive updates, KeepAlive, unmount, navigation, Back, and Forward all recalculate the effective head.
 
+# Server Routes and Server Middleware
+
+`defineServerRoutes()` declares application-owned HTTP routes. Handlers receive a
+native Web `Request` and return a native `Response`; read query parameters with
+`new URL(request.url).searchParams` and bodies with `request.json()` or `request.text()`.
+
+```ts
+import { defineServer, defineServerRoutes, defineServerMiddleware } from 'vue-ssr-lite'
+
+const loggerMiddleware = defineServerMiddleware(async (request, context, next) => {
+  const response = await next()
+  console.log(context.requestId, request.method, response.status)
+  response.headers.set('x-service', 'shop')
+  return response
+})
+
+const authMiddleware = defineServerMiddleware<{ user: { id: string } }>(
+  async (request, context, next) => {
+    const user = await authenticate(request) // your normal server-side import
+    if (!user) return new Response(null, { status: 401 })
+    context.user = user
+    return next()
+  }
+)
+
+const productsRoutes = defineServerRoutes({
+  prefix: '/api/products',
+  middleware: [authMiddleware], // group scope
+  routes: {
+    '/:id': {
+      GET(request, context) {
+        return Response.json({ id: context.params.id, userId: context.user.id })
+      },
+    },
+  },
+})
+
+export default defineServer({
+  serverMiddleware: [loggerMiddleware],
+  serverRoutes: [productsRoutes],
+})
+```
+
+Route middleware has three scopes: group `middleware`, path `middleware`, and
+method `{ middleware, handler }`. They run in that order and unwind in reverse;
+each middleware must return a `Response` or `return next()`, and call `next()` at
+most once. A middleware can short-circuit with an error response or catch errors
+from `await next()`. Use `new URL('/login', request.url)` for native redirects.
+Core gives upstream middleware a Response with mutable headers, including when
+downstream returns `Response.redirect()` or a response from `fetch()`. It preserves
+the status, status text, cookies and original body stream without buffering or
+teeing. Consumed/locked bodies and non-HTTP responses such as `Response.error()`
+(status 0) fail through the normal framework error handler.
+
+Returning a Node `fetch()` response streams its decoded body directly. For fetched
+gzip, deflate and Brotli bodies, Core removes the upstream Content-Encoding and
+Content-Length so Node frames the downstream stream correctly. It also removes
+upstream connection-specific headers, including fields named by Connection.
+Content-Type, Cache-Control, Last-Modified, cookies and application headers remain;
+weak ETags remain, while unchanged strong ETags and representation-integrity fields
+for a decoded representation are removed; middleware replacements survive final
+transport sanitization. This includes RFC 9530 `Repr-Digest`, whose value depends on the
+selected representation metadata and therefore changes when Content-Encoding is
+removed. A decoded fetched 206 response, or decoded response carrying
+Content-Range, fails through the normal framework error handler because Core cannot
+recalculate encoded byte offsets for the decoded stream. Fetch provenance survives
+Core normalization and middleware rewrapping the same body stream. Fetched HEAD/304
+metadata and locally constructed responses, including production file assets, retain
+their correct representation headers.
+
+`defineServerMiddleware<Provides, Requires>()` defaults both types to `{}`.
+Provided values are optional inside the providing callback until assigned, then
+required downstream. Requirements must be supplied by earlier middleware or
+inferred params. Group middleware may require prefix params; path and method
+middleware may require prefix plus child params. Duplicate provided keys and
+framework keys (`requestId`, `params`) are rejected. Both framework properties
+are read-only. Global `serverMiddleware` accepts only middleware with empty
+Provides and Requires, and receives `requestId` before route matching.
+
+Paths are case-sensitive and normalize trailing slashes. Omit `prefix` when none
+is needed; an explicitly supplied prefix must start with `/`, so `prefix: ''` is
+invalid. Literal segments outrank `:params`, comparing segments from left to right.
+Matching claims a path before
+checking the method: an unsupported method returns 405 with `Allow`, without
+falling through to a dynamic sibling or Vue. Core supplies GET-backed HEAD and
+204 OPTIONS. Automatic OPTIONS and 405 skip route middleware; explicit OPTIONS
+runs its route chain. Global middleware wraps all application-owned responses,
+including legacy endpoints, production assets, non-HTML 404s, cached HTML and
+SPA/SSR rendering. Framework health/readiness checks, private assets and
+Vite-owned requests bypass it. Server routes bypass application preparation and
+Vue SSR admission. Native response bodies stream with backpressure, and
+`request.signal` follows the existing request deadline and disconnect lifecycle.
+
+Fetch forbids constructing native Requests for TRACE, TRACK and CONNECT. If such
+a method reaches the managed request handler, Core checks server-route ownership
+before constructing a Request: a matched path returns 405 with that path's `Allow`;
+an unmatched path follows the existing application/legacy fallback (normally a
+non-HTML 404). These methods bypass all server middleware and never open the Web
+body bridge. The Node transport still drains unread bodies. Node's separate
+CONNECT/tunnel handling is not a server-route API.
+
+In multi-app configuration, put `serverRoutes` on each `defineApplication()`;
+`serverMiddleware` stays on `defineServer()`. Host selection isolates route tables.
+Exact server-route paths suppress built-in SEO ownership of `/robots.txt` and
+`/sitemap.xml`; overlap with a legacy endpoint’s explicit `ownedPaths` is a
+configuration error. Legacy endpoints remain supported and may return `null` to
+continue. Route patterns matching health/readiness paths are configuration errors.
+Legacy response statuses 100–599 remain accepted. Informational 1xx responses
+retain the existing Node transport behavior because native Response cannot
+represent them; this does not add an informational-response/session API. With
+server middleware, returning 1xx from the legacy continuation transfers control
+out of the Web response chain: `next()` rejects with an internal transport transfer,
+`finally` blocks run, and normal response decoration is skipped. A middleware
+catch that returns its own Response replaces that result. Without server middleware,
+legacy responses use the original transport directly. With middleware, unchanged
+legacy headers retain their original values and multiplicity on the wire; changed
+or deleted values follow Web Headers semantics. Legacy string bodies do
+not acquire an implicit Content-Type.
+
+`defineMiddleware()` remains **Vue navigation middleware**. HTTP middleware uses
+`defineServerMiddleware()`. `serverRoutes` and `serverMiddleware` are server-only
+and can import databases and Node modules; they never enter browser projection.
+See the [approved server API example](doc/server-api-plan/server-api-example/) for
+group, path, and method middleware together.
+
 # HTTP Status Codes
 
 ```ts
@@ -890,7 +1015,7 @@ const config = usePublicConfig<{ apiUrl: string }>()
 </script>
 ```
 
-The factory runs server-side once per request. Returned values must be JSON-safe and must never include credentials. Credential-bearing requests bypass the shared response cache.
+The factory runs server-side once per request that reaches application preparation. Server routes run before this step. Returned values must be JSON-safe and must never include credentials. Credential-bearing requests bypass the shared response cache.
 
 # Site Origin
 
@@ -930,7 +1055,7 @@ export default defineServer({
 | `onMetrics`                | Render metrics callback                         |
 | `renderError`              | Custom render-error response                    |
 
-Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML, custom endpoints, health/readiness checks, Vite responses, and production assets bypass it. When both limits are full, the server returns `503 Service Unavailable`; queue time remains part of `requestTimeoutMs`. Set `maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are occupied.
+Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML, server routes, legacy endpoints, health/readiness checks, Vite responses, and production assets bypass it. When both limits are full, the server returns `503 Service Unavailable`; queue time remains part of `requestTimeoutMs`. Set `maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are occupied.
 
 `PORT` overrides the configured port. A non-empty `HOST` overrides the configured bind host; whitespace-only `HOST` is ignored.
 
@@ -982,6 +1107,8 @@ vue-ssr-lite start
 ```ts
 import {
   defineServer,
+  defineServerRoutes,
+  defineServerMiddleware,
   defineApplication,
   useFetch,
   useSeo,
@@ -1002,6 +1129,8 @@ import type { AppContext } from 'vue-ssr-lite'
 | ------------------- | ------------------------------------------------ |
 | `defineServer`      | Configure the server/runtime                     |
 | `defineApplication` | Register an explicit application                 |
+| `defineServerRoutes` | Declare application HTTP routes with native Request/Response |
+| `defineServerMiddleware` | Declare typed HTTP middleware with Provides/Requires |
 | `useFetch`          | Fetch page data with SSR, hydration, typed refs, and caching |
 | `useSeo`            | Set reactive SEO/head data                       |
 | `usePublicConfig`   | Read browser-safe server config                  |
@@ -1040,7 +1169,9 @@ server.ts
 SEO site resolvers
 sitemap providers
 robots providers
-server endpoints
+serverRoutes and their route middleware
+serverMiddleware
+legacy endpoints
 ```
 
 These are universal/browser-capable:
@@ -1055,7 +1186,7 @@ components
 
 `defineApplication()` may mention routes and SEO in `app.ts`. The compiler projects a client graph from `main`, `App.vue`, and the routes module. It does not import the complete server configuration into browser bundles.
 
-Six configuration fields are also projected into the browser: `extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, and `cleanup`. Core normally requires their dependencies to be universal and browser-safe. The only environment-specific exception is middleware on a statically proven default-SPA application, which never executes on the server and therefore uses its normal Vite browser dependency graph. This boundary keeps SEO, sitemap, robots, endpoints, Node APIs, secrets, and other server-only imports out of the browser bundle.
+Six configuration fields are also projected into the browser: `extensions`, `middleware`, `router`, `scrollBehavior`, `createInitialState`, and `cleanup`. Core normally requires their dependencies to be universal and browser-safe. The only environment-specific exception is middleware on a statically proven default-SPA application, which never executes on the server and therefore uses its normal Vite browser dependency graph. This boundary keeps SEO, sitemap, robots, serverRoutes, serverMiddleware, legacy endpoints, Node APIs, secrets, and other server-only imports out of the browser bundle.
 
 Use static inline expressions, direct imports from browser-safe modules, or dedicated `const` bindings whose dependencies are also static. A config stored in a `const` and the documented function/async export that directly returns `defineServer({...})` are supported too.
 
