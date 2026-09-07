@@ -17,8 +17,9 @@ import type { ApplicationConfig, ServerConfig } from './SsrConfigTypes'
 export { defineExtension } from './core/extensions/defineExtension'
 export { defineMiddleware } from './middleware/defineMiddleware'
 export { LoadingIndicator, RouterView } from './navigation/index'
-export { useFetch } from './data/index'
+export { setContext, useFetch } from './data/index'
 export type {
+  SetContextOptions,
   UseFetchDoneContext,
   UseFetchError,
   UseFetchErrorContext,
