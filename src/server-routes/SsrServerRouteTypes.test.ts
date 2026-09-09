@@ -119,6 +119,70 @@ defineServer({ serverMiddleware: [logger], serverRoutes: collection })
 defineServer({ serverMiddleware: [logger], applications: [defineApplication({ name: 'shop', serverRoutes: collection })] })
 const routeKey: keyof typeof products.routes = '/:id'
 const prefix: '/api/products' | undefined = products.prefix
+
+const audit = defineServerMiddleware<{ audited: true }, { isAdmin: true }>((request, context, next) => {
+  context.audited = true
+  return next()
+})
+const search = defineServerMiddleware<{ query: string }, { user: User; params: { term: string } }>((request, context, next) => {
+  context.query = context.params.term
+  return next()
+})
+const completeRouteTable = defineServerRoutes({
+  prefix: '/api',
+  middleware: [auth],
+  routes: {
+    '/products/:id': {
+      middleware: [admin],
+      GET: { middleware: [product], handler(request, context) {
+        const nativeRequest: Request = request
+        const user: User = context.user
+        const isAdmin: true = context.isAdmin
+        const item: Product = context.product
+        const id: string = context.params.id
+        const typedContext: false = null! as IsAny<typeof context>
+        return Response.json({ nativeRequest: nativeRequest.url, user, isAdmin, item, id, typedContext })
+      } },
+      POST: { middleware: [audit], handler(request, context) {
+        const user: User = context.user
+        const isAdmin: true = context.isAdmin
+        const audited: true = context.audited
+        const id: string = context.params.id
+        const typedContext: false = null! as IsAny<typeof context>
+        return Response.json({ user, isAdmin, audited, id, typedContext })
+      } },
+    },
+    '/search/:term': {
+      GET: { middleware: [search], handler(request, context) {
+        const user: User = context.user
+        const query: string = context.query
+        const term: string = context.params.term
+        const typedContext: false = null! as IsAny<typeof context>
+        return Response.json({ user, query, term, typedContext })
+      } },
+      POST: { handler(request, context) {
+        const user: User = context.user
+        const term: string = context.params.term
+        const typedContext: false = null! as IsAny<typeof context>
+        return Response.json({ user, term, typedContext })
+      } },
+    },
+  },
+})
+const explicitPrefix = defineServerRoutes<'/api'>({
+  prefix: '/api', routes: { '/health': { GET: { handler() { return new Response() } } } },
+})
+const explicitGroup = defineServerRoutes<'/api', readonly [typeof auth]>({
+  prefix: '/api', middleware: [auth], routes: { '/me': { GET(request, context) {
+    const user: User = context.user
+    return Response.json(user)
+  } } },
+})
+type ExplicitPaths = { readonly '/health': { readonly GET: readonly [] } }
+const explicitPaths = defineServerRoutes<'/api', readonly [], ExplicitPaths>({
+  prefix: '/api', routes: { '/health': { GET: { handler() { return new Response() } } } },
+})
+const completeCollection: readonly ServerRoutesDefinition[] = [completeRouteTable, explicitPrefix, explicitGroup, explicitPaths]
 `)).toEqual([])
   })
 
