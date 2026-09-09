@@ -29,7 +29,7 @@ describe('application source discovery contract', () => {
 
     const bundled = await bundleSsrConfigModules(root, [types, application])
 
-    expect(bundled.codes.get(types)).toBe('export {}\n')
+    expect(bundled.codes.get(types)).toBe('')
     expect(bundled.codes.get(application)).toContain('name: "shop"')
   })
 
