@@ -92,54 +92,343 @@ export type ComposeServerMiddleware<Context, Middleware extends ServerMiddleware
 export type ValidateServerMiddleware<Context, Middleware extends ServerMiddlewareList> =
   [ComposeServerMiddleware<Context, Middleware>] extends [never] ? never : Middleware
 
-/** Only middleware is inferred here; callbacks are contextually typed by the mapped input. */
-export type ServerRouteMiddlewareShape = Partial<
-  Record<ServerRouteMethod | 'middleware', unknown>
->
-type ListAt<Shape, Key extends PropertyKey> = Key extends keyof Shape
-  ? NonNullable<Shape[Key]> extends ServerMiddlewareList ? NonNullable<Shape[Key]> : readonly []
+/** Only middleware tuples are inferred here; callbacks are contextually typed by the mapped input. */
+export type ServerRouteMiddlewareShape = Partial<Record<ServerRouteMethod | 'middleware', unknown>>
+
+type MiddlewareTuple<Value> = NonNullable<Value> extends ServerMiddlewareList
+  ? number extends NonNullable<Value>['length'] ? readonly [] : NonNullable<Value>
   : readonly []
+
+type MiddlewareInput<Value> = Value & (unknown extends Value
+  ? ServerMiddlewareList
+  : NonNullable<Value> extends ServerMiddlewareList ? unknown : ServerMiddlewareList)
+
+type MiddlewareAt<Shape extends Record<string, unknown>, Path extends PropertyKey> =
+  Path extends keyof Shape ? Shape[Path] : undefined
+
+type KnownStringKeys<Shape extends Record<string, unknown>> =
+  string extends keyof Shape ? never : keyof Shape & string
 
 type GroupContext<Prefix extends string, Group extends ServerMiddlewareList> =
   ComposeServerMiddleware<ServerRouteContext<ServerRouteParams<Prefix>>, Group>
-type PathContext<Prefix extends string, Group extends ServerMiddlewareList, Path extends string, Shape> =
-  ComposeServerMiddleware<
-    Omit<GroupContext<Prefix, Group>, 'params'> & ServerRouteContext<ServerRouteParams<`${Prefix}/${Path}`>>,
-    ListAt<Shape, 'middleware'>
+
+type RouteBaseContext<Prefix extends string, Group extends ServerMiddlewareList, Path extends string> =
+  Omit<GroupContext<Prefix, Group>, 'params'> & ServerRouteContext<ServerRouteParams<`${Prefix}/${Path}`>>
+
+type PathContext<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Path extends string,
+  PathMiddleware,
+> = ComposeServerMiddleware<
+  RouteBaseContext<Prefix, Group, Path>,
+  MiddlewareTuple<PathMiddleware>
+>
+
+type MethodRoute<
+  Context,
+  MethodMiddleware,
+> = ServerRouteHandler<Context> | {
+  readonly middleware?: MiddlewareInput<MethodMiddleware>
+  readonly handler: ServerRouteHandler<ComposeServerMiddleware<
+    Context,
+    MiddlewareTuple<MethodMiddleware>
+  >>
+}
+
+type PathMiddlewareRoutes<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  PathMiddleware extends Record<string, unknown>,
+> = {
+  readonly [Path in keyof PathMiddleware]: ServerRouteMiddlewareShape & {
+    readonly middleware?: MiddlewareInput<PathMiddleware[Path]>
+  }
+}
+
+type MethodRoutes<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  PathMiddleware extends Record<string, unknown>,
+  Method extends ServerRouteMethod,
+  MethodMiddleware extends Record<string, unknown>,
+> = {
+  readonly [Path in keyof MethodMiddleware]: ServerRouteMiddlewareShape & {
+    readonly [Key in Method]?: MethodRoute<
+      PathContext<Prefix, Group, Path & string, MiddlewareAt<PathMiddleware, Path>>,
+      MethodMiddleware[Path]
+    >
+  }
+}
+
+type InvalidMiddlewarePath<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Paths extends string,
+  PathMiddleware extends Record<string, unknown>,
+> = {
+  [Path in Paths]: [ComposeServerMiddleware<
+    RouteBaseContext<Prefix, Group, Path>,
+    MiddlewareTuple<MiddlewareAt<PathMiddleware, Path>>
+  >] extends [never] ? Path : never
+}[Paths]
+
+type InvalidMethodPath<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Paths extends string,
+  PathMiddleware extends Record<string, unknown>,
+  MethodMiddleware extends Record<string, unknown>,
+> = {
+  [Path in Paths]: [ComposeServerMiddleware<
+    PathContext<Prefix, Group, Path, MiddlewareAt<PathMiddleware, Path>>,
+    MiddlewareTuple<MiddlewareAt<MethodMiddleware, Path>>
+  >] extends [never] ? Path : never
+}[Paths]
+
+type ValidateRouteMiddleware<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Paths extends string,
+  PathMiddleware extends Record<string, unknown>,
+  GetMiddleware extends Record<string, unknown>,
+  HeadMiddleware extends Record<string, unknown>,
+  PostMiddleware extends Record<string, unknown>,
+  PutMiddleware extends Record<string, unknown>,
+  PatchMiddleware extends Record<string, unknown>,
+  DeleteMiddleware extends Record<string, unknown>,
+  OptionsMiddleware extends Record<string, unknown>,
+> = [
+  InvalidMiddlewarePath<Prefix, Group, Paths, PathMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, GetMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, HeadMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, PostMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, PutMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, PatchMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, DeleteMiddleware>
+  | InvalidMethodPath<Prefix, Group, Paths, PathMiddleware, OptionsMiddleware>,
+] extends [never] ? unknown : { readonly __invalidServerMiddleware__: never }
+
+export type InferredServerRoutesInput<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  PathMiddleware extends Record<string, unknown>,
+  GetMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  HeadMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PostMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PutMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PatchMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  DeleteMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  OptionsMiddleware extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  readonly prefix?: Prefix
+  readonly middleware?: Group & ValidateServerMiddleware<
+    ServerRouteContext<ServerRouteParams<Prefix>>,
+    NoInfer<Group>
+  >
+  readonly routes:
+    PathMiddlewareRoutes<Prefix, Group, PathMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'GET', GetMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'HEAD', HeadMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'POST', PostMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'PUT', PutMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'PATCH', PatchMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'DELETE', DeleteMiddleware>
+    & MethodRoutes<Prefix, Group, PathMiddleware, 'OPTIONS', OptionsMiddleware>
+} & ValidateRouteMiddleware<
+  Prefix,
+  Group,
+  KnownStringKeys<PathMiddleware>
+  | KnownStringKeys<GetMiddleware>
+  | KnownStringKeys<HeadMiddleware>
+  | KnownStringKeys<PostMiddleware>
+  | KnownStringKeys<PutMiddleware>
+  | KnownStringKeys<PatchMiddleware>
+  | KnownStringKeys<DeleteMiddleware>
+  | KnownStringKeys<OptionsMiddleware>,
+  PathMiddleware,
+  GetMiddleware,
+  HeadMiddleware,
+  PostMiddleware,
+  PutMiddleware,
+  PatchMiddleware,
+  DeleteMiddleware,
+  OptionsMiddleware
+>
+
+type InferredRoutePaths<
+  PathMiddleware extends Record<string, unknown>,
+  GetMiddleware extends Record<string, unknown>,
+  HeadMiddleware extends Record<string, unknown>,
+  PostMiddleware extends Record<string, unknown>,
+  PutMiddleware extends Record<string, unknown>,
+  PatchMiddleware extends Record<string, unknown>,
+  DeleteMiddleware extends Record<string, unknown>,
+  OptionsMiddleware extends Record<string, unknown>,
+> = KnownStringKeys<PathMiddleware>
+  | KnownStringKeys<GetMiddleware>
+  | KnownStringKeys<HeadMiddleware>
+  | KnownStringKeys<PostMiddleware>
+  | KnownStringKeys<PutMiddleware>
+  | KnownStringKeys<PatchMiddleware>
+  | KnownStringKeys<DeleteMiddleware>
+  | KnownStringKeys<OptionsMiddleware>
+
+type NormalizedRoutePaths<
+  PathMiddleware extends Record<string, unknown>,
+  GetMiddleware extends Record<string, unknown>,
+  HeadMiddleware extends Record<string, unknown>,
+  PostMiddleware extends Record<string, unknown>,
+  PutMiddleware extends Record<string, unknown>,
+  PatchMiddleware extends Record<string, unknown>,
+  DeleteMiddleware extends Record<string, unknown>,
+  OptionsMiddleware extends Record<string, unknown>,
+> = [InferredRoutePaths<
+  PathMiddleware,
+  GetMiddleware,
+  HeadMiddleware,
+  PostMiddleware,
+  PutMiddleware,
+  PatchMiddleware,
+  DeleteMiddleware,
+  OptionsMiddleware
+>] extends [never]
+  ? string
+  : InferredRoutePaths<
+    PathMiddleware,
+    GetMiddleware,
+    HeadMiddleware,
+    PostMiddleware,
+    PutMiddleware,
+    PatchMiddleware,
+    DeleteMiddleware,
+    OptionsMiddleware
   >
 
-type TypedServerRoutePath<
+type NormalizedServerRoutePath<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Path extends string,
+  PathMiddleware,
+  GetMiddleware,
+  HeadMiddleware,
+  PostMiddleware,
+  PutMiddleware,
+  PatchMiddleware,
+  DeleteMiddleware,
+  OptionsMiddleware,
+> = {
+  readonly middleware?: MiddlewareInput<PathMiddleware>
+  readonly GET?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, GetMiddleware>
+  readonly HEAD?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, HeadMiddleware>
+  readonly POST?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, PostMiddleware>
+  readonly PUT?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, PutMiddleware>
+  readonly PATCH?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, PatchMiddleware>
+  readonly DELETE?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, DeleteMiddleware>
+  readonly OPTIONS?: MethodRoute<PathContext<Prefix, Group, Path, PathMiddleware>, OptionsMiddleware>
+}
+
+/** Normalized public result after the input-only reverse-mapped inference layers have run. */
+export type InferredServerRoutesResult<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  PathMiddleware extends Record<string, unknown>,
+  GetMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  HeadMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PostMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PutMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  PatchMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  DeleteMiddleware extends Record<string, unknown> = Record<string, unknown>,
+  OptionsMiddleware extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  readonly prefix?: Prefix
+  readonly middleware?: Group
+  readonly routes: {
+    readonly [Path in NormalizedRoutePaths<
+      PathMiddleware,
+      GetMiddleware,
+      HeadMiddleware,
+      PostMiddleware,
+      PutMiddleware,
+      PatchMiddleware,
+      DeleteMiddleware,
+      OptionsMiddleware
+    >]: NormalizedServerRoutePath<
+      Prefix,
+      Group,
+      Path,
+      MiddlewareAt<PathMiddleware, Path>,
+      MiddlewareAt<GetMiddleware, Path>,
+      MiddlewareAt<HeadMiddleware, Path>,
+      MiddlewareAt<PostMiddleware, Path>,
+      MiddlewareAt<PutMiddleware, Path>,
+      MiddlewareAt<PatchMiddleware, Path>,
+      MiddlewareAt<DeleteMiddleware, Path>,
+      MiddlewareAt<OptionsMiddleware, Path>
+    >
+  }
+}
+
+type ListAt<Shape, Key extends PropertyKey> = Key extends keyof Shape
+  ? MiddlewareTuple<Shape[Key]>
+  : readonly []
+
+type DeclaredPathContext<
+  Prefix extends string,
+  Group extends ServerMiddlewareList,
+  Path extends string,
+  Shape extends ServerRouteMiddlewareShape,
+> = ComposeServerMiddleware<
+  RouteBaseContext<Prefix, Group, Path>,
+  ListAt<Shape, 'middleware'>
+>
+
+type DeclaredServerRoutePath<
   Prefix extends string,
   Group extends ServerMiddlewareList,
   Path extends string,
   Shape extends ServerRouteMiddlewareShape,
 > = {
-  [Key in keyof Shape]: Key extends 'middleware'
+  readonly [Key in keyof Shape]: Key extends 'middleware'
     ? Shape[Key] & ValidateServerMiddleware<
-        Omit<GroupContext<Prefix, Group>, 'params'> & ServerRouteContext<ServerRouteParams<`${Prefix}/${Path}`>>,
-        ListAt<NoInfer<Shape>, Key>
-      >
+      RouteBaseContext<Prefix, Group, Path>,
+      ListAt<NoInfer<Shape>, 'middleware'>
+    >
     : Key extends ServerRouteMethod
-      ? ServerRouteHandler<PathContext<Prefix, Group, Path, Shape>> | {
-          middleware?: Shape[Key] & ValidateServerMiddleware<
-            PathContext<Prefix, Group, Path, Shape>, ListAt<NoInfer<Shape>, Key>
-          >
-          handler: ServerRouteHandler<ComposeServerMiddleware<
-            PathContext<Prefix, Group, Path, Shape>, ListAt<NoInfer<Shape>, Key>
-          >>
-        }
+      ? ServerRouteHandler<DeclaredPathContext<Prefix, Group, Path, Shape>> | {
+        readonly middleware?: Shape[Key] & ValidateServerMiddleware<
+          DeclaredPathContext<Prefix, Group, Path, Shape>,
+          ListAt<NoInfer<Shape>, Key>
+        >
+        readonly handler: ServerRouteHandler<ComposeServerMiddleware<
+          DeclaredPathContext<Prefix, Group, Path, Shape>,
+          ListAt<NoInfer<Shape>, Key>
+        >>
+      }
       : never
 }
 
+/**
+ * Public explicit-generic route definition contract. `Paths` describes the complete
+ * route shape, as it did before independent middleware-tuple inference was added.
+ */
 export type ServerRoutesInput<
   Prefix extends string,
   Group extends ServerMiddlewareList,
-  Paths extends Record<string, ServerRouteMiddlewareShape>,
+  Paths extends Readonly<Record<string, ServerRouteMiddlewareShape>>,
 > = {
   readonly prefix?: Prefix
-  readonly middleware?: Group & ValidateServerMiddleware<ServerRouteContext<ServerRouteParams<Prefix>>, NoInfer<Group>>
+  readonly middleware?: Group & ValidateServerMiddleware<
+    ServerRouteContext<ServerRouteParams<Prefix>>,
+    NoInfer<Group>
+  >
   readonly routes: {
-    [Path in keyof Paths]: TypedServerRoutePath<Prefix, Group, Path & string, Paths[Path]>
+    readonly [Path in keyof Paths]: DeclaredServerRoutePath<
+      Prefix,
+      Group,
+      Path & string,
+      Paths[Path]
+    >
   }
 }
 
