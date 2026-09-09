@@ -988,6 +988,11 @@ const mutationFieldLabel = (field: string): string =>
     ? 'the configuration object'
     : `universal field "${field}"`
 
+const sentenceFieldLabel = (field: string): string => {
+  const label = mutationFieldLabel(field)
+  return label[0].toUpperCase() + label.slice(1)
+}
+
 const mutableBindingError = (filePath: string, field: string, binding?: string): Error =>
   projectionBoundaryError(
     filePath,
@@ -1004,7 +1009,7 @@ const unsupportedReferenceEscapeError = (
 ): Error =>
   projectionBoundaryError(
     filePath,
-    `${mutationFieldLabel(field)} escapes through ${context}; Core cannot prove that the server-only use preserves the browser value. ` +
+    `${sentenceFieldLabel(field)} escapes through ${context}; Core cannot prove that this ${mutationFieldLabel(field)} preserves the browser value. ` +
       'Keep the value in a dedicated static const or define it directly on defineServer() / defineApplication().'
   )
 
