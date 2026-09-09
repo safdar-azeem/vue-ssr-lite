@@ -116,16 +116,115 @@ describe('managed server routes over Node HTTP', () => {
   })
 
   it('decorates an immutable fetch response without losing its streamed body or cookies', async () => {
-    let port = 0
-    port = await start(defineServerRoutes({ routes: {
-      '/upstream': { GET: () => new Response('proxied', { status: 202, headers: { 'set-cookie': 'upstream=1' } }) },
-      '/proxy': { GET: () => fetch(`http://127.0.0.1:${port}/upstream`, { headers: { host: 'routes.test' } }) },
+    const upstream = await startUpstream((_request, response) => {
+      response.writeHead(202, { 'set-cookie': 'upstream=1' })
+      response.end('proxied')
+    })
+    const port = await start(defineServerRoutes({ routes: {
+      '/proxy': { GET: () => fetch(upstream) },
     } }))
     const result = await send(port, '/proxy')
     expect(result.status).toBe(202)
     expect(result.body).toBe('proxied')
     expect(result.headers['x-global']).toBe('yes')
     expect(result.headers['set-cookie']).toEqual(['upstream=1'])
+  })
+
+  it('responds while an unread upload is in progress and preserves keep-alive reuse', async () => {
+    const port = await start()
+    const { Agent, request: sendRequest } = await import('node:http')
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+
+    const readResponse = (path: string) => new Promise<{ localPort: number, status: number }>((resolve, reject) => {
+      const outgoing = sendRequest({
+        agent,
+        headers: { host: 'routes.test' },
+        hostname: '127.0.0.1',
+        path,
+        port,
+      }, (response) => {
+        const localPort = outgoing.socket?.localPort
+        response.resume()
+        response.once('end', () => {
+          if (localPort === undefined) {
+            reject(new Error('The request did not acquire a local port.'))
+            return
+          }
+          resolve({ localPort, status: response.statusCode ?? 0 })
+        })
+      })
+      outgoing.once('error', reject)
+      outgoing.end()
+    })
+
+    try {
+      const body = Buffer.alloc(512 * 1024, 'x')
+      const initialLength = 16 * 1024
+      let markResponseStarted!: () => void
+      const responseStarted = new Promise<void>((resolve) => {
+        markResponseStarted = resolve
+      })
+
+      let markUploadFinished!: () => void
+      let markUploadFailed!: (error: Error) => void
+      const uploadFinished = new Promise<void>((resolve, reject) => {
+        markUploadFinished = resolve
+        markUploadFailed = reject
+      })
+
+      let outgoingRequest!: ReturnType<typeof sendRequest>
+      const firstResponse = new Promise<{ localPort: number, status: number }>((resolve, reject) => {
+        outgoingRequest = sendRequest({
+          agent,
+          headers: {
+            'content-length': String(body.length),
+            host: 'routes.test',
+          },
+          hostname: '127.0.0.1',
+          method: 'POST',
+          path: '/early',
+          port,
+        }, (response) => {
+          const localPort = outgoingRequest.socket?.localPort
+          markResponseStarted()
+          response.resume()
+          response.once('end', () => {
+            if (localPort === undefined) {
+              reject(new Error('The streaming request did not acquire a local port.'))
+              return
+            }
+            resolve({ localPort, status: response.statusCode ?? 0 })
+          })
+        })
+        outgoingRequest.once('error', (error) => {
+          reject(error)
+          markUploadFailed(error)
+        })
+        outgoingRequest.once('finish', markUploadFinished)
+        outgoingRequest.write(body.subarray(0, initialLength))
+      })
+
+      let responseStartTimeout!: ReturnType<typeof setTimeout>
+      const responseBeganWhileUploadPaused = await Promise.race([
+        responseStarted.then(() => true),
+        new Promise<boolean>((resolve) => {
+          responseStartTimeout = setTimeout(() => resolve(false), 1_000)
+        }),
+      ])
+      clearTimeout(responseStartTimeout)
+
+      outgoingRequest.end(body.subarray(initialLength))
+      const [first] = await Promise.all([firstResponse, uploadFinished])
+      expect(responseBeganWhileUploadPaused).toBe(true)
+      expect(first.status).toBe(200)
+
+      const second = await readResponse('/api')
+      expect(second.status).toBe(200)
+      expect(second.localPort).toBe(first.localPort)
+    }
+    finally {
+      agent.destroy()
+    }
   })
 
   it.each([
