@@ -149,7 +149,7 @@ export const products = ${routes}({
 import { defineServerRoutes, defineServerMiddleware } from 'vue-ssr-lite'
 import { middleware } from 'universal-state'
 export const http = ${declaration}
-`)).rejects.toThrow(/universal field "middleware"/)
+`)).rejects.toThrow(/Universal field "middleware"/)
   })
 
   it.each([
