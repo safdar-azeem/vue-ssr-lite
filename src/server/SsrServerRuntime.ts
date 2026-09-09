@@ -680,10 +680,22 @@ export const createSsrManagedServer = async (
             }
           : undefined,
       })
+
+      // Transfer unread-body ownership back to Node before writing the
+      // response. Draining continues concurrently so an early response is not
+      // delayed by a slow upload, while this request remains alive until the
+      // transport has consumed the bytes required for keep-alive reuse.
+      // Begin consuming unread transport bytes before publishing an early response.
+      // The drain continues concurrently: response latency must not depend on the
+      // client finishing its upload, while request-scope ownership remains active
+      // until Node can safely reuse the connection.
+      const bodyDrained = bodySource.drain()
+
       if (result && !response.writableEnded) {
         if (result instanceof Response) await writeWebResponse(request, response, result, scope.signal)
         else sendResponse(request, response, result)
       }
+      await bodyDrained
     } catch (error) {
       if (error instanceof SsrRequestCancelledError) {
         if (!response.destroyed) response.destroy()
