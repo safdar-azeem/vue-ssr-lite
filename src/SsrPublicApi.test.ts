@@ -46,8 +46,6 @@ const SERVER_RUNTIME_EXPORTS = [
   'createSsrMemoryResponseCache',
   'createSsrSeoEndpoints',
   'defineServer',
-  'defineServerRoutes',
-  'defineServerMiddleware',
   'defineSitemap',
   'requireSsrEnum',
   'requireSsrEnv',
@@ -166,14 +164,6 @@ const CLIENT_TYPE_EXPORTS = [
 
 /** ADVANCED PUBLIC CONTRACT: server hosting, endpoint, cache, and SEO types. */
 const SERVER_TYPE_EXPORTS = [
-  'GlobalServerMiddleware',
-  'ServerMiddleware',
-  'ServerMiddlewareHandler',
-  'ServerMiddlewareBaseContext',
-  'ServerRouteContext',
-  'ServerRouteHandler',
-  'ServerRouteMethod',
-  'ServerRoutesDefinition',
   'ApplicationConfig',
   'RobotsConfig',
   'RobotsGroup',
