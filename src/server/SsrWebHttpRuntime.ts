@@ -19,6 +19,7 @@ import {
 export const createSsrRequestBodySource = (incoming: IncomingMessage, signal: AbortSignal): {
   openBody: (() => ReadableStream<Uint8Array>) | undefined
   release: () => void
+  drain: () => Promise<void>
 } => {
   let opened = false
   let release = () => {}
@@ -75,6 +76,27 @@ export const createSsrRequestBodySource = (incoming: IncomingMessage, signal: Ab
       return body
     },
     release: () => release(),
+    drain: () => {
+      release()
+      if (incoming.readableEnded || incoming.destroyed || signal.aborted) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        const finish = () => {
+          incoming.off('end', finish)
+          incoming.off('aborted', finish)
+          incoming.off('error', finish)
+          incoming.off('close', finish)
+          signal.removeEventListener('abort', finish)
+          resolve()
+        }
+        incoming.once('end', finish)
+        incoming.once('aborted', finish)
+        incoming.once('error', finish)
+        incoming.once('close', finish)
+        signal.addEventListener('abort', finish, { once: true })
+        incoming.resume()
+        if (incoming.readableEnded || incoming.destroyed || signal.aborted) finish()
+      })
+    },
   }
 }
 
