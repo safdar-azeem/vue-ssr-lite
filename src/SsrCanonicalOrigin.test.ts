@@ -53,7 +53,7 @@ describe('canonical origin and path', () => {
     ).toBe('https://tenant.example.com')
   })
 
-  it('rejects localhost in production', () => {
+  it('rejects localhost in production without transport provenance', () => {
     expect(() =>
       resolveCanonicalOrigin({
         production: true,
@@ -107,7 +107,7 @@ describe('canonical origin and path', () => {
     ).toThrow(PRODUCTION_HTTP_ORIGIN_ERROR)
   })
 
-  it('rejects localhost in production even over https', () => {
+  it('rejects untrusted localhost in production even over https', () => {
     expect(() =>
       assertPublicProductionOrigin('https://localhost', 'seo.siteUrl')
     ).toThrow(/localhost/)
@@ -137,5 +137,30 @@ describe('canonical origin and path', () => {
         allowHttpOrigin: true,
       })
     ).toBe('http://example.com')
+  })
+
+  it.each(['http://localhost:4173', 'http://127.0.0.1:4173', 'http://[::1]:4173', 'https://localhost'])(
+    'allows trusted local production at %s without consumer configuration', (origin) => {
+      expect(resolveCanonicalOrigin({
+        production: true, requireProductionOrigin: true, fallbackOrigin: origin, trustedLocalConnection: true,
+      })).toBe(origin)
+      expect(() => assertPublicProductionOrigin(origin)).toThrow(/localhost/)
+    }
+  )
+
+  it('never extends transport permission to public HTTP or unspecified bind addresses', () => {
+    for (const origin of ['http://example.com', 'http://localhost.example.com', 'http://0.0.0.0', 'http://[::]']) {
+      expect(() => resolveCanonicalOrigin({
+        production: true, requireProductionOrigin: true, fallbackOrigin: origin, trustedLocalConnection: true,
+      })).toThrow()
+    }
+  })
+
+  it('retains the explicit HTTP exception independently of transport provenance', () => {
+    for (const origin of ['http://example.com', 'http://localhost:4173', 'http://0.0.0.0:4173']) {
+      expect(resolveCanonicalOrigin({
+        production: true, requireProductionOrigin: true, fallbackOrigin: origin, allowHttpOrigin: true,
+      })).toBe(origin)
+    }
   })
 })
