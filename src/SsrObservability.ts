@@ -2,7 +2,7 @@ import type {
   SsrLogger,
   SsrRenderMetrics,
 } from './SsrRuntimeTypes'
-import { readSsrProductionFailure } from './SsrProductionError'
+import { readSsrInitializationPhase, readSsrProductionFailure } from './SsrProductionError'
 
 type SsrLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -55,12 +55,14 @@ const diagnosticDetails = (details?: Record<string, unknown>): Record<string, un
     .replace(/[a-f0-9]{32,}/gi, '[redacted]')
     .replace(/[^/]{80,}/g, '[redacted]').slice(0, 512)
   const productionFailure = readSsrProductionFailure(details?.error)
+  const initializationPhase = readSsrInitializationPhase(details?.error)
   return {
     requestId: safeIdentifier(details?.requestId),
     applicationId: safeIdentifier(details?.applicationId ?? details?.entryId),
     ...(details?.entryId === undefined ? {} : { entryId: safeIdentifier(details.entryId) }),
     pathname: pathname.startsWith('/') && !pathname.startsWith('//') ? pathname : '/',
     ...(details?.error === undefined ? {} : { error: describeSsrFailure(details.error), errorType: failureType(details.error) }),
+    ...(initializationPhase ? { phase: initializationPhase } : {}),
     ...(productionFailure ? { code: productionFailure.code, artifact: productionFailure.artifact, reason: productionFailure.reason } : {}),
   }
 }
