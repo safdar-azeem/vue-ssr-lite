@@ -36,6 +36,8 @@ export interface SeoEndpointOptions {
   siteSeo?: SiteSeoConfig
   siteRobots?: SiteRobotsConfig
   root: string
+  /** Core supplies the compiled client directory in production. */
+  publicDirectory?: string
   sitemapProvider?: SitemapProvider
   defaultRender?: SsrRenderMode
   resolveSiteUrl: (request: SsrHttpRequest<any>) => string | Promise<string>
@@ -53,8 +55,8 @@ export class SeoProviderFailure extends Error {
   }
 }
 
-const physicalFileExists = async (root: string, fileName: string): Promise<boolean> => {
-  try { await access(resolve(root, 'public', fileName)); return true } catch { return false }
+const physicalFileExists = async (directory: string, fileName: string): Promise<boolean> => {
+  try { await access(resolve(directory, fileName)); return true } catch { return false }
 }
 
 const ownedEndpoint = (
@@ -221,7 +223,8 @@ export const createSeoEndpoints = async (
   const endpoints: SsrEndpointDefinition<any>[] = []
   const sitemapId = `${options.applicationId}-sitemap`
   const robotsId = `${options.applicationId}-robots`
-  const hasPhysicalSitemap = await physicalFileExists(options.root, 'sitemap.xml')
+  const publicDirectory = options.publicDirectory ?? resolve(options.root, 'public')
+  const hasPhysicalSitemap = await physicalFileExists(publicDirectory, 'sitemap.xml')
 
   if (
     !privateMode &&
@@ -273,7 +276,7 @@ export const createSeoEndpoints = async (
   }
 
   if (
-    (privateMode || !(await physicalFileExists(options.root, 'robots.txt'))) &&
+    (privateMode || !(await physicalFileExists(publicDirectory, 'robots.txt'))) &&
     !options.serverRouteOwnedPaths?.includes('/robots.txt') &&
     !ownedEndpoint(
       [...options.existingEndpoints, ...endpoints],
