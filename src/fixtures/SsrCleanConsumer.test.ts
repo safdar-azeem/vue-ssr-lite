@@ -3,16 +3,17 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import vue from '@vitejs/plugin-vue'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { build, createServer, type ViteDevServer } from 'vite'
 import {
@@ -32,6 +33,8 @@ import { vueSsrLite } from '../vite/SsrVitePlugin'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { defineServer } from '../SsrConfigRuntime'
 import { withSsrShells } from '../SsrTestFixtures'
+import { createSsrProductionViteBuildOptions } from '../cli/SsrCliBuildOptions'
+import type { SsrApplicationRenderer } from '../SsrRenderRuntime'
 import {
   createSsrManagedServer,
   type SsrManagedServer,
@@ -83,6 +86,7 @@ afterEach(async () => {
     await rm(coldConsumerRoot, { recursive: true, force: true })
     coldConsumerRoot = ''
   }
+  vi.unstubAllEnvs()
 })
 
 describe('zero-config clean consumer fixture', () => {
@@ -507,6 +511,128 @@ describe('zero-config clean consumer fixture', () => {
     expect(lazy).toContain('AsyncCard.vue?vue')
     expect(lazy).toContain('data-vue-ssr-lite-rendered-style="app"')
   })
+
+  it('serves real client + SSR builds with tree-shaken SFC facades and lazy route assets', async () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('PUBLIC_URL', '')
+    vi.stubEnv('HOST', '')
+    vi.stubEnv('PORT', '')
+    // Match the CLI's canonical root, including macOS /var -> /private/var.
+    // Otherwise Vite resolves index.html outside the symlink-spelled root.
+    coldConsumerRoot = await realpath(
+      await mkdtemp(join(tmpdir(), 'vue-ssr-lite-production-consumer-'))
+    )
+    await cp(fixtureRoot, coldConsumerRoot, { recursive: true })
+    const modules = join(coldConsumerRoot, 'node_modules')
+    await mkdir(modules, { recursive: true })
+    await symlink(packageRoot, join(modules, 'vue-ssr-lite'))
+    await symlink(join(packageRoot, 'node_modules/vue'), join(modules, 'vue'))
+    await symlink(join(packageRoot, 'node_modules/vue-router'), join(modules, 'vue-router'))
+    await writeFile(join(coldConsumerRoot, 'package.json'), '{"type":"module"}')
+    await writeFile(join(coldConsumerRoot, 'server.ts'),
+      "import { defineServer } from 'vue-ssr-lite'\nexport default defineServer({ render: 'ssr' })\n")
+    // A styleless TS setup SFC reproduces Vite's removed facade: SSR registers
+    // src/App.vue, while the client retains only its ?vue&type=script module.
+    await writeFile(join(coldConsumerRoot, 'src/App.vue'), `<script setup lang="ts">
+import { RouterView } from 'vue-router'
+</script>
+<template><main class="clean-app"><RouterView /></main></template>`)
+    await writeFile(join(coldConsumerRoot, 'src/ScriptLazy.vue'), `<script setup lang="ts">
+import './script-lazy.css'
+const title = 'script-only-lazy'
+</script>
+<template><article>{{ title }}</article></template>`)
+    await writeFile(join(coldConsumerRoot, 'src/script-lazy.css'), 'article { outline: 1px solid purple; }')
+    const mainPath = join(coldConsumerRoot, 'src/main.ts')
+    await writeFile(mainPath, (await readFile(mainPath, 'utf8'))
+      .replace('../../../src/index', 'vue-ssr-lite')
+      .replace('const routes = [', "const routes = [\n  { path: '/script-lazy', component: () => import('./ScriptLazy.vue') },"))
+    const fixtureBuildConfig = () => ({
+      configFile: false as const,
+      plugins: [vueSsrLite(), vue()],
+      logLevel: 'silent' as const,
+    })
+    // The CLI's two production builds, including the real virtual SSR entry.
+    // No development module runner or hand-written manifest participates.
+    await build({ root: coldConsumerRoot, ...fixtureBuildConfig() })
+    await build({ ...createSsrProductionViteBuildOptions(coldConsumerRoot), ...fixtureBuildConfig() })
+    const clientRoot = join(coldConsumerRoot, 'dist/client')
+    const manifest = JSON.parse(await readFile(join(clientRoot, '.vite/ssr-manifest.json'), 'utf8')) as Record<string, string[]>
+    expect(manifest['src/App.vue']).toBeUndefined()
+    expect(manifest['src/App.vue?vue&type=script&setup=true&lang.ts']).toBeDefined()
+    const scriptAssets = manifest['src/ScriptLazy.vue?vue&type=script&setup=true&lang.ts']!
+    expect(scriptAssets.some((asset) => asset.endsWith('.css'))).toBe(true)
+    expect(scriptAssets.some((asset) => asset.endsWith('.js'))).toBe(true)
+    const lazyAssets = manifest['src/LazyPage.vue']!
+    const cardAssets = manifest['src/AsyncCard.vue']!
+    expect(lazyAssets.some((asset) => asset.endsWith('.css'))).toBe(true)
+    expect(cardAssets.some((asset) => asset.endsWith('.css'))).toBe(true)
+    const entry = pathToFileURL(join(coldConsumerRoot, 'dist/server/SsrRuntime.js')).href
+    const runtime = await import(entry) as { default: () => Promise<Record<string, any>> }
+    const config = await runtime.default()
+    expect(config.__vueSsrLiteModuleRoot).toBe(coldConsumerRoot.replaceAll('\\', '/'))
+    const renderedModules = new Map<string, readonly string[]>()
+    const render: SsrApplicationRenderer = config.__vueSsrLiteRenderApplication
+    const errors = vi.fn()
+    const productionOptions = {
+      production: true, root: coldConsumerRoot,
+      loadRuntime: async () => ({ ...config,
+        // Ephemeral port and observation only; origin and SSR options remain
+        // exactly those of the unchanged defineServer({ render: 'ssr' }).
+        server: { ...config.server, host: '127.0.0.1', port: 0, logger: { error: errors } },
+        __vueSsrLiteRenderApplication: (async (application, request, options) => {
+          const result = await render(application, request, options)
+          renderedModules.set(new URL(request.url).pathname, [...result.renderedModules])
+          return result
+        }) satisfies SsrApplicationRenderer,
+      }),
+    }
+    managedServer = await createSsrManagedServer(productionOptions)
+    await managedServer.listen()
+    const origin = `http://127.0.0.1:${managedServer.address().port}`
+    for (const [path, text] of [['/', 'clean-consumer'], ['/lazy', 'lazy-consumer'], ['/script-lazy', 'script-only-lazy']] as const) {
+      const response = await fetch(`${origin}${path}`, { headers: { accept: 'text/html' } })
+      const html = await response.text()
+      expect(response.status, html).toBe(200)
+      expect(html).toContain(text)
+      expect(html).not.toContain('Application unavailable')
+      expect(renderedModules.get(path)).toContain('src/App.vue')
+      if (path === '/') {
+        expect(renderedModules.get(path)).toContain('src/HomePage.vue')
+        for (const file of [...lazyAssets, ...scriptAssets].filter((asset) => asset.endsWith('.css'))) expect(html).not.toContain(file)
+      } else {
+        const expected = path === '/lazy' ? [...lazyAssets, ...cardAssets] : scriptAssets
+        expect(renderedModules.get(path)).toContain(path === '/lazy' ? 'src/LazyPage.vue' : 'src/ScriptLazy.vue')
+        for (const file of expected.filter((asset) => /\.(?:css|js)$/.test(asset))) {
+          expect(html).toContain(`href="${file}"`)
+          const asset = await fetch(`${origin}${file}`)
+          expect(asset.status).toBe(200)
+          expect(await asset.text()).not.toBe('')
+        }
+      }
+    }
+    expect(errors).not.toHaveBeenCalled()
+
+    // Missing authoritative entries remain fatal after successful startup.
+    // Exercise the actual post-render boundary, not a simulated thrown error.
+    await managedServer.close()
+    for (const key of Object.keys(manifest)) {
+      if (key === 'src/App.vue' || key.startsWith('src/App.vue?')) delete manifest[key]
+    }
+    await writeFile(join(clientRoot, '.vite/ssr-manifest.json'), JSON.stringify(manifest))
+    managedServer = await createSsrManagedServer(productionOptions)
+    await managedServer.listen()
+    const failed = await fetch(`http://127.0.0.1:${managedServer.address().port}/`, { headers: { accept: 'text/html' } })
+    expect(failed.status).toBe(500)
+    const failedHtml = await failed.text()
+    expect(failedHtml).toContain('Application unavailable')
+    expect(failedHtml).not.toMatch(/src\/App|manifest|module-not-in-manifest|SsrProductionArtifactError/)
+    expect(errors).toHaveBeenCalledWith('ssr.request.failed', expect.objectContaining({
+      artifact: 'rendered-assets', reason: 'module-not-in-manifest',
+      code: 'rendered-assets.module-not-in-manifest',
+    }))
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(coldConsumerRoot)
+  }, 120_000)
 
   it('bundles the generated browser entry as the production HTML entry', async () => {
     productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-client-'))
