@@ -7,6 +7,11 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Examples consume the repository through file:../... Yarn v1 embeds the
+# linked package version in generated lockfiles, which would duplicate the
+# manually maintained root package version.
+examples/*/yarn.lock
+
 node_modules
 dist
 dist-ssr
