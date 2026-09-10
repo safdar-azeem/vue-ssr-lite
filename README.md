@@ -1204,7 +1204,14 @@ dist/
     └── SsrRuntime.js
 ```
 
-Production public origins still require HTTPS by default. Set `seo.allowHttpOrigin` only for an intentional exception.
+Local production smoke testing works automatically over a direct Node loopback connection at `http://localhost:4173`, `http://127.0.0.1:4173`, or `http://[::1]:4173` when listening on IPv6. No configuration change or `PUBLIC_URL` is required.
+Public production origins still require HTTPS by default. The existing `seo.allowHttpOrigin` option remains available for intentional public or unusual HTTP configurations.
+
+On **Vercel**, deploy as a normal Vite project with the existing build command. `vue-ssr-lite` detects the build environment and generates the SSR runtime automatically; no adapter configuration is required.
+
+**Netlify is not supported in this version.** Detected Netlify builds stop because its current framework integration cannot automatically select a safe static publish directory while preserving the portable server output. Use Vercel or Node hosting; never publish the complete `dist` directory as a static site.
+
+Production request failures keep the browser error generic and emit safe structured operator diagnostics, using the configured logger when present. Asset failures identify the artifact and reason, distinguishing missing or malformed build files from rendered modules that do not match the SSR manifest.
 
 # CLI
 
@@ -1361,7 +1368,7 @@ Install the plugin inside the `main.ts` initializer so Core creates it per Vue a
 
 ## Production origin rejected
 
-Use an HTTPS request origin or configure an explicit HTTPS `PUBLIC_URL` / `seo.siteUrl`. HTTP requires the intentional `seo.allowHttpOrigin` exception.
+Direct Node loopback requests with a local Host work automatically. Remote or proxied requests require an HTTPS public origin by default; use an HTTPS request origin or configure an explicit HTTPS `PUBLIC_URL` / `seo.siteUrl`. Intentional public or unusual HTTP configurations can use the existing `seo.allowHttpOrigin` exception.
 
 ## Wrong host/protocol behind a proxy
 
