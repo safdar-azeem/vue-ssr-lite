@@ -7,6 +7,8 @@ import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
+import { createDeploymentBuild } from '../deployment/DeploymentRuntime'
+import { safeSsrLog } from '../SsrObservability'
 
 const runServer = async (options: SsrCliOptions, production: boolean) => {
   const startupTimings = production ? undefined : createSsrPhaseTimings()
@@ -57,9 +59,11 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
 }
 
 const runBuild = async (options: SsrCliOptions) => {
+  const deployment = createDeploymentBuild(options.root)
   const { build: viteBuild } = await import('vite')
-  await viteBuild({ root: options.root })
+  await viteBuild({ root: options.root, plugins: deployment.plugins })
   await viteBuild(createSsrProductionViteBuildOptions(options.root))
+  await deployment.complete(options.serverOutput)
 }
 
 const main = async () => {
@@ -69,6 +73,10 @@ const main = async () => {
 }
 
 main().catch((error) => {
-  console.error('fatal error', error)
+  if (process.argv[2] === 'start') {
+    safeSsrLog(undefined, 'error', 'ssr.start.failed', { requestId: 'startup', error })
+  } else {
+    console.error('fatal error', error)
+  }
   process.exitCode = 1
 })
