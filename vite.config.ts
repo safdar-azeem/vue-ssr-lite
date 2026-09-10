@@ -33,6 +33,7 @@ export default defineConfig({
           repositoryRoot,
           'src/SsrRenderRuntime.ts'
         ),
+        'internal-vercel': resolve(repositoryRoot, 'src/deployment/vercel/VercelRuntime.ts'),
         server: resolve(repositoryRoot, 'src/server.ts'),
         vite: resolve(repositoryRoot, 'src/vite.ts'),
         cli: resolve(repositoryRoot, 'src/cli/SsrCli.ts'),
@@ -44,6 +45,7 @@ export default defineConfig({
       external: [
         /^node:/,
         'esbuild',
+        '@vercel/nft',
         'es-module-lexer',
         'vite',
         'rollup',
