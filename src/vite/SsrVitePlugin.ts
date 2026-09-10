@@ -4,6 +4,8 @@ import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Plugin, ResolveFn, Rollup, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
+import { assertSupportedDeploymentEnvironment, resolveDeploymentEnvironment } from '../deployment/DeploymentEnvironment'
+import { createDeploymentMetadata, DEPLOYMENT_METADATA_PATH } from '../deployment/DeploymentMetadata'
 import {
   extractSsrViteEntries,
   generateSsrClientModule,
@@ -343,6 +345,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       return { ...outputOptions, assetFileNames: trackedAssetFileNames }
     },
     async config(userConfig, environment) {
+      if (environment.command === 'build') {
+        assertSupportedDeploymentEnvironment(resolveDeploymentEnvironment(process.env))
+      }
       root = resolve(options.root || userConfig.root || process.cwd())
       if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
       const resolved = await ensureEntries()
@@ -501,6 +506,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         const resolved = await ensureEntries()
         const absoluteConfig =
           configPath ?? (await resolveSsrConfigPath(root, options.config))
+        // Capture the same resolved root used by plugin-vue's SSR registrations
+        // and Vite's client SSR manifest. Keep it private in the server runtime;
+        // deployment relocation must not change module identity resolution.
         return generateSsrRuntimeModule(
           root,
           absoluteConfig,
@@ -597,6 +605,17 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         fileName: SSR_PRODUCTION_ASSET_METADATA_PATH,
         source: serializeSsrProductionAssetMetadata(immutable),
       })
+      if (resolveDeploymentEnvironment(process.env) === 'vercel' && loadedConfig) {
+        this.emitFile({
+          type: 'asset',
+          fileName: DEPLOYMENT_METADATA_PATH,
+          source: JSON.stringify(createDeploymentMetadata(
+            (loadedConfig as { __vueSsrLiteNormalized?: ReturnType<typeof normalizeSsrConfig> }).__vueSsrLiteNormalized ??
+              normalizeSsrConfig(loadedConfig, { root, development: false }),
+            configuredBuildBase ?? resolvedBase
+          )),
+        })
+      }
     },
     transformIndexHtml: {
       order: 'pre',
