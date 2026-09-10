@@ -20,6 +20,7 @@ import { serializeSsrState } from '../SsrSerialization'
 import type { SsrRenderedApplicationAsset } from '../SsrApplicationAssetRuntime'
 import type { SsrViteManifest } from '../SsrRenderedAssetRuntime'
 import { resolveRenderedApplicationAssets } from '../SsrRenderedAssetRuntime'
+import { attachSsrTrustedLocalOrigin } from '../SsrRequestOrigin'
 import {
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
@@ -148,6 +149,8 @@ export interface SsrNormalizedRequest {
   readonly url: string
   readonly headers: SsrHeaders
   readonly protocol: 'http' | 'https'
+  /** Actual direct loopback Node peer and local Host; absent for provider requests. */
+  readonly trustedLocalConnection?: boolean
   /** Lazy transport-owned source, absent for GET/HEAD and opened once after host selection. */
   readonly openBody?: () => ReadableStream<Uint8Array>
 }
@@ -461,8 +464,12 @@ export const handleSsrRequest = async (
             entry.application?.seo
           ),
           allowHttpOrigin: entry.application?.seo?.allowHttpOrigin,
+          trustedLocalConnection: request.trustedLocalConnection,
         })
       )
+      if (request.trustedLocalConnection) {
+        attachSsrTrustedLocalOrigin(renderRequest, renderRequest.siteOrigin!)
+      }
       const needsSiteSeo =
         isHtmlNavigation(request, pathname) ||
         pathname === '/robots.txt' ||
@@ -674,6 +681,7 @@ export const handleSsrRequest = async (
             moduleIds: rendered.renderedModules,
             base: runtime.viteBase,
             manifest: runtime.ssrManifest!,
+            root: definition.moduleRoot ?? serverOptions.root,
           })
         : await scope.run(() =>
             runtime.resolveDevelopmentAssets(application.id, rendered.renderedModules)
@@ -784,7 +792,7 @@ export const handleSsrRequest = async (
       requestId: request.requestId,
       entryId: selectedEntryId,
       pathname,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error,
     })
     let timeout =
       error instanceof SsrRequestTimeoutError ||
@@ -828,8 +836,10 @@ export const handleSsrRequest = async (
           statusCode = 504
         }
         safeSsrLog(definition.server.logger, 'error', 'ssr.error-renderer.failed', {
+          requestId: request.requestId,
           entryId: selectedEntryId,
-          error: renderError instanceof Error ? renderError.message : 'Unknown error renderer failure',
+          pathname,
+          error: renderError,
         })
       }
     }
