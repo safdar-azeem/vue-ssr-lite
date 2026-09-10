@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
+import type { SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
 import { createSsrCookieFilter, createSsrHostResolver } from './SsrHostRuntime'
 
 const compileMetadata = (definition: SsrCompiledConfig) => ({
