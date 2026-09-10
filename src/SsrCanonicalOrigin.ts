@@ -1,7 +1,15 @@
 export const PRODUCTION_ORIGIN_ERROR =
   '[vue-ssr-lite] A valid site origin is required for this request.'
 
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'])
+
+/** Accepts a normalized hostname, never a header, URL or DNS lookup result. */
+export const isSsrLoopbackHostname = (hostname: string): boolean => {
+  const host = hostname.replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '::1' ||
+    /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/.test(host) ||
+    /^::ffff:7f[\da-f]{2}:[\da-f]{1,4}$/.test(host)
+}
 
 export const isSsrProduction = (): boolean =>
   typeof process !== 'undefined' && process.env.NODE_ENV === 'production'
@@ -34,21 +42,25 @@ export const normalizeSiteOrigin = (
 export const PRODUCTION_HTTP_ORIGIN_ERROR = `[vue-ssr-lite] Public production origins must use https://.
 
 Use PUBLIC_URL=https://example.com
-Or set seo.allowHttpOrigin = true for an intentional local/unusual exception.`
+Or set seo.allowHttpOrigin = true for an intentional public/unusual HTTP exception.`
 
 export const assertPublicProductionOrigin = (
   origin: string,
   label = 'site origin',
-  options: { allowHttpOrigin?: boolean } = {}
+  options: { allowHttpOrigin?: boolean; trustedLocalConnection?: boolean } = {}
 ): string => {
   const normalized = normalizeSiteOrigin(origin, label)
   const parsed = new URL(normalized)
-  if (LOCAL_HOSTS.has(parsed.hostname)) {
+  const loopback = isSsrLoopbackHostname(parsed.hostname)
+  const trustedLocal = options.trustedLocalConnection === true && loopback
+  if ((LOCAL_HOSTS.has(parsed.hostname) || loopback) && !options.allowHttpOrigin && !trustedLocal) {
     throw new Error(
-      `[vue-ssr-lite] ${label} cannot be a localhost origin in production.`
+      `[vue-ssr-lite] ${label} cannot be a localhost origin in production. ` +
+        'Automatic local smoke testing requires a direct loopback Node connection. ' +
+        'Use an HTTPS public origin for remote or proxied requests.'
     )
   }
-  if (parsed.protocol !== 'https:' && !options.allowHttpOrigin) {
+  if (parsed.protocol !== 'https:' && !options.allowHttpOrigin && !trustedLocal) {
     throw new Error(PRODUCTION_HTTP_ORIGIN_ERROR)
   }
   return normalized
@@ -61,6 +73,8 @@ export interface ResolveCanonicalOriginOptions {
   production: boolean
   requireProductionOrigin: boolean
   allowHttpOrigin?: boolean
+  /** Internal transport provenance; never inferred from request headers. */
+  trustedLocalConnection?: boolean
 }
 
 export const resolveCanonicalOrigin = (
@@ -75,6 +89,7 @@ export const resolveCanonicalOrigin = (
     const origin = options.production
       ? assertPublicProductionOrigin(candidate, 'site origin', {
           allowHttpOrigin: options.allowHttpOrigin,
+          trustedLocalConnection: options.trustedLocalConnection,
         })
       : normalizeSiteOrigin(candidate)
     return origin
@@ -83,6 +98,7 @@ export const resolveCanonicalOrigin = (
     if (!options.fallbackOrigin) throw new Error(PRODUCTION_ORIGIN_ERROR)
     return assertPublicProductionOrigin(options.fallbackOrigin, 'site origin', {
       allowHttpOrigin: options.allowHttpOrigin,
+      trustedLocalConnection: options.trustedLocalConnection,
     })
   }
   if (options.fallbackOrigin) {
