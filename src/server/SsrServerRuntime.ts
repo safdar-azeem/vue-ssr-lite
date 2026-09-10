@@ -11,6 +11,8 @@ import { resolve } from 'node:path'
 import type { ViteDevServer } from 'vite'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrConfigCompileRuntime'
 import { safeSsrLog } from '../SsrObservability'
+import { readSsrProductionFailure, SsrProductionArtifactError } from '../SsrProductionError'
+import { isSsrTrustedLocalConnection } from './SsrLocalConnectionRuntime'
 import { createSsrPhaseTimings, readSsrPhaseTimings, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import {
   assertConfiguredProductionSeoOrigin,
@@ -48,6 +50,8 @@ import {
   handleSsrRequest,
   SsrRequestCancelledError,
   type SsrNormalizedRequest,
+  type SsrRequestScope,
+  type SsrRequestHandlerResult,
 } from './SsrRequestHandler'
 import {
   createSsrAdmissionController,
@@ -131,6 +135,17 @@ const resolveRuntime = async (
     }
   }
   return definition
+}
+
+const readProductionArtifact = async (
+  filename: string,
+  artifact: 'client-manifest' | 'asset-cache-metadata' | 'ssr-manifest'
+): Promise<string> => {
+  try {
+    return await readFile(filename, 'utf8')
+  } catch (error) {
+    throw new SsrProductionArtifactError(`${artifact}.${isExpectedUnavailableAssetError(error) ? 'missing' : 'read-failed'}`)
+  }
 }
 
 const endResponse = (
@@ -252,9 +267,10 @@ const waitForStartedViteOptimizerWork = async (vite: ViteDevServer): Promise<voi
   if (processingResult.rejected) throw processingResult.reason
 }
 
-export const createSsrManagedServer = async (
+/** Internal shared infrastructure. Creating it never creates a Node HTTP server. */
+export const createSsrRequestRuntime = async (
   options: SsrManagedServerOptions
-): Promise<SsrManagedServer> => {
+) => {
   // The CLI starts this collector before creating Vite; programmatic hosts
   // measure their managed-server startup from this boundary instead.
   const inheritedStartupTimings = !options.production ? readSsrPhaseTimings(options) : undefined
@@ -348,8 +364,6 @@ export const createSsrManagedServer = async (
       }
     },
   })
-  const host = resolveManagedServerHost(initialServerOptions.host)
-  const port = resolveManagedServerPort(initialServerOptions.port)
   const clientRoot = resolve(initialServerOptions.root, initialServerOptions.clientOutDir)
   const hasEnabledSsrApplications =
     options.production &&
@@ -368,42 +382,29 @@ export const createSsrManagedServer = async (
     let revisionedAssets: ReadonlySet<string> = new Set()
     try {
       manifestAssets = parseSsrClientAssetManifest(
-        await readFile(clientManifestPath, 'utf8'),
+        await readProductionArtifact(clientManifestPath, 'client-manifest'),
         clientManifestPath
       )
     } catch (error) {
-      if (!isExpectedUnavailableAssetError(error)) {
-        throw new Error(
-          `vue-ssr-lite could not load Vite's client manifest at ${clientManifestPath}. ${error instanceof Error ? error.message : String(error)}`
-        )
-      }
+      if (readSsrProductionFailure(error)?.code !== 'client-manifest.missing') throw error
       // A manually assembled client directory remains servable, but without
       // authoritative build metadata every file gets conservative caching.
+      safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
     }
     try {
       revisionedAssets = parseSsrProductionAssetMetadata(
-        await readFile(assetMetadataPath, 'utf8'),
+        await readProductionArtifact(assetMetadataPath, 'asset-cache-metadata'),
         assetMetadataPath
       )
     } catch (error) {
-      if (!isExpectedUnavailableAssetError(error)) {
-        throw new Error(
-          `vue-ssr-lite could not load asset cache metadata at ${assetMetadataPath}. ${error instanceof Error ? error.message : String(error)}`
-        )
-      }
+      if (readSsrProductionFailure(error)?.code !== 'asset-cache-metadata.missing') throw error
+      safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
     }
     immutableAssetPaths = resolveSsrImmutableAssetPaths(manifestAssets, revisionedAssets)
   }
   if (hasEnabledSsrApplications) {
     const manifestPath = resolve(clientRoot, '.vite/ssr-manifest.json')
-    let source: string
-    try {
-      source = await readFile(manifestPath, 'utf8')
-    } catch (error) {
-      throw new Error(
-        `vue-ssr-lite requires Vite's generated SSR manifest for production SSR applications at ${manifestPath}. Ensure build.ssrManifest is enabled. ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+    const source = await readProductionArtifact(manifestPath, 'ssr-manifest')
     ssrManifest = parseSsrViteManifest(source, manifestPath)
   }
 
@@ -418,7 +419,7 @@ export const createSsrManagedServer = async (
   const productionTemplatePaths = new Map<string, string>()
   const templatePaths = new WeakMap<SsrCompiledConfig['applications'][number], string>()
   const resolveProductionAssets = ssrManifest
-    ? createSsrRenderedAssetResolver(ssrManifest, viteBase)
+    ? createSsrRenderedAssetResolver(ssrManifest, viteBase, initialRuntime.moduleRoot)
     : undefined
 
   // Reuse compiled code/metadata until Vite invalidates its dependency graph.
@@ -602,248 +603,259 @@ export const createSsrManagedServer = async (
     }))
   }
 
-  const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
-    activeRequestCount += 1
-    const startedAt = Date.now()
-    const requestId =
-      String(request.headers['x-request-id'] || '').trim() ||
-      startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
-    const scope = createSsrRequestScope(lastDefinition.server.requestTimeoutMs)
-    const bodySource = createSsrRequestBodySource(request, scope.signal)
-    const cancelDisconnectedRequest = () => scope.cancel()
-    const cancelClosedResponse = () => {
-      if (!response.writableEnded) scope.cancel()
-    }
-    const closeIdleAfterResponse = () => {
-      response.off('finish', closeIdleAfterResponse)
-      response.off('close', closeIdleAfterResponse)
-      if (shuttingDown) nodeServer.closeIdleConnections?.()
-    }
-    request.once('aborted', cancelDisconnectedRequest)
-    response.once('close', cancelClosedResponse)
-    response.once('finish', closeIdleAfterResponse)
-    response.once('close', closeIdleAfterResponse)
-
-    try {
-      const normalizedRequest: SsrNormalizedRequest = Object.freeze({
-        requestId,
-        startedAt,
-        method: request.method || 'GET',
-        openBody: bodySource.openBody,
-        url: request.url || '/',
-        headers: snapshotRequestHeaders(request),
-        protocol: (request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
-      })
-      const result = await handleSsrRequest(normalizedRequest, {
-        production: options.production,
-        scope,
-        loadDefinition,
-        fallbackDefinition: () => lastDefinition,
-        shuttingDown: () => shuttingDown,
-        assertReady,
-        ssrAdmission,
+  const execute = (
+    request: SsrNormalizedRequest,
+    scope: SsrRequestScope,
+    serveViteRequest?: () => Promise<boolean>
+  ): Promise<SsrRequestHandlerResult> => handleSsrRequest(request, {
+    production: options.production,
+    scope,
+    loadDefinition,
+    fallbackDefinition: () => lastDefinition,
+    shuttingDown: () => shuttingDown,
+    assertReady,
+    ssrAdmission,
+    viteBase,
+    ssrManifest,
+    takeRenderTimingDetails: () => ({
+      lifecycle: timedSsrRequestCount++ === 0 ? 'first-ssr' : 'warm-ssr',
+      readyToRequestMs: readyAt === undefined ? undefined : request.startedAt - readyAt,
+    }),
+    resolveProductionAssets,
+    loadTemplate,
+    loadPreparedSsrTemplate,
+    resolveDevelopmentAssets: (applicationId, modules) =>
+      options.vite
+        ? resolveRenderedStyleDependencies(options.vite, applicationId, modules)
+        : Promise.resolve([]),
+    isPrivateProductionAssetPath: (pathname) =>
+      isSsrPrivateProductionAssetPath(pathname, viteBase),
+    resolveProductionAssetResponse: (pathname, protectedTemplates, headers, method, signal) =>
+      resolveProductionAssetResponse({
+        clientRoot,
+        pathname,
+        protectedTemplates,
         viteBase,
-        ssrManifest,
-        takeRenderTimingDetails: () => ({
-          lifecycle: timedSsrRequestCount++ === 0 ? 'first-ssr' : 'warm-ssr',
-          readyToRequestMs: readyAt === undefined ? undefined : startedAt - readyAt,
-        }),
-        resolveProductionAssets,
-        loadTemplate,
-        loadPreparedSsrTemplate,
-        resolveDevelopmentAssets: (applicationId, modules) =>
-          options.vite
-            ? resolveRenderedStyleDependencies(options.vite!, applicationId, modules)
-            : Promise.resolve([]),
-        isPrivateProductionAssetPath: (pathname) =>
-          isSsrPrivateProductionAssetPath(pathname, viteBase),
-        resolveProductionAssetResponse: (pathname, protectedTemplates, headers, method, signal) =>
-          resolveProductionAssetResponse({
-            clientRoot,
-            pathname,
-            protectedTemplates,
-            viteBase,
-            immutableAssetPaths,
-            signal,
-          }, headers, method, signal),
-        serveViteRequest: options.vite
-          ? async () => {
-              const originalUrl = request.url
-              try {
-                await runViteMiddleware(options.vite!, request, response)
-                return response.writableEnded || response.destroyed
-              } finally {
-                // Vite strips its base and may rewrite module queries. A
-                // declined request must retain its application URL.
-                request.url = originalUrl
+        immutableAssetPaths,
+        signal,
+      }, headers, method, signal),
+    serveViteRequest,
+  })
+
+  const createManagedServer = (): SsrManagedServer => {
+    const host = resolveManagedServerHost(initialServerOptions.host)
+    const port = resolveManagedServerPort(initialServerOptions.port)
+    const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
+      activeRequestCount += 1
+      const startedAt = Date.now()
+      const requestId =
+        String(request.headers['x-request-id'] || '').trim() ||
+        startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+      const scope = createSsrRequestScope(lastDefinition.server.requestTimeoutMs)
+      const bodySource = createSsrRequestBodySource(request, scope.signal)
+      const cancelDisconnectedRequest = () => scope.cancel()
+      const cancelClosedResponse = () => {
+        if (!response.writableEnded) scope.cancel()
+      }
+      const closeIdleAfterResponse = () => {
+        response.off('finish', closeIdleAfterResponse)
+        response.off('close', closeIdleAfterResponse)
+        if (shuttingDown) nodeServer.closeIdleConnections?.()
+      }
+      request.once('aborted', cancelDisconnectedRequest)
+      response.once('close', cancelClosedResponse)
+      response.once('finish', closeIdleAfterResponse)
+      response.once('close', closeIdleAfterResponse)
+
+      try {
+        const normalizedRequest: SsrNormalizedRequest = Object.freeze({
+          requestId,
+          startedAt,
+          method: request.method || 'GET',
+          openBody: bodySource.openBody,
+          url: request.url || '/',
+          headers: snapshotRequestHeaders(request),
+          protocol: (request.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
+          trustedLocalConnection: isSsrTrustedLocalConnection(request),
+        })
+        const result = await execute(normalizedRequest, scope, options.vite
+            ? async () => {
+                const originalUrl = request.url
+                try {
+                  await runViteMiddleware(options.vite!, request, response)
+                  return response.writableEnded || response.destroyed
+                } finally {
+                  // Vite strips its base and may rewrite module queries. A
+                  // declined request must retain its application URL.
+                  request.url = originalUrl
+                }
               }
-            }
-          : undefined,
-      })
+            : undefined)
 
-      // Transfer unread-body ownership back to Node before writing the
-      // response. Draining continues concurrently so an early response is not
-      // delayed by a slow upload, while this request remains alive until the
-      // transport has consumed the bytes required for keep-alive reuse.
-      // Begin consuming unread transport bytes before publishing an early response.
-      // The drain continues concurrently: response latency must not depend on the
-      // client finishing its upload, while request-scope ownership remains active
-      // until Node can safely reuse the connection.
-      const bodyDrained = bodySource.drain()
-
-      if (result && !response.writableEnded) {
-        if (result instanceof Response) await writeWebResponse(request, response, result, scope.signal)
-        else sendResponse(request, response, result)
-      }
-      await bodyDrained
-    } catch (error) {
-      if (error instanceof SsrRequestCancelledError) {
+        if (result && !response.writableEnded) {
+          if (result instanceof Response) await writeWebResponse(request, response, result, scope.signal)
+          else sendResponse(request, response, result)
+        }
+        // A native Response may own request.body. Do not close its pull bridge
+        // before streaming the response; drain unused bytes afterwards for Node
+        // keep-alive reuse, still bounded by this request's deadline.
+        await bodySource.drain()
+      } catch (error) {
+        if (error instanceof SsrRequestCancelledError) {
+          if (!response.destroyed) response.destroy()
+          return
+        }
+        safeSsrLog(lastDefinition.server.logger, 'error', 'ssr.transport.failed', {
+          requestId,
+          pathname: request.url,
+          error,
+        })
         if (!response.destroyed) response.destroy()
-        return
-      }
-      safeSsrLog(lastDefinition.server.logger, 'error', 'ssr.transport.failed', {
-        requestId,
-        error: error instanceof Error ? error.message : 'Unknown transport error',
-      })
-      if (!response.destroyed) response.destroy()
-    } finally {
-      // Detach the pull bridge before resuming Node, otherwise an unread Web
-      // body could pause the socket again. This invariant covers every exit.
-      bodySource.release()
-      if (!request.readableEnded) {
-        if (!response.destroyed && !request.destroyed && !scope.signal.aborted) request.resume()
-        else request.destroy()
-      }
-      request.off('aborted', cancelDisconnectedRequest)
-      response.off('close', cancelClosedResponse)
-      scope.dispose()
-      activeRequestCount -= 1
-      if (activeRequestCount === 0) {
-        resolveRequestsDrained?.()
-        resolveRequestsDrained = undefined
+      } finally {
+        // Detach the pull bridge before resuming Node, otherwise an unread Web
+        // body could pause the socket again. This invariant covers every exit.
+        bodySource.release()
+        if (!request.readableEnded) {
+          if (!response.destroyed && !request.destroyed && !scope.signal.aborted) request.resume()
+          else request.destroy()
+        }
+        request.off('aborted', cancelDisconnectedRequest)
+        response.off('close', cancelClosedResponse)
+        scope.dispose()
+        activeRequestCount -= 1
+        if (activeRequestCount === 0) {
+          resolveRequestsDrained?.()
+          resolveRequestsDrained = undefined
+        }
       }
     }
-  }
-  const nodeServer = createServer((request, response) =>
-    options.vite
-      ? runWithSsrViteAssetResolutionContext(() => handleRequest(request, response))
-      : handleRequest(request, response)
-  )
+    const nodeServer = createServer((request, response) =>
+      options.vite
+        ? runWithSsrViteAssetResolutionContext(() => handleRequest(request, response))
+        : handleRequest(request, response)
+    )
 
-  const close = (): Promise<void> => {
-    if (shutdownPromise) return shutdownPromise
-    shuttingDown = true
-    detachTemplateWatcher()
-    // Stop new SSR admission and detach every queued request. Active leases
-    // remain valid until their actual Vue render work settles.
-    ssrAdmission.dispose()
-    shutdownPromise = (async () => {
-      const timeoutMs = initialServerOptions.shutdownTimeoutMs
-      let forced: ReturnType<typeof setTimeout> | undefined
-      let viteClosePromise: Promise<void> | undefined
-      const closeVite = (): Promise<void> => {
-        if (!options.vite) return Promise.resolve()
-        if (!viteClosePromise) {
-          // Promise.resolve().then() also captures a synchronous throw from a
-          // Vite close implementation while preserving one invocation.
-          viteClosePromise = Promise.resolve().then(() => options.vite!.close())
+    const close = (): Promise<void> => {
+      if (shutdownPromise) return shutdownPromise
+      shuttingDown = true
+      detachTemplateWatcher()
+      // Stop new SSR admission and detach every queued request. Active leases
+      // remain valid until their actual Vue render work settles.
+      ssrAdmission.dispose()
+      shutdownPromise = (async () => {
+        const timeoutMs = initialServerOptions.shutdownTimeoutMs
+        let forced: ReturnType<typeof setTimeout> | undefined
+        let viteClosePromise: Promise<void> | undefined
+        const closeVite = (): Promise<void> => {
+          if (!options.vite) return Promise.resolve()
+          if (!viteClosePromise) {
+            // Promise.resolve().then() also captures a synchronous throw from a
+            // Vite close implementation while preserving one invocation.
+            viteClosePromise = Promise.resolve().then(() => options.vite!.close())
+          }
+          return viteClosePromise
         }
-        return viteClosePromise
-      }
-      const nodeClose = new Promise<void>((resolveClose, rejectClose) => {
-        nodeServer.close((error) => {
-          if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') {
-            resolveClose()
-          } else {
-            rejectClose(error)
-          }
+        const nodeClose = new Promise<void>((resolveClose, rejectClose) => {
+          nodeServer.close((error) => {
+            if (!error || (error as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING') {
+              resolveClose()
+            } else {
+              rejectClose(error)
+            }
+          })
+          // close() stops new accepts first. Explicitly draining idle keep-alive
+          // sockets preserves active requests while avoiding needless shutdown
+          // delay on platforms where close() does not reap them immediately.
+          nodeServer.closeIdleConnections?.()
         })
-        // close() stops new accepts first. Explicitly draining idle keep-alive
-        // sockets preserves active requests while avoiding needless shutdown
-        // delay on platforms where close() does not reap them immediately.
-        nodeServer.closeIdleConnections?.()
-      })
-      const gracefulClose = (async () => {
-        // A cancelled request can leave its underlying Vue render alive after
-        // the transport handler exits. Do not close Vite or its ModuleRunner
-        // until both managed handlers and authoritative admission leases drain.
-        await Promise.all([
-          waitForRequestsDrained(),
-          ssrAdmission.waitForIdle(),
-        ])
-        // A disconnected waiter can leave server-owned compilation in flight.
-        await loadingDefinition
-        // On a cold start Vite may have already moved from dependency scanning
-        // into an optimizer batch. Cancelling at that boundary can leave
-        // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
-        // only the work Vite has already exposed as pending, then use its
-        // normal close API for environments, ModuleRunner, HMR, and WebSockets.
-        let shutdownError: unknown
-        let hasShutdownError = false
-        if (options.vite) {
-          try {
-            await waitForStartedViteOptimizerWork(options.vite)
-          } catch (error) {
-            shutdownError = error
-            hasShutdownError = true
-          }
-          // Vite owns its environments, ModuleRunner, HMR, and WebSocket
-          // server. Its cleanup is mandatory even when an optimizer batch
-          // failed; report the optimizer failure only after cleanup is owned.
-          try {
-            await closeVite()
-          } catch (error) {
-            if (!hasShutdownError) {
+        const gracefulClose = (async () => {
+          // A cancelled request can leave its underlying Vue render alive after
+          // the transport handler exits. Do not close Vite or its ModuleRunner
+          // until both managed handlers and authoritative admission leases drain.
+          await Promise.all([
+            waitForRequestsDrained(),
+            ssrAdmission.waitForIdle(),
+          ])
+          // A disconnected waiter can leave server-owned compilation in flight.
+          await loadingDefinition
+          // On a cold start Vite may have already moved from dependency scanning
+          // into an optimizer batch. Cancelling at that boundary can leave
+          // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
+          // only the work Vite has already exposed as pending, then use its
+          // normal close API for environments, ModuleRunner, HMR, and WebSockets.
+          let shutdownError: unknown
+          let hasShutdownError = false
+          if (options.vite) {
+            try {
+              await waitForStartedViteOptimizerWork(options.vite)
+            } catch (error) {
               shutdownError = error
               hasShutdownError = true
             }
+            // Vite owns its environments, ModuleRunner, HMR, and WebSocket
+            // server. Its cleanup is mandatory even when an optimizer batch
+            // failed; report the optimizer failure only after cleanup is owned.
+            try {
+              await closeVite()
+            } catch (error) {
+              if (!hasShutdownError) {
+                shutdownError = error
+                hasShutdownError = true
+              }
+            }
           }
+          await nodeClose
+          if (hasShutdownError) throw shutdownError
+        })()
+        try {
+          await Promise.race([
+            gracefulClose,
+            new Promise<never>((_resolve, reject) => {
+              forced = setTimeout(() => {
+                nodeServer.closeAllConnections?.()
+                // A stuck optimizer drain must not leave Vite-owned resources
+                // unclosed after the shutdown deadline. This is a forced
+                // timeout path; normal application work still drains before
+                // the regular closeVite() call above.
+                void closeVite().catch(() => undefined)
+                reject(new Error('SSR server graceful shutdown timed out.'))
+              }, timeoutMs)
+            }),
+          ])
+        } finally {
+          if (forced) clearTimeout(forced)
         }
-        await nodeClose
-        if (hasShutdownError) throw shutdownError
       })()
-      try {
-        await Promise.race([
-          gracefulClose,
-          new Promise<never>((_resolve, reject) => {
-            forced = setTimeout(() => {
-              nodeServer.closeAllConnections?.()
-              // A stuck optimizer drain must not leave Vite-owned resources
-              // unclosed after the shutdown deadline. This is a forced
-              // timeout path; normal application work still drains before
-              // the regular closeVite() call above.
-              void closeVite().catch(() => undefined)
-              reject(new Error('SSR server graceful shutdown timed out.'))
-            }, timeoutMs)
-          }),
-        ])
-      } finally {
-        if (forced) clearTimeout(forced)
-      }
-    })()
-    return shutdownPromise
+      return shutdownPromise
+    }
+
+    return {
+      nodeServer,
+      address: () => {
+        const address = nodeServer.address()
+        return {
+          host: typeof address === 'object' && address ? address.address : host,
+          port: typeof address === 'object' && address ? address.port : port,
+        }
+      },
+      listen: () =>
+        new Promise<void>((resolveListen, rejectListen) => {
+          const onError = (error: Error) => rejectListen(error)
+          nodeServer.once('error', onError)
+          nodeServer.listen(port, host, () => {
+            nodeServer.off('error', onError)
+            readyAt = Date.now()
+            logServerReady(host, port)
+            resolveListen()
+          })
+        }),
+      close,
+    }
   }
 
-  return {
-    nodeServer,
-    address: () => {
-      const address = nodeServer.address()
-      return {
-        host: typeof address === 'object' && address ? address.address : host,
-        port: typeof address === 'object' && address ? address.port : port,
-      }
-    },
-    listen: () =>
-      new Promise<void>((resolveListen, rejectListen) => {
-        const onError = (error: Error) => rejectListen(error)
-        nodeServer.once('error', onError)
-        nodeServer.listen(port, host, () => {
-          nodeServer.off('error', onError)
-          readyAt = Date.now()
-          logServerReady(host, port)
-          resolveListen()
-        })
-      }),
-    close,
-  }
+  return { execute, definition: () => lastDefinition, createManagedServer }
 }
+
+export const createSsrManagedServer = async (
+  options: SsrManagedServerOptions
+): Promise<SsrManagedServer> => (await createSsrRequestRuntime(options)).createManagedServer()
