@@ -1,10 +1,16 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, parse, relative } from 'node:path'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { build } from 'esbuild'
 import { nodeFileTrace } from '@vercel/nft'
-import { buildVercelDeployment, createVercelRouting } from '../vercel/VercelBuild'
+import {
+  buildVercelDeployment,
+  createVercelFunctionBootstrap,
+  createVercelRouting,
+  createVercelTraceWarningMessages,
+} from '../vercel/VercelBuild'
 import { deploymentFiles } from '../DeploymentAssets'
 import { DEPLOYMENT_METADATA_PATH } from '../DeploymentMetadata'
 
@@ -14,7 +20,12 @@ vi.mock('esbuild', () => ({ build: vi.fn() }))
 vi.mock('@vercel/nft', () => ({ nodeFileTrace: vi.fn() }))
 
 let root = ''
-afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); root = ''; vi.clearAllMocks() })
+afterEach(async () => {
+  vi.restoreAllMocks()
+  if (root) await rm(root, { recursive: true, force: true })
+  root = ''
+  vi.clearAllMocks()
+})
 
 describe('Vercel Build Output API projection', () => {
   it.each([false, true])('preserves Core runtime files and respects CDN ownership with dynamicAssets=%s', async (dynamicAssets) => {
@@ -89,7 +100,10 @@ describe('Vercel Build Output API projection', () => {
     expect(payload).toContain('dist/client/runtime-shared.json')
     const config = JSON.parse(await readFile(join(functionRoot, '.vc-config.json'), 'utf8'))
     expect(config).toMatchObject({ handler: 'index.mjs', launcherType: 'Nodejs', shouldAddHelpers: false, supportsResponseStreaming: true })
-    expect(await readFile(join(functionRoot, 'index.mjs'), 'utf8')).not.toContain(root)
+    const functionEntry = await readFile(join(functionRoot, 'index.mjs'), 'utf8')
+    expect(functionEntry).not.toContain(root)
+    expect(functionEntry).toContain('let handlerPromise')
+    expect(functionEntry).not.toContain('export default (await import')
     expect(await readdir(root)).not.toContain('vercel.json')
     expect(await readdir(join(root, '.vercel'))).not.toContain('vue-ssr-lite-stage')
     expect(vi.mocked(nodeFileTrace).mock.calls[0]![0]).toContain(join(root, 'dist/server/chunks/lazy.js'))
@@ -107,5 +121,134 @@ describe('Vercel Build Output API projection', () => {
       expect(fallback.dest).toBe('/__vue_ssr_lite')
     }
     expect('methods' in fallback).toBe(false)
+  })
+
+  it('reports sanitized, actionable dependency trace warnings', () => {
+    const missing = Object.assign(
+      new Error("Cannot find module '@scope/runtime-native' from '/private/build/user/project/index.mjs'"),
+      { code: 'MODULE_NOT_FOUND' }
+    )
+    const messages = createVercelTraceWarningMessages(new Set([
+      missing,
+      new Error('Failed to parse /private/build/user/project/generated.mjs'),
+    ]))
+    expect(messages).toEqual([
+      '[vue-ssr-lite] Dependency tracing warning (parse failure).',
+      '[vue-ssr-lite] Dependency tracing warning (unresolved module: @scope/runtime-native).',
+    ])
+    expect(messages.join('\n')).not.toContain('/private/build')
+  })
+})
+
+const createResponse = () => {
+  const headers = new Map<string, string>()
+  return {
+    statusCode: 200,
+    headersSent: false,
+    writableEnded: false,
+    destroyed: false,
+    body: undefined as string | undefined,
+    setHeader(name: string, value: string) { headers.set(name, value) },
+    getHeader(name: string) { return headers.get(name) },
+    writeHead(status: number) { this.statusCode = status; this.headersSent = true },
+    end(body = '') { this.body = body; this.writableEnded = true },
+    destroy() { this.destroyed = true },
+  }
+}
+
+const importGeneratedBootstrap = async (entrySource: string) => {
+  root = await mkdtemp(join(tmpdir(), 'ssr-vercel-bootstrap-'))
+  const entry = join(root, 'entry.mjs')
+  const bootstrap = join(root, 'index.mjs')
+  await writeFile(entry, entrySource)
+  await writeFile(bootstrap, createVercelFunctionBootstrap('./', './entry.mjs'))
+  const previousCwd = process.cwd()
+  try {
+    return await import(`${pathToFileURL(bootstrap).href}?test=${Date.now()}-${Math.random()}`) as {
+      default: (request: { method: string }, response: ReturnType<typeof createResponse>) => Promise<unknown>
+    }
+  } finally {
+    process.chdir(previousCwd)
+  }
+}
+
+describe('generated Vercel function bootstrap', () => {
+  it('loads lazily and caches the successfully initialized handler', async () => {
+    const key = `__vueSsrLiteBootstrap${Date.now()}${Math.random()}`
+    const generated = await importGeneratedBootstrap(`
+globalThis[${JSON.stringify(key)}] = (globalThis[${JSON.stringify(key)}] || 0) + 1
+export default async (_request, response) => response.end('ok')
+`)
+    expect((globalThis as Record<string, unknown>)[key]).toBeUndefined()
+    const first = createResponse()
+    const second = createResponse()
+    await generated.default({ method: 'GET' }, first)
+    await generated.default({ method: 'GET' }, second)
+    expect(first.body).toBe('ok')
+    expect(second.body).toBe('ok')
+    expect((globalThis as Record<string, unknown>)[key]).toBe(1)
+    delete (globalThis as Record<string, unknown>)[key]
+  })
+
+  it('evicts the rejected handler load promise', () => {
+    const source = createVercelFunctionBootstrap('./', './entry.mjs')
+    expect(source).toContain('let handlerPromise')
+    expect(source).toContain('handlerPromise ??= import("./entry.mjs")')
+    expect(source).toContain(
+      '.catch((error) => { handlerPromise = undefined; throw error })'
+    )
+  })
+
+  it('allows later requests after a loaded handler fails before sending a response', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const generated = await importGeneratedBootstrap(`
+let calls = 0
+export default async (_request, response) => {
+  calls += 1
+  if (calls === 1) throw new Error('temporary request failure')
+  response.end('recovered')
+}
+`)
+    const failed = createResponse()
+    await generated.default({ method: 'GET' }, failed)
+    expect(failed.statusCode).toBe(500)
+    expect(failed.body).toBe('Internal Server Error')
+
+    const recovered = createResponse()
+    await generated.default({ method: 'GET' }, recovered)
+    expect(recovered.body).toBe('recovered')
+    error.mockRestore()
+  })
+
+  it('returns a controlled 500 for a malformed default export without leaking details', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const generated = await importGeneratedBootstrap(
+      'export default { secret: "/private/build/user/project" }\n'
+    )
+    const response = createResponse()
+    await generated.default({ method: 'HEAD' }, response)
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toBe('')
+    expect(response.getHeader('cache-control')).toBe('no-store')
+    expect(response.getHeader('content-type')).toBe('text/plain; charset=utf-8')
+    expect(error.mock.calls.flat().join(' ')).not.toContain('/private/build')
+    error.mockRestore()
+  })
+
+  it('does not write a second response after the loaded handler has started one', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const generated = await importGeneratedBootstrap(`
+export default async (_request, response) => {
+  response.writeHead(202)
+  throw new Error('stream failed')
+}
+`)
+    const response = createResponse()
+    const end = vi.spyOn(response, 'end')
+    await generated.default({ method: 'GET' }, response)
+    expect(response.statusCode).toBe(202)
+    expect(end).not.toHaveBeenCalled()
+    expect(response.destroyed).toBe(true)
+    error.mockRestore()
   })
 })
