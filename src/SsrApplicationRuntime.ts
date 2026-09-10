@@ -25,6 +25,7 @@ import {
   SSR_DOMAIN_CONTEXT,
 } from './SsrDomainRuntime'
 import { createManagedHeadController } from './SsrManagedHead'
+import { readSsrTrustedLocalOrigin } from './SsrRequestOrigin'
 import {
   installSsrRequestContextObservation,
   SSR_REQUEST_CONTEXT,
@@ -81,6 +82,8 @@ const resolveApplicationSiteOrigin = (
     production,
     requireProductionOrigin,
     allowHttpOrigin: definition.seo?.allowHttpOrigin,
+    trustedLocalConnection: request.siteOrigin !== undefined &&
+      readSsrTrustedLocalOrigin(request) === request.siteOrigin,
   })
 }
 
