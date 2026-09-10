@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -35,13 +35,6 @@ interface PackageManifest {
 }
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const examples = [
-  '1-single-app',
-  '2-hybrid-route-app',
-  '3-multi-domain-apps',
-  '4-server-api-app',
-] as const
-
 const readJson = async <T>(path: string): Promise<T> =>
   JSON.parse(await readFile(path, 'utf8')) as T
 
@@ -187,24 +180,20 @@ describe('repository release contract', () => {
     }
   })
 
-  it('keeps primary examples synchronized with the repository version', async () => {
-    const manifest = await readJson<PackageManifest>(
-      join(repositoryRoot, 'package.json')
-    )
+  it('makes every first-party example consume the local repository package', async () => {
+    const examplesRoot = join(repositoryRoot, 'examples')
+    const examples = (await readdir(examplesRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
 
     for (const example of examples) {
-      const exampleRoot = join(repositoryRoot, 'examples', example)
+      const exampleRoot = join(examplesRoot, example)
       const exampleManifest = await readJson<{
         dependencies?: Record<string, string>
       }>(join(exampleRoot, 'package.json'))
-      const lockfile = await readFile(join(exampleRoot, 'yarn.lock'), 'utf8')
 
-      expect(exampleManifest.dependencies?.['vue-ssr-lite']).toBe(
-        manifest.version
-      )
-      expect(exampleManifest.dependencies?.vue).toBe(manifest.peerDependencies?.vue)
-      expect(lockfile).toContain(`vue-ssr-lite@${manifest.version}:`)
-      expect(lockfile).not.toContain('vue-ssr-lite@1.0.0-rc.1:')
+      expect(exampleManifest.dependencies?.['vue-ssr-lite']).toBe('file:../..')
     }
   })
 
