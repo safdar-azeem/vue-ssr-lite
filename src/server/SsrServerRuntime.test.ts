@@ -2229,7 +2229,7 @@ describe('managed SSR server lifecycle', () => {
     ).rejects.toThrow('does not support Vite relative base')
   })
 
-  it('fails production SSR startup when Vite asset metadata is missing', async () => {
+  it('identifies a missing SSR manifest at production startup', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     await mkdir(join(root, 'dist', 'client'), { recursive: true })
     await writeFile(
@@ -2255,7 +2255,7 @@ describe('managed SSR server lifecycle', () => {
           },
         }),
       })
-    ).rejects.toThrow("requires Vite's generated SSR manifest")
+    ).rejects.toThrow('ssr-manifest.missing')
   })
 
   it('never reads or writes the shared response cache for raw credential headers', async () => {
