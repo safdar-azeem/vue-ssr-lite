@@ -1,6 +1,52 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { createServer } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
+
+const invokeGeneratedVercelFirstRequest = async generatedFunction => {
+  const server = createHttpServer((request, response) => {
+    Promise.resolve(generatedFunction.default(request, response)).catch(() => {
+      if (response.writableEnded || response.destroyed) return
+      if (!response.headersSent) response.statusCode = 500
+      response.end()
+    })
+  })
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+
+  try {
+    const address = server.address()
+    assert(
+      address && typeof address === 'object',
+      'Generated Vercel function smoke server should expose a listening address'
+    )
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/`, {
+      headers: {
+        host: 'packed-smoke.test',
+        'x-forwarded-host': 'packed-smoke.test',
+        'x-forwarded-proto': 'https'
+      }
+    })
+    const html = await response.text()
+
+    assert(
+      response.status === 200,
+      `Generated Vercel function GET / should return 200, received ${response.status}`
+    )
+    assert(
+      /id=["']home-page["'][^>]*>packed-home/.test(html),
+      'Generated Vercel function GET / should return the packed fixture SSR home page'
+    )
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close(error => (error ? reject(error) : resolve()))
+    })
+  }
+}
 import {
   access,
   mkdir,
@@ -434,7 +480,7 @@ export default (_context: AppContext) => {
 
 const reservePort = async () =>
   new Promise((resolvePort, reject) => {
-    const server = createServer()
+    const server = createNetServer()
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       const address = server.address()
@@ -1106,15 +1152,16 @@ const main = async () => {
     }
     const previousCwd = process.cwd()
     try {
-      const generatedFunction = await import(
+    const generatedFunction = await import(
         `${pathToFileURL(join(functionRoot, 'index.mjs')).href}?smoke=${Date.now()}`
       )
       assert(
         typeof generatedFunction.default === 'function',
         'the generated Vercel function did not cold-load to a default handler.'
       )
-    } finally {
-      process.chdir(previousCwd)
+    await invokeGeneratedVercelFirstRequest(generatedFunction)
+  } finally {
+    process.chdir(previousCwd)
     }
 
     const productionPort = await reservePort()
