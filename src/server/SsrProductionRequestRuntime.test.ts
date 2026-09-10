@@ -97,6 +97,45 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
 
 describe('shared production executor', () => {
   it.each([
+    {
+      expectedPhase: 'runtime-load',
+      loadRuntime: async () => { throw new SyntaxError('private load detail /private/runtime.js') },
+    },
+    {
+      expectedPhase: 'runtime-compile',
+      loadRuntime: async () => () => { throw new SyntaxError('private compile detail /private/server.ts') },
+    },
+  ])('classifies $expectedPhase failures without exposing raw exception details', async ({
+    expectedPhase,
+    loadRuntime,
+  }) => {
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime })
+    const response = await execute(normalized('/'), new AbortController().signal)
+
+    expect(response.status).toBe(500)
+    expect(await response.text()).toContain('Application unavailable')
+    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({ phase: expectedPhase, errorType: 'SyntaxError' })
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private (?:load|compile)|runtime\.js|server\.ts/)
+  })
+
+  it('classifies production template preparation failures without exposing template details', async () => {
+    await writeFile(
+      join(root, 'dist/client/index.html'),
+      '<!doctype html><html><head></head><body>private-template-content</body></html>'
+    )
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition() })
+    const response = await execute(normalized('/'), new AbortController().signal)
+
+    expect(response.status).toBe(500)
+    expect(await response.text()).toContain('Application unavailable')
+    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({ phase: 'template-preflight', errorType: 'Error' })
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private-template-content|dist\/client|index\.html/)
+    expect(JSON.stringify(diagnostic)).not.toContain(root)
+  })
+
+  it.each([
     { file: 'manifest.json', contents: '{secret', artifact: 'client-manifest', reason: 'invalid-json' },
     { file: 'vue-ssr-lite-assets.json', contents: '{"version":999}', artifact: 'asset-cache-metadata', reason: 'invalid-schema' },
     { file: 'ssr-manifest.json', contents: '{secret', artifact: 'ssr-manifest', reason: 'invalid-json' },
@@ -112,7 +151,9 @@ describe('shared production executor', () => {
     expect(html).toContain('Application unavailable')
     expect(html).not.toMatch(/manifest|secret|invalid-json|invalid-schema|SsrProductionArtifactError/)
     const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
-    expect(diagnostic).toMatchObject({ artifact, reason, code: `${artifact}.${reason}` })
+    expect(diagnostic).toMatchObject({
+      phase: 'artifact-preflight', artifact, reason, code: `${artifact}.${reason}`,
+    })
     expect(JSON.stringify(diagnostic)).not.toContain(root)
   })
 
