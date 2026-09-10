@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { describeSsrFailure, safeSsrLog, safeSsrMetrics } from './SsrObservability'
 import { PRODUCTION_HTTP_ORIGIN_ERROR } from './SsrCanonicalOrigin'
-import { readSsrProductionFailure, SsrProductionArtifactError } from './SsrProductionError'
+import {
+  markSsrInitializationFailure,
+  readSsrInitializationPhase,
+  readSsrProductionFailure,
+  SsrProductionArtifactError,
+} from './SsrProductionError'
 import { parseSsrViteManifest, createSsrRenderedAssetResolver } from './SsrRenderedAssetRuntime'
 import { parseSsrProductionAssetMetadata } from './SsrAssetMetadata'
 import { parseSsrClientAssetManifest } from './server/SsrAssetRuntime'
@@ -54,6 +59,23 @@ describe('safe operator diagnostics', () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/secret|\/private/)
     expect(readSsrProductionFailure({
       [Symbol.for('vue-ssr-lite.internal.production-failure')]: 'ssr-manifest.secret-token',
+    })).toBeUndefined()
+  })
+
+  it('emits only allowlisted initialization phases without exposing exception contents', () => {
+    const logger = { error: vi.fn() }
+    const failure = markSsrInitializationFailure(
+      new SyntaxError('private-token /private/SsrRuntime.js'),
+      'runtime-load'
+    )
+    safeSsrLog(logger, 'error', 'ssr.runtime.failed', { error: failure })
+    expect(logger.error).toHaveBeenCalledWith('ssr.runtime.failed', expect.objectContaining({
+      phase: 'runtime-load',
+      errorType: 'SyntaxError',
+    }))
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/private-token|SsrRuntime\.js/)
+    expect(readSsrInitializationPhase({
+      [Symbol.for('vue-ssr-lite.internal.initialization-phase')]: 'consumer-secret',
     })).toBeUndefined()
   })
 
