@@ -19,6 +19,78 @@ const commonRoot = (paths: string[]): string => {
 }
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+const TRACE_PACKAGE = /^(?:@[a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)(?:\/[a-z0-9._~+-]+)*$/i
+
+const summarizeTraceWarning = (warning: unknown): string => {
+  const record = warning && typeof warning === 'object'
+    ? warning as { code?: unknown; message?: unknown }
+    : undefined
+  const message = typeof record?.message === 'string' ? record.message : String(warning)
+  const category =
+    record?.code === 'MODULE_NOT_FOUND' || /cannot find|failed to resolve|unresolved/i.test(message)
+      ? 'unresolved module'
+      : /parse|syntax/i.test(message)
+        ? 'parse failure'
+        : 'optional reference'
+  const candidate = message.match(
+    /(?:cannot find (?:module|package)|failed to resolve(?: dependency)?|dependency)\s*["']([^"']+)["']/i
+  )?.[1]
+  return candidate && TRACE_PACKAGE.test(candidate)
+    ? `${category}: ${candidate}`
+    : category
+}
+
+export const createVercelTraceWarningMessages = (
+  warnings: ReadonlySet<unknown>
+): string[] => {
+  const summaries = new Map<string, number>()
+  for (const warning of warnings) {
+    const summary = summarizeTraceWarning(warning)
+    summaries.set(summary, (summaries.get(summary) ?? 0) + 1)
+  }
+  return [...summaries]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(0, 8)
+    .map(([summary, count]) =>
+      `[vue-ssr-lite] Dependency tracing warning (${summary}${count > 1 ? `; ${count} occurrences` : ''}).`
+    )
+}
+
+/** The function entry itself must cold-load without evaluating application code. */
+export const createVercelFunctionBootstrap = (
+  deployedProject: string,
+  deployedEntry: string
+): string => [
+  'import { fileURLToPath } from "node:url"',
+  `process.chdir(fileURLToPath(new URL(${JSON.stringify(deployedProject)}, import.meta.url)))`,
+  'let handlerPromise',
+  'const loadHandler = () => handlerPromise ??= import(' + JSON.stringify(deployedEntry) + ')',
+  '  .then((module) => {',
+  '    if (typeof module.default !== "function") {',
+  '      throw new Error("The generated Vercel entry must default-export a request handler.")',
+  '    }',
+  '    return module.default',
+  '  })',
+  '  .catch((error) => { handlerPromise = undefined; throw error })',
+  'export default async function vueSsrLiteVercelFunction(request, response) {',
+  '  try {',
+  '    const handler = await loadHandler()',
+  '    return await handler(request, response)',
+  '  } catch {',
+  '    console.error("[vue-ssr-lite] Vercel function initialization or invocation failed.")',
+  '    if (response.headersSent || response.writableEnded || response.destroyed) {',
+  '      if (!response.destroyed && !response.writableEnded) response.destroy()',
+  '      return',
+  '    }',
+  '    response.statusCode = 500',
+  '    response.setHeader("content-type", "text/plain; charset=utf-8")',
+  '    response.setHeader("cache-control", "no-store")',
+  '    response.end(request.method === "HEAD" ? "" : "Internal Server Error")',
+  '  }',
+  '}',
+  '',
+].join('\n')
+
 /** Only exact public file paths are CDN-owned. Everything else keeps its original URL. */
 export const createVercelRouting = (assets: readonly DeploymentStaticAsset[]) => ({
   version: 3,
@@ -136,16 +208,17 @@ export const buildVercelDeployment = async (options: {
       }
     }
     if (trace.warnings.size) {
-      console.warn(`[vue-ssr-lite] Dependency tracing reported ${trace.warnings.size} unresolved or optional references. Verify runtime dependencies before deploying.`)
+      console.warn(`[vue-ssr-lite] Dependency tracing reported ${trace.warnings.size} unresolved or optional references.`)
+      for (const message of createVercelTraceWarningMessages(trace.warnings)) {
+        console.warn(message)
+      }
     }
     const deployedProject = modulePath(posix(relative(functionRoot, resolve(payload, relative(payloadRoot, root))))) + '/'
     const deployedEntry = modulePath(posix(relative(functionRoot, resolve(payload, relative(payloadRoot, entry)))))
-    await writeFile(resolve(functionRoot, 'index.mjs'), [
-      'import { fileURLToPath } from "node:url"',
-      `process.chdir(fileURLToPath(new URL(${JSON.stringify(deployedProject)}, import.meta.url)))`,
-      `export default (await import(${JSON.stringify(deployedEntry)})).default`,
-      '',
-    ].join('\n'))
+    await writeFile(
+      resolve(functionRoot, 'index.mjs'),
+      createVercelFunctionBootstrap(deployedProject, deployedEntry)
+    )
     await writeFile(resolve(functionRoot, '.vc-config.json'), JSON.stringify({
       runtime: `nodejs${nodeMajor}.x`, handler: 'index.mjs', launcherType: 'Nodejs',
       shouldAddHelpers: false, supportsResponseStreaming: true,
