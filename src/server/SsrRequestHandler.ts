@@ -2,7 +2,7 @@ import { createWebRequest, isFetchForbiddenMethod, SsrLegacyInformationalRespons
 import { normalizeServerResponse } from '../server-routes/SsrServerResponseRuntime'
 import { executeServerMiddleware } from '../server-routes/SsrServerMiddlewareRuntime'
 import { dispatchServerRoute, matchServerRoute, SsrServerRouteBadRequest } from '../server-routes/SsrServerRouteRuntime'
-import type { SsrCompiledConfig } from '../SsrConfigCompileRuntime'
+import type { SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
 import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
 import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../SsrObservability'
