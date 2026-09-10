@@ -1,3 +1,5 @@
+import { SsrProductionArtifactError } from './SsrProductionError'
+
 export const SSR_PRODUCTION_ASSET_METADATA_PATH =
   '.vite/vue-ssr-lite-assets.json'
 
@@ -6,21 +8,17 @@ interface SsrProductionAssetMetadata {
   immutable: string[]
 }
 
-const normalizeAssetPath = (value: string, filename: string): string => {
+const normalizeAssetPath = (value: string): string => {
   if (
     !value ||
     /^(?:[a-z]+:)?\/\//i.test(value) ||
     /[?#\\\u0000-\u001f\u007f]/.test(value)
   ) {
-    throw new Error(
-      `vue-ssr-lite rejected invalid asset path ${JSON.stringify(value)} in ${filename}.`
-    )
+    throw new SsrProductionArtifactError('asset-cache-metadata.invalid-path')
   }
   const normalized = value.replace(/^\/+/, '')
   if (!normalized || normalized.split('/').includes('..')) {
-    throw new Error(
-      `vue-ssr-lite rejected invalid asset path ${JSON.stringify(value)} in ${filename}.`
-    )
+    throw new SsrProductionArtifactError('asset-cache-metadata.invalid-path')
   }
   return normalized
 }
@@ -35,18 +33,16 @@ export const serializeSsrProductionAssetMetadata = (
 
 export const parseSsrProductionAssetMetadata = (
   source: string,
-  filename = SSR_PRODUCTION_ASSET_METADATA_PATH
+  _filename = SSR_PRODUCTION_ASSET_METADATA_PATH
 ): ReadonlySet<string> => {
   let value: unknown
   try {
     value = JSON.parse(source)
-  } catch (error) {
-    throw new Error(
-      `vue-ssr-lite could not parse ${filename}: ${error instanceof Error ? error.message : String(error)}`
-    )
+  } catch {
+    throw new SsrProductionArtifactError('asset-cache-metadata.invalid-json')
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`vue-ssr-lite expected ${filename} to contain an object.`)
+    throw new SsrProductionArtifactError('asset-cache-metadata.invalid-schema')
   }
   const metadata = value as Partial<SsrProductionAssetMetadata>
   if (
@@ -54,11 +50,9 @@ export const parseSsrProductionAssetMetadata = (
     !Array.isArray(metadata.immutable) ||
     metadata.immutable.some((path) => typeof path !== 'string')
   ) {
-    throw new Error(
-      `vue-ssr-lite expected ${filename} to contain version 1 immutable asset metadata.`
-    )
+    throw new SsrProductionArtifactError('asset-cache-metadata.invalid-schema')
   }
   return new Set(
-    metadata.immutable.map((path) => normalizeAssetPath(path, filename))
+    metadata.immutable.map((path) => normalizeAssetPath(path))
   )
 }
