@@ -10,7 +10,11 @@ import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { compileSsrConfig, type SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
 import { safeSsrLog } from '../SsrObservability'
-import { readSsrProductionFailure, SsrProductionArtifactError } from '../SsrProductionError'
+import {
+  markSsrInitializationFailure,
+  readSsrProductionFailure,
+  SsrProductionArtifactError,
+} from '../SsrProductionError'
 import { isSsrTrustedLocalConnection } from './SsrLocalConnectionRuntime'
 import { createSsrPhaseTimings, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import type { SsrRenderedApplicationAsset } from '../SsrApplicationAssetRuntime'
@@ -250,8 +254,14 @@ export const createSsrRequestRuntime = async (
         return { error: new Error('SSR server is shutting down.'), isCurrent: undefined }
       }
       let isCurrent = captureRuntimeRevision()
+      let loaded: unknown
       try {
-        const loaded = await options.loadRuntime()
+        loaded = await options.loadRuntime()
+      } catch (error) {
+        if (isCurrent && !isCurrent()) continue
+        return { error: markSsrInitializationFailure(error, 'runtime-load'), isCurrent }
+      }
+      try {
         isCurrent = captureRuntimeRevision(loaded)
         if (isCurrent && !isCurrent()) continue
         const definition = await resolveRuntime(loaded, options)
@@ -265,7 +275,7 @@ export const createSsrRequestRuntime = async (
         if (isCurrent && !isCurrent()) continue
         // Preserve the guard for the failed attempt too. The caller may resume
         // after another invalidation and must not mark that newer revision bad.
-        return { error, isCurrent }
+        return { error: markSsrInitializationFailure(error, 'runtime-compile'), isCurrent }
       }
     }
   }
@@ -318,7 +328,9 @@ export const createSsrRequestRuntime = async (
         clientManifestPath
       )
     } catch (error) {
-      if (readSsrProductionFailure(error)?.code !== 'client-manifest.missing') throw error
+      if (readSsrProductionFailure(error)?.code !== 'client-manifest.missing') {
+        throw markSsrInitializationFailure(error, 'artifact-preflight')
+      }
       // A manually assembled client directory remains servable, but without
       // authoritative build metadata every file gets conservative caching.
       safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
@@ -329,15 +341,21 @@ export const createSsrRequestRuntime = async (
         assetMetadataPath
       )
     } catch (error) {
-      if (readSsrProductionFailure(error)?.code !== 'asset-cache-metadata.missing') throw error
+      if (readSsrProductionFailure(error)?.code !== 'asset-cache-metadata.missing') {
+        throw markSsrInitializationFailure(error, 'artifact-preflight')
+      }
       safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
     }
     immutableAssetPaths = resolveSsrImmutableAssetPaths(manifestAssets, revisionedAssets)
   }
   if (hasEnabledSsrApplications) {
     const manifestPath = resolve(clientRoot, '.vite/ssr-manifest.json')
-    const source = await readProductionArtifact(manifestPath, 'ssr-manifest')
-    ssrManifest = parseSsrViteManifest(source, manifestPath)
+    try {
+      const source = await readProductionArtifact(manifestPath, 'ssr-manifest')
+      ssrManifest = parseSsrViteManifest(source, manifestPath)
+    } catch (error) {
+      throw markSsrInitializationFailure(error, 'artifact-preflight')
+    }
   }
 
   // Production build artifacts are immutable for a managed-server lifetime.
@@ -483,17 +501,41 @@ export const createSsrRequestRuntime = async (
         .map((application) => resolveTemplatePath(initialRuntime, application))
     ),
   ]
-  await Promise.all(
-    initialTemplatePaths.map(async (templatePath) => {
-      const information = await stat(templatePath)
-      if (!information.isFile()) {
-        throw new Error(`Missing client entry: ${templatePath}`)
+  const validateInitialTemplatePaths = async () => {
+    await Promise.all(
+      initialTemplatePaths.map(async (templatePath) => {
+        const information = await stat(templatePath)
+        if (!information.isFile()) {
+          throw new Error(`Missing client entry: ${templatePath}`)
+        }
+        if (options.production) {
+          productionTemplatePaths.set(templatePath, await realpath(templatePath))
+        }
+      })
+    )
+  }
+  const prepareInitialProductionTemplates = async () => {
+    if (!productionTemplates) return
+    await Promise.all(initialRuntime.applications.map(async (application) => {
+      const path = resolveTemplatePath(initialRuntime, application)
+      const canonical = productionTemplatePaths.get(path) ?? path
+      if (application.kind === 'ssr' || application.hasRouteRenderOverrides) {
+        await productionTemplates.prepare(canonical, application.mountSelector)
+      } else {
+        await productionTemplates.load(canonical)
       }
-      if (options.production) {
-        productionTemplatePaths.set(templatePath, await realpath(templatePath))
-      }
-    })
-  )
+    }))
+  }
+  if (options.production) {
+    try {
+      await validateInitialTemplatePaths()
+      await prepareInitialProductionTemplates()
+    } catch (error) {
+      throw markSsrInitializationFailure(error, 'template-preflight')
+    }
+  } else {
+    await validateInitialTemplatePaths()
+  }
 
   startupTimings?.mark('template preflight')
   if (options.development && !options.production) {
@@ -523,18 +565,6 @@ export const createSsrRequestRuntime = async (
       scope: inheritedStartupTimings ? 'development server including Vite' : 'managed server',
     })
   }
-  if (productionTemplates) {
-    await Promise.all(initialRuntime.applications.map(async (application) => {
-      const path = resolveTemplatePath(initialRuntime, application)
-      const canonical = productionTemplatePaths.get(path) ?? path
-      if (application.kind === 'ssr' || application.hasRouteRenderOverrides) {
-        await productionTemplates.prepare(canonical, application.mountSelector)
-      } else {
-        await productionTemplates.load(canonical)
-      }
-    }))
-  }
-
   const execute = (
     request: SsrNormalizedRequest,
     scope: SsrRequestScope,
