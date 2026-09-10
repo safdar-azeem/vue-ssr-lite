@@ -98,6 +98,42 @@ const readMjsTree = async (directory) => {
   return contents.join('\n')
 }
 
+const walkRelativeFiles = async (directory, prefix = '') => {
+  const files = []
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      files.push(...await walkRelativeFiles(join(directory, entry.name), relativePath))
+    } else {
+      files.push(relativePath)
+    }
+  }
+  return files
+}
+
+const readRelativeModuleGraph = async (entry) => {
+  const modules = new Map()
+  const visit = async (file) => {
+    const canonical = await realpath(file)
+    if (modules.has(canonical)) return
+    const source = await readFile(canonical, 'utf8')
+    modules.set(canonical, source)
+    const specifiers = [
+      ...source.matchAll(/\b(?:from\s*|import\s*\(\s*)['"]([^'"]+)['"]/g),
+      ...source.matchAll(/\bimport\s*['"]([^'"]+)['"]/g),
+    ].map((match) => match[1])
+    for (const specifier of specifiers) {
+      if (!specifier.startsWith('.')) continue
+      await visit(resolve(dirname(canonical), specifier.split(/[?#]/, 1)[0]))
+    }
+  }
+  await visit(entry)
+  return modules
+}
+
+const BUILD_ONLY_RUNTIME_IMPORT =
+  /\b(?:from\s*|import\s*\(\s*|import\s*)['"](?:vite|rollup|esbuild|@vercel\/nft|@rollup\/[^/'"]+|@esbuild\/[^/'"]+)(?:\/[^'"]*)?['"]/i
+
 const assertDependencyOwnership = (manifest, options = {}) => {
   const dependencies = manifest.dependencies || {}
   const peerDependencies = manifest.peerDependencies || {}
@@ -989,6 +1025,97 @@ const main = async () => {
         !builtClient.includes('Packed tenant defaults for'),
       'server-only siteSeo/siteRobots resolver data leaked into the client bundle.'
     )
+
+    await execFile(buildCommand.executable, buildCommand.arguments, {
+      cwd: consumerRoot,
+      env: {
+        ...process.env,
+        PUBLIC_URL: 'https://packed-smoke.test',
+        VERCEL: '1',
+        VERCEL_ENV: 'production',
+        NETLIFY: 'false',
+        NETLIFY_DEV: 'false',
+        NODE_ENV: 'production',
+      },
+    })
+    const vercelOutput = join(consumerRoot, '.vercel', 'output')
+    const functionRoot = join(
+      vercelOutput,
+      'functions',
+      '__vue_ssr_lite.func'
+    )
+    const payloadRoot = join(functionRoot, 'payload')
+    for (const required of [
+      join(vercelOutput, 'config.json'),
+      join(vercelOutput, 'static'),
+      join(functionRoot, 'index.mjs'),
+      join(functionRoot, '.vc-config.json'),
+      payloadRoot,
+    ]) {
+      assert(await pathExists(required), `Vercel projection is missing ${required}.`)
+    }
+    const payloadFiles = await walkRelativeFiles(payloadRoot)
+    assert(
+      (await walkRelativeFiles(join(vercelOutput, 'static'))).length > 0,
+      'the Vercel projection did not publish the clean fixture static assets.'
+    )
+    for (const buildOnly of [
+      /(?:^|\/)node_modules\/vite\//,
+      /(?:^|\/)node_modules\/rollup\//,
+      /(?:^|\/)node_modules\/@rollup\//,
+      /(?:^|\/)node_modules\/esbuild\//,
+      /(?:^|\/)node_modules\/@esbuild\//,
+      /(?:^|\/)node_modules\/@vercel\/nft\//,
+    ]) {
+      assert(
+        !payloadFiles.some((file) => buildOnly.test(file)),
+        `the clean Vercel function payload contains build-only tooling matching ${buildOnly}.`
+      )
+    }
+    const internalVercel = join(
+      consumerRoot,
+      'node_modules',
+      'vue-ssr-lite',
+      'dist',
+      'internal-vercel.mjs'
+    )
+    const runtimeGraph = await readRelativeModuleGraph(internalVercel)
+    for (const [file, source] of runtimeGraph) {
+      assert(
+        !BUILD_ONLY_RUNTIME_IMPORT.test(source),
+        `the internal-vercel runtime graph retains a build-only bare import in ${file}.`
+      )
+    }
+    const generatedFunctionSource = await readFile(join(functionRoot, 'index.mjs'), 'utf8')
+    assert(
+      !BUILD_ONLY_RUNTIME_IMPORT.test(generatedFunctionSource),
+      'the generated Vercel function entry retains a build-only bare import.'
+    )
+    const deployedEntry = generatedFunctionSource.match(
+      /handlerPromise\s*\?\?=\s*import\((['"])([^'"]+)\1\)/
+    )?.[2]
+    assert(deployedEntry?.startsWith('.'), 'the Vercel bootstrap lacks a relative deployed entry.')
+    const deployedGraph = await readRelativeModuleGraph(
+      resolve(functionRoot, deployedEntry)
+    )
+    for (const [file, source] of deployedGraph) {
+      assert(
+        !BUILD_ONLY_RUNTIME_IMPORT.test(source),
+        `the generated function runtime graph retains a build-only bare import in ${file}.`
+      )
+    }
+    const previousCwd = process.cwd()
+    try {
+      const generatedFunction = await import(
+        `${pathToFileURL(join(functionRoot, 'index.mjs')).href}?smoke=${Date.now()}`
+      )
+      assert(
+        typeof generatedFunction.default === 'function',
+        'the generated Vercel function did not cold-load to a default handler.'
+      )
+    } finally {
+      process.chdir(previousCwd)
+    }
 
     const productionPort = await reservePort()
     const production = await startCli(consumerRoot, 'start', productionPort)
