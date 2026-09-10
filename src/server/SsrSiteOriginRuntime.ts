@@ -27,6 +27,8 @@ export interface ResolveServerSiteOriginOptions {
   production: boolean
   requireProductionOrigin: boolean
   allowHttpOrigin?: boolean
+  /** Set only from the managed Node transport's loopback peer check. */
+  trustedLocalConnection?: boolean
 }
 
 export const resolveServerSiteOrigin = async (
@@ -45,6 +47,7 @@ export const resolveServerSiteOrigin = async (
       production: options.production,
       requireProductionOrigin: options.requireProductionOrigin,
       allowHttpOrigin: options.allowHttpOrigin,
+      trustedLocalConnection: options.trustedLocalConnection,
     })
   }
   return resolveCanonicalOrigin({
@@ -54,6 +57,7 @@ export const resolveServerSiteOrigin = async (
     production: options.production,
     requireProductionOrigin: options.requireProductionOrigin,
     allowHttpOrigin: options.allowHttpOrigin,
+    trustedLocalConnection: options.trustedLocalConnection,
   })
 }
 
