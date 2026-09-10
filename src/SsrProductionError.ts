@@ -20,9 +20,60 @@ const PRODUCTION_FAILURES = {
 
 export type SsrProductionFailureCode = keyof typeof PRODUCTION_FAILURES
 
+const SSR_INITIALIZATION_PHASES = [
+  'runtime-load',
+  'runtime-compile',
+  'artifact-preflight',
+  'template-preflight',
+] as const
+
+export type SsrInitializationPhase = typeof SSR_INITIALIZATION_PHASES[number]
+
 // Transport, bundled renderer and Vite can instantiate separate module copies.
 // The shared symbol identifies a code; only our allowlisted literals get logged.
 const PRODUCTION_FAILURE = Symbol.for('vue-ssr-lite.internal.production-failure')
+const INITIALIZATION_PHASE = Symbol.for('vue-ssr-lite.internal.initialization-phase')
+
+const isSsrInitializationPhase = (value: unknown): value is SsrInitializationPhase =>
+  typeof value === 'string' && (SSR_INITIALIZATION_PHASES as readonly string[]).includes(value)
+
+/**
+ * Attach a framework-owned phase literal while preserving the original error
+ * where possible; non-extensible failures are retained as the wrapper cause.
+ */
+export const markSsrInitializationFailure = (
+  error: unknown,
+  phase: SsrInitializationPhase
+): unknown => {
+  const failure = error && (typeof error === 'object' || typeof error === 'function')
+    ? error
+    : new Error('SSR initialization failed.', { cause: error })
+  try {
+    Object.defineProperty(failure, INITIALIZATION_PHASE, { value: phase })
+    return failure
+  } catch {
+    const wrapped = new Error('SSR initialization failed.', { cause: error })
+    try {
+      const name = error instanceof Error ? error.name : ''
+      if (['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'URIError'].includes(name)) {
+        wrapped.name = name
+      }
+    } catch { /* A hostile error object cannot affect initialization. */ }
+    Object.defineProperty(wrapped, INITIALIZATION_PHASE, { value: phase })
+    return wrapped
+  }
+}
+
+/** Read a phase only when it is one of the framework's stable allowlisted literals. */
+export const readSsrInitializationPhase = (error: unknown): SsrInitializationPhase | undefined => {
+  try {
+    if (!error || (typeof error !== 'object' && typeof error !== 'function')) return undefined
+    const phase = (error as { [INITIALIZATION_PHASE]?: unknown })[INITIALIZATION_PHASE]
+    return isSsrInitializationPhase(phase) ? phase : undefined
+  } catch {
+    return undefined
+  }
+}
 
 export class SsrProductionArtifactError extends Error {
   readonly [PRODUCTION_FAILURE]: SsrProductionFailureCode
