@@ -1,6 +1,7 @@
 import type { Stats } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
+import { SsrProductionArtifactError } from '../SsrProductionError'
 
 const mimeTypes: Readonly<Record<string, string>> = {
   '.css': 'text/css; charset=utf-8',
@@ -61,7 +62,7 @@ const isWithinRoot = (root: string, candidate: string): boolean => {
   return candidate === root || candidate.startsWith(rootPrefix)
 }
 
-const effectiveViteBasePath = (viteBase: string | undefined): string => {
+export const effectiveViteBasePath = (viteBase: string | undefined): string => {
   if (!viteBase || viteBase === '/' || viteBase === '.' || viteBase === './') {
     return '/'
   }
@@ -106,8 +107,9 @@ const decodeAssetPath = (
   return relativePath
 }
 
+const PRIVATE_BUILD_DIRECTORIES = new Set(['.vite', '.vue-ssr-lite'])
 const isPrivateBuildMetadataPath = (relativePath: string): boolean =>
-  relativePath.split('/', 1)[0].toLowerCase() === '.vite'
+  PRIVATE_BUILD_DIRECTORIES.has(relativePath.split('/', 1)[0].toLowerCase())
 
 /**
  * Identify reserved production build metadata before normal document routing
@@ -124,8 +126,7 @@ export const isSsrPrivateProductionAssetPath = (
   if (!firstSegment) return false
   try {
     return (
-      decodeURIComponent(firstSegment).replace(/^\/+/, '').split('/', 1)[0].toLowerCase() ===
-      '.vite'
+      PRIVATE_BUILD_DIRECTORIES.has(decodeURIComponent(firstSegment).replace(/^\/+/, '').split('/', 1)[0].toLowerCase())
     )
   } catch {
     return false
@@ -138,11 +139,11 @@ const normalizeManifestAssetPath = (value: string): string => {
     /^(?:[a-z]+:)?\/\//i.test(value) ||
     /[?#\\\u0000-\u001f\u007f]/.test(value)
   ) {
-    throw new Error(`Invalid Vite client manifest asset path ${JSON.stringify(value)}.`)
+    throw new SsrProductionArtifactError('client-manifest.invalid-path')
   }
   const normalized = value.replace(/^\/+/, '')
   if (!normalized || normalized.split('/').includes('..')) {
-    throw new Error(`Invalid Vite client manifest asset path ${JSON.stringify(value)}.`)
+    throw new SsrProductionArtifactError('client-manifest.invalid-path')
   }
   return normalized
 }
@@ -152,41 +153,33 @@ const normalizeManifestAssetPath = (value: string): string => {
  * conservative cache policy. */
 export const parseSsrClientAssetManifest = (
   source: string,
-  filename = '.vite/manifest.json'
+  _filename = '.vite/manifest.json'
 ): ReadonlySet<string> => {
   let manifest: unknown
   try {
     manifest = JSON.parse(source)
-  } catch (error) {
-    throw new Error(
-      `vue-ssr-lite could not parse ${filename}: ${error instanceof Error ? error.message : String(error)}`
-    )
+  } catch {
+    throw new SsrProductionArtifactError('client-manifest.invalid-json')
   }
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    throw new Error(`vue-ssr-lite expected ${filename} to contain an object.`)
+    throw new SsrProductionArtifactError('client-manifest.invalid-schema')
   }
 
   const emitted = new Set<string>()
-  for (const [key, value] of Object.entries(manifest)) {
+  for (const value of Object.values(manifest)) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error(
-        `vue-ssr-lite expected ${filename} entry ${JSON.stringify(key)} to contain an object.`
-      )
+      throw new SsrProductionArtifactError('client-manifest.invalid-schema')
     }
     const entry = value as Record<string, unknown>
     if (typeof entry.file !== 'string') {
-      throw new Error(
-        `vue-ssr-lite expected ${filename} entry ${JSON.stringify(key)} to contain a file.`
-      )
+      throw new SsrProductionArtifactError('client-manifest.invalid-schema')
     }
     const candidates = [entry.file]
     for (const field of ['css', 'assets'] as const) {
       const files = entry[field]
       if (files === undefined) continue
       if (!Array.isArray(files) || files.some((file) => typeof file !== 'string')) {
-        throw new Error(
-          `vue-ssr-lite expected ${filename} entry ${JSON.stringify(key)} field ${field} to contain only filenames.`
-        )
+        throw new SsrProductionArtifactError('client-manifest.invalid-schema')
       }
       candidates.push(...(files as string[]))
     }
