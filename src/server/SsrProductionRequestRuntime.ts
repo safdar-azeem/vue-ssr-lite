@@ -1,4 +1,4 @@
-import { createSsrRequestRuntime } from './SsrServerRuntime'
+import { createSsrRequestRuntime } from './SsrRequestRuntime'
 import {
   createSsrRequestScope,
   SsrRequestCancelledError,
