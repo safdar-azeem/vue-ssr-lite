@@ -156,6 +156,8 @@ export interface SsrCompiledConfig {
   development: boolean
   /** Vite's resolved client `base`, carried by the generated SSR runtime. */
   viteBase?: string
+  /** Original Vite root for module identities, independent of deployment root. */
+  moduleRoot?: string
   /** Renderer evaluated beside the application in its Vite/server bundle. */
   renderApplication?: SsrApplicationRenderer
   resolveSiteUrl?: SsrConfig['resolveSiteUrl']
@@ -1161,7 +1163,7 @@ export const generateSsrRuntimeModule = (
     .filter((entry) => entry.applicationFile)
     .map(
       (entry) =>
-        `    [${JSON.stringify(entry.id)}, ${JSON.stringify(absoluteImportPath(root, entry.applicationFile!))}],`
+        `    [${JSON.stringify(entry.id)}, ${JSON.stringify(toProjectRelative(root, absoluteImportPath(root, entry.applicationFile!)))}],`
     )
   return [
     ...importLines,
@@ -1171,11 +1173,12 @@ export const generateSsrRuntimeModule = (
       ? '  const exported = __ssrUserConfig?.default ?? __ssrUserConfig\n  const config = typeof exported === "function" ? await exported() : exported'
       : '  const config = {}',
     `  const viteBase = ${JSON.stringify(viteBase)}`,
+    `  const __vueSsrLiteModuleRoot = ${JSON.stringify(root.replaceAll('\\', '/'))}`,
     ...shellBindings,
     '  const __vueSsrLiteApplicationFiles = new Map([',
     ...applicationFiles,
     '  ])',
-    '  return { ...config, __vueSsrLiteViteBase: viteBase, __vueSsrLiteRenderApplication, __vueSsrLiteShells, __vueSsrLiteApplicationFiles }',
+    '  return { ...config, __vueSsrLiteViteBase: viteBase, __vueSsrLiteModuleRoot, __vueSsrLiteRenderApplication, __vueSsrLiteShells, __vueSsrLiteApplicationFiles }',
     '}',
     '',
     'export default resolveConfig',
@@ -1445,6 +1448,7 @@ export const compileSsrConfig = async (
     options.development ?? (typeof process === 'undefined' || process.env.NODE_ENV !== 'production')
   const loadedRecord = (raw || {}) as SsrConfig & {
     __vueSsrLiteViteBase?: unknown
+    __vueSsrLiteModuleRoot?: unknown
     __vueSsrLiteRenderApplication?: SsrApplicationRenderer
     __vueSsrLiteShells?: Record<string, SsrBoundAppShell>
     __vueSsrLiteApplicationFiles?: Map<string, string>
@@ -1469,7 +1473,9 @@ export const compileSsrConfig = async (
   const config = normalizeSsrConfig(loadedRecord, {
     root: options.root,
     development,
-    applicationFiles,
+    applicationFiles: applicationFiles && new Map([...applicationFiles].map(([id, path]) =>
+      [id, resolve(options.root || process.cwd(), path)] as const
+    )),
     routesModules,
     routesExports,
   })
@@ -1554,6 +1560,7 @@ export const compileSsrConfig = async (
           routes: seoRoutes,
           seo: applicationSeo,
           root: options.root || process.cwd(),
+          publicDirectory: development ? undefined : resolve(server.root, server.clientOutDir),
           sitemapProvider,
           existingEndpoints: compiled.endpoints,
           serverRouteOwnedPaths: compiled.serverRoutes!.ownedPaths,
@@ -1584,6 +1591,8 @@ export const compileSsrConfig = async (
     applications,
     development,
     viteBase,
+    moduleRoot: typeof loadedRecord.__vueSsrLiteModuleRoot === 'string'
+      ? loadedRecord.__vueSsrLiteModuleRoot : server.root,
     renderApplication,
     readiness: config.readiness,
     resolveSiteUrl,
