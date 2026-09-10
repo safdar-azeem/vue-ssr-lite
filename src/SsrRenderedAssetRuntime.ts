@@ -1,45 +1,55 @@
 import type { SsrRenderedApplicationAsset } from './SsrApplicationAssetRuntime'
+import { SsrProductionArtifactError } from './SsrProductionError'
+import { posix, win32 } from 'node:path'
 
 export type SsrViteManifest = Readonly<Record<string, readonly string[]>>
 
 const JAVASCRIPT_ASSET_RE = /\.(?:js|mjs)(?:$|[?#])/i
 const STYLESHEET_ASSET_RE = /\.css(?:$|[?#])/i
+const VUE_BLOCK_QUERY_FIELDS = new Set(['vue', 'type', 'setup', 'index', 'scoped', 'id', 'inline'])
 
-const normalizeModuleId = (id: string): string =>
-  id.replaceAll('\\', '/').replace(/^\0+/, '')
+const moduleIdentity = (id: string, root?: string): string => {
+  let identity = id.replaceAll('\\', '/')
+  // Vite 7 and plugin-vue both use normalizePath(relative(config.root, id)).
+  // Runtime filesystem location is irrelevant after the portable build moves.
+  // Do not strip guessed prefixes, /@fs/, null bytes, or package directories.
+  if (root && !identity.includes('\0')) {
+    const paths = /^[a-z]:\//i.test(root.replaceAll('\\', '/')) || root.startsWith('\\\\') || root.startsWith('//')
+      ? win32 : posix
+    if (paths.isAbsolute(identity)) identity = paths.relative(root, identity).replaceAll('\\', '/')
+  }
 
-const moduleCandidates = (id: string): string[] => {
-  const normalized = normalizeModuleId(id)
-  const query = normalized.indexOf('?')
-  const withoutQuery = query < 0 ? normalized : normalized.slice(0, query)
-  return [...new Set([
-    normalized,
-    normalized.replace(/^\/+/, ''),
-    withoutQuery,
-    withoutQuery.replace(/^\/+/, ''),
-  ])]
+  // Vue registers the SFC filename in ssrContext.modules. Rollup can eliminate
+  // its client facade, leaving only ?vue&type=script (and style/template) keys
+  // in Vite's SSR manifest. These blocks belong to that exact SFC, so aggregate
+  // their authoritative entries even when the facade itself has no entry.
+  // Unrelated queries and external src blocks keep their distinct identities.
+  const queryAt = identity.indexOf('?')
+  if (queryAt < 0) return identity
+  const filename = identity.slice(0, queryAt)
+  const query = new URLSearchParams(identity.slice(queryAt + 1))
+  if (filename.endsWith('.vue') && query.has('vue') &&
+      ['script', 'template', 'style', 'custom'].includes(query.get('type') ?? '') &&
+      [...query.keys()].every((key) => VUE_BLOCK_QUERY_FIELDS.has(key) || /^lang\.[\w-]+$/.test(key))) return filename
+  return identity
 }
 
 export const parseSsrViteManifest = (
   source: string,
-  filename = '.vite/ssr-manifest.json'
+  _filename = '.vite/ssr-manifest.json'
 ): SsrViteManifest => {
   let value: unknown
   try {
     value = JSON.parse(source)
-  } catch (error) {
-    throw new Error(
-      `vue-ssr-lite could not parse ${filename}: ${error instanceof Error ? error.message : String(error)}`
-    )
+  } catch {
+    throw new SsrProductionArtifactError('ssr-manifest.invalid-json')
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`vue-ssr-lite expected ${filename} to contain an object.`)
+    throw new SsrProductionArtifactError('ssr-manifest.invalid-schema')
   }
-  for (const [moduleId, assets] of Object.entries(value)) {
+  for (const assets of Object.values(value)) {
     if (!Array.isArray(assets) || assets.some((asset) => typeof asset !== 'string')) {
-      throw new Error(
-        `vue-ssr-lite expected ${filename} entry ${JSON.stringify(moduleId)} to contain only asset filenames.`
-      )
+      throw new SsrProductionArtifactError('ssr-manifest.invalid-schema')
     }
   }
   return value as SsrViteManifest
@@ -60,26 +70,35 @@ export const assertSupportedSsrViteBase = (
 }
 
 const joinAssetBase = (base: string, file: string): string => {
-  if (/^(?:data|javascript):/i.test(file)) {
-    throw new Error(
-      `vue-ssr-lite rejected unsafe SSR manifest asset URL ${JSON.stringify(file)}.`
-    )
+  if (!file || (/^[a-z][\w+.-]*:/i.test(file) && !/^https?:\/\//i.test(file))) {
+    throw new SsrProductionArtifactError('rendered-assets.invalid-asset')
   }
   if (
-    /[\\\u0000-\u001f]/.test(file) ||
+    /[\\\u0000-\u001f\u007f]/.test(file) ||
     file.split(/[?#]/, 1)[0].split('/').includes('..')
   ) {
-    throw new Error(
-      `vue-ssr-lite rejected unsafe SSR manifest asset path ${JSON.stringify(file)}.`
-    )
+    throw new SsrProductionArtifactError('rendered-assets.invalid-asset')
   }
   // Vite may already include either an absolute path or an absolute CDN base
   // in the authoritative manifest value. Preserve it exactly.
-  if (file.startsWith('/') || isAbsoluteHttpUrl(file)) return file
+  if (isAbsoluteHttpUrl(file)) {
+    try {
+      const parsed = new URL(file, 'https://vue-ssr-lite.invalid')
+      if (parsed.username || parsed.password) throw new Error()
+    } catch {
+      throw new SsrProductionArtifactError('rendered-assets.invalid-asset')
+    }
+    return file
+  }
+  if (file.startsWith('/')) return file
   const cleanFile = file.replace(/^\/+/, '')
   const cleanBase = assertSupportedSsrViteBase(base)
   if (isAbsoluteHttpUrl(cleanBase)) {
-    return new URL(cleanFile, cleanBase).href
+    try {
+      return new URL(cleanFile, cleanBase).href
+    } catch {
+      throw new SsrProductionArtifactError('rendered-assets.invalid-asset')
+    }
   }
   return `${cleanBase.endsWith('/') ? cleanBase : `${cleanBase}/`}${cleanFile}`
 }
@@ -93,10 +112,10 @@ interface SsrManifestAsset {
 const prepareManifestModule = (files: readonly string[], base: string): readonly SsrManifestAsset[] => {
   const assets: SsrManifestAsset[] = []
   for (const file of files) {
+    const href = joinAssetBase(base, file)
     const rel = STYLESHEET_ASSET_RE.test(file) ? 'stylesheet'
       : JAVASCRIPT_ASSET_RE.test(file) ? 'modulepreload' : undefined
     if (!rel) continue
-    const href = joinAssetBase(base, file)
     assets.push({ identity: `${rel}:${href}`, href, rel })
   }
   return assets
@@ -111,9 +130,7 @@ const collectRenderedAssets = (
   for (const moduleId of moduleIds) {
     const files = resolveModule(moduleId)
     if (!files) {
-      throw new Error(
-        `vue-ssr-lite could not resolve rendered module ${JSON.stringify(moduleId)} in Vite's SSR manifest for application ${JSON.stringify(applicationId)}.`
-      )
+      throw new SsrProductionArtifactError('rendered-assets.module-not-in-manifest')
     }
     for (const { identity, href, rel } of files) {
       if (!assets.has(identity)) {
@@ -130,21 +147,23 @@ export const resolveRenderedApplicationAssets = (options: {
   moduleIds: readonly string[]
   base: string
   manifest: SsrViteManifest
-}): SsrRenderedApplicationAsset[] => collectRenderedAssets(options.applicationId, options.moduleIds, (id) => {
-  const key = moduleCandidates(id).find((candidate) => Object.hasOwn(options.manifest, candidate))
-  return key ? prepareManifestModule(options.manifest[key], options.base) : undefined
-})
+  /** Original Vite build root, carried internally by the generated runtime. */
+  root?: string
+}): SsrRenderedApplicationAsset[] =>
+  createSsrRenderedAssetResolver(options.manifest, options.base, options.root)(options.applicationId, options.moduleIds)
 
 /** Prepare immutable manifest relationships at server startup. Request-specific
  * rendered module IDs still determine the exact asset selection and order. */
-export const createSsrRenderedAssetResolver = (manifest: SsrViteManifest, base: string) => {
-  const modules = new Map(Object.entries(manifest).map(([id, files]) =>
-    [id, prepareManifestModule(files, base)] as const
-  ))
-  const resolveModule = (id: string) => {
-    const key = moduleCandidates(id).find((candidate) => modules.has(candidate))
-    return key ? modules.get(key) : undefined
+export const createSsrRenderedAssetResolver = (manifest: SsrViteManifest, base: string, root?: string) => {
+  const modules = new Map<string, SsrManifestAsset[]>()
+  for (const [id, files] of Object.entries(manifest)) {
+    const identity = moduleIdentity(id, root)
+    const assets = modules.get(identity) ?? []
+    assets.push(...prepareManifestModule(files, base))
+    // An authoritative empty entry is meaningful: eager CSS/JS already lives
+    // in the HTML template. Missing entries must still fail below.
+    modules.set(identity, assets)
   }
   return (applicationId: string, moduleIds: readonly string[]) =>
-    collectRenderedAssets(applicationId, moduleIds, resolveModule)
+    collectRenderedAssets(applicationId, moduleIds, (id) => modules.get(moduleIdentity(id, root)))
 }
