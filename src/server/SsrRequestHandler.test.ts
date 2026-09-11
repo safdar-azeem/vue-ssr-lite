@@ -774,4 +774,151 @@ describe('transport-independent SSR request handler', () => {
       scopeB.dispose()
     }
   })
+
+  it('renders a development HTML error document with message, stack, path and error id', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const definition = compiledDefinition({
+      id: 'boom',
+      match: (request) => request.pathname === '/boom',
+      handle: () => {
+        throw new TypeError('Cannot read properties of undefined (reading "x")')
+      },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/boom'),
+        handlerRuntime(scope, definition)
+      )
+      expect(response?.statusCode).toBe(500)
+      const html = String(response?.body)
+      expect(html).toContain('Application error')
+      expect(html).toContain('TypeError')
+      expect(html).toContain('Cannot read properties of undefined (reading &quot;x&quot;)')
+      expect(html).toContain('Path: /boom')
+      expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+      expect(html).toContain('TypeError: Cannot read properties of undefined')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('escapes hostile development error text and represents string throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const definition = compiledDefinition({
+      id: 'inject',
+      match: (request) => request.pathname === '/inject',
+      handle: () => {
+        throw new Error('<script>alert(1)</script>')
+      },
+    })
+    const stringDefinition = compiledDefinition({
+      id: 'string',
+      match: (request) => request.pathname === '/string',
+      handle: () => {
+        throw 'plain string failure'
+      },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const injected = await handleSsrRequest(
+        normalizedHtmlRequest('/inject'),
+        handlerRuntime(scope, definition)
+      )
+      expect(String(injected?.body)).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+      expect(String(injected?.body)).not.toContain('<script>alert(1)</script>')
+      const thrown = await handleSsrRequest(
+        normalizedHtmlRequest('/string'),
+        handlerRuntime(scope, stringDefinition)
+      )
+      expect(String(thrown?.body)).toContain('plain string failure')
+      expect(String(thrown?.body)).not.toContain('[object Object]')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('keeps production HTML generic while logging the original error id', async () => {
+    const logger = { error: vi.fn() }
+    const definition = compiledDefinition({
+      id: 'boom',
+      match: (request) => request.pathname === '/boom',
+      handle: () => {
+        throw new TypeError('Cannot read properties of undefined (reading "x")')
+      },
+    })
+    Object.assign(definition.server, { logger })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/boom'),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      const html = String(response?.body)
+      expect(html).toContain('Application unavailable')
+      expect(html).not.toContain('Cannot read properties')
+      expect(logger.error).toHaveBeenCalledWith('ssr.request.failed', expect.objectContaining({
+        errorType: 'TypeError',
+        message: 'Cannot read properties of undefined (reading "x")',
+        errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+      }))
+      const details = logger.error.mock.calls[0]![1] as Record<string, unknown>
+      expect(html).toContain(`Error ID: ${details.errorId}`)
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('passes the original error and error id to renderError', async () => {
+    const thrown = new Error('original failure')
+    const renderError = vi.fn(() => ({ statusCode: 418, body: 'custom' }))
+    const definition = compiledDefinition({
+      id: 'boom',
+      match: (request) => request.pathname === '/boom',
+      handle: () => {
+        throw thrown
+      },
+    })
+    Object.assign(definition.server, { renderError })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/boom'),
+        handlerRuntime(scope, definition)
+      )
+      expect(response?.statusCode).toBe(418)
+      expect(response?.body).toBe('custom')
+      expect(renderError).toHaveBeenCalledWith(expect.objectContaining({
+        error: thrown,
+        errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+        kind: 'internal',
+        production: false,
+      }))
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('omits an HTML error body for HEAD', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const definition = compiledDefinition({
+      id: 'boom',
+      match: (request) => request.pathname === '/boom',
+      handle: () => {
+        throw new Error('hidden from head')
+      },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        Object.freeze({ ...normalizedHtmlRequest('/boom'), method: 'HEAD' }),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      expect(response?.statusCode).toBe(500)
+      expect(response?.body).toBeUndefined()
+      expect(response?.headers).toMatchObject({ 'cache-control': 'no-store' })
+    } finally {
+      scope.dispose()
+    }
+  })
 })
