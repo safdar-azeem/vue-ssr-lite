@@ -11,6 +11,7 @@ import {
   normalizeServerResponse, sanitizeFetchedResponseHeaders,
   rememberLegacyResponseHeaders, unchangedLegacyResponseHeaders,
 } from '../server-routes/SsrServerResponseRuntime'
+import { carrySsrFailure, createSsrErrorDiagnostic, observeSsrFailure } from '../SsrErrorDiagnostic'
 import { renderSsrErrorDocument } from './SsrHtmlRuntime'
 import { safeSsrLog } from '../SsrObservability'
 
@@ -76,17 +77,27 @@ export const createSsrProductionRequestHandler = (options: {
         scope!.signal.removeEventListener('abort', abortBody)
         dispose()
       }
+      const reportTransportFailure = (error: unknown) => {
+        const failure = observeSsrFailure(error)
+        safeSsrLog(runtime!.definition().server.logger, 'error', 'ssr.transport.failed', {
+          requestId: request.requestId,
+          pathname: request.url,
+          error: failure.original,
+          errorId: failure.occurrence.errorId,
+          occurrence: failure.occurrence,
+        })
+        return carrySsrFailure(failure.original, failure.occurrence)
+      }
       const abortBody = () => {
         if (finished) return
         const reason = scope!.signal.reason
-        if (reason instanceof SsrRequestTimeoutError) {
-          safeSsrLog(runtime!.definition().server.logger, 'error', 'ssr.transport.failed', {
-            requestId: request.requestId, pathname: request.url, error: reason,
-          })
-        }
         finish()
         void reader.cancel(reason).catch(() => undefined)
-        controller.error(reason)
+        controller.error(
+          reason instanceof SsrRequestTimeoutError
+            ? reportTransportFailure(reason)
+            : reason
+        )
       }
       const body = new ReadableStream<Uint8Array>({
         start(value) {
@@ -103,10 +114,7 @@ export const createSsrProductionRequestHandler = (options: {
           } catch (error) {
             if (finished) return
             finish()
-            safeSsrLog(runtime!.definition().server.logger, 'error', 'ssr.transport.failed', {
-              requestId: request.requestId, pathname: request.url, error,
-            })
-            controller.error(error)
+            controller.error(reportTransportFailure(error))
           }
         },
         cancel(reason) {
@@ -118,11 +126,23 @@ export const createSsrProductionRequestHandler = (options: {
     } catch (error) {
       dispose()
       if (signal.aborted || error instanceof SsrRequestCancelledError) throw new SsrRequestCancelledError()
+      const diagnostic = createSsrErrorDiagnostic({
+        error,
+        requestId: request.requestId,
+        applicationId: 'unknown',
+        pathname: request.url,
+      })
       safeSsrLog(runtime?.definition().server.logger, 'error', 'ssr.runtime.failed', {
-        requestId: request.requestId, applicationId: 'unknown', pathname: request.url, error,
+        requestId: request.requestId,
+        applicationId: 'unknown',
+        pathname: request.url,
+        error,
+        errorId: diagnostic.errorId,
       })
       return new Response(request.method === 'HEAD' ? null : renderSsrErrorDocument(
-        'Application unavailable', 'The application could not render this page. Please try again.'
+        'Application unavailable',
+        'The application could not render this page. Please try again.',
+        { errorId: diagnostic.errorId },
       ), {
         status: 500,
         headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
