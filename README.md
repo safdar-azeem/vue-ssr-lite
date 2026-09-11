@@ -1182,7 +1182,7 @@ export default defineServer({
 | `diagnostics`              | Development diagnostics                         |
 | `logger`                   | Structured logger                               |
 | `onMetrics`                | Render metrics callback                         |
-| `renderError`              | Custom render-error response                    |
+| `renderError`              | Custom public error response                    |
 
 Only requests that reach Vue SSR consume this capacity. Cache hits, SPA HTML, server routes, legacy endpoints, health/readiness checks, Vite responses, and production assets bypass it. When both limits are full, the server returns `503 Service Unavailable`; queue time remains part of `requestTimeoutMs`. Set `maxQueuedSsrRequests: 0` to reject immediately whenever all active slots are occupied.
 
@@ -1211,7 +1211,46 @@ On **Vercel**, deploy as a normal Vite project with the existing build command. 
 
 **Netlify is not supported in this version.** Detected Netlify builds stop because its current framework integration cannot automatically select a safe static publish directory while preserving the portable server output. Use Vercel or Node hosting; never publish the complete `dist` directory as a static site.
 
-Production request failures keep the browser error generic and emit safe structured operator diagnostics, using the configured logger when present. Asset failures identify the artifact and reason, distinguishing missing or malformed build files from rendered modules that do not match the SSR manifest.
+## Diagnostics
+
+Development (`vue-ssr-lite dev`) shows a detailed error page and prints the same exception name, message, and stack in the terminal. This is local developer tooling.
+
+Production (`vue-ssr-lite start`, generic Node, and Vercel) keeps two channels separate:
+
+- **Public page:** visitors see a generic “Application unavailable” document and a short `errorId` such as `vssl_8f3c2a7e1b0d4c56`. The page never includes the exception message, stack, filesystem paths, headers, cookies, request bodies, environment values, or config.
+- **Private server logs:** operators receive the actual `error.name`, `error.message`, and `error.stack` when available, plus the same `errorId`, `requestId`, pathname, and any framework classification (`reason`, `package`, `export`, artifact `code`). Search logs by the error ID from the browser page.
+
+There is no query-string or header switch that exposes production stacks to a public requester.
+
+On **Vercel**, open the project **Logs / Runtime Logs** and search for the error ID. `console.error` from the generated function is enough; no vue-ssr-lite-specific Vercel logging configuration is required. If the function cannot load Core, the bootstrap fallback logs `ssr.bootstrap.failed` and the safe text response includes only `Internal Server Error` plus that error ID. After Core has loaded, later failures use Core/request diagnostics; a last-resort invocation catch is `ssr.invocation.failed`, not a runtime-load bootstrap failure.
+
+When no `server.logger` is configured, the built-in console path prints:
+
+```text
+[vue-ssr-lite] ssr.request.failed
+{ errorId, requestId, applicationId, pathname, errorType, message, stack, ... }
+```
+
+A custom `SsrLogger` keeps receiving structured details on the existing `(event, details)` methods. Error details include:
+
+| Field | Meaning |
+| --- | --- |
+| `errorId` | Correlation id shared with the public page |
+| `requestId` | Request id |
+| `applicationId` / `entryId` | Selected application |
+| `pathname` | Sanitized path |
+| `phase` / `reason` / `code` / `artifact` | Framework classification when applicable |
+| `package` / `module` / `export` | Allowlisted runtime-load identifiers |
+| `errorType` | Error name |
+| `error` | Safe public summary |
+| `message` | Exception message (operator-confidential) |
+| `stack` | Exception stack when present (operator-confidential) |
+
+Private logs are operator-confidential. The framework does not recursively parse `Error.message` for secrets, and it never automatically logs headers, cookies, bodies, config, `process.env`, or `Error.cause`.
+
+`renderError` customizes only the public response. Framework logging still runs first.
+
+Asset and runtime-load failures still emit structured reasons (missing package, missing named export, malformed manifests) in addition to the original loader or exception details in the private log.
 
 # CLI
 
