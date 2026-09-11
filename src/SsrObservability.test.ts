@@ -72,11 +72,81 @@ describe('safe operator diagnostics', () => {
     expect(logger.error).toHaveBeenCalledWith('ssr.runtime.failed', expect.objectContaining({
       phase: 'runtime-load',
       errorType: 'SyntaxError',
+      reason: 'runtime-load-failed',
     }))
     expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/private-token|SsrRuntime\.js/)
     expect(readSsrInitializationPhase({
       [Symbol.for('vue-ssr-lite.internal.initialization-phase')]: 'consumer-secret',
     })).toBeUndefined()
+  })
+
+  it('emits a structured runtime-load reason and allowlisted module identifiers', () => {
+    const logger = { error: vi.fn() }
+    const failure = markSsrInitializationFailure(
+      Object.assign(
+        new SyntaxError(
+          "The requested module 'clickout-lite' does not provide an export named 'onClickOutside'"
+        ),
+        {
+          cause: { password: 'secret-password', stack: 'private-stack /private/build/SsrRuntime.js' },
+          stack: "SyntaxError: The requested module 'clickout-lite' does not provide an export named 'onClickOutside'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)",
+        }
+      ),
+      'runtime-load'
+    )
+    safeSsrLog(logger, 'error', 'ssr.runtime.failed', { error: failure })
+    expect(logger.error).toHaveBeenCalledWith('ssr.runtime.failed', expect.objectContaining({
+      phase: 'runtime-load',
+      errorType: 'SyntaxError',
+      reason: 'missing-named-export',
+      package: 'clickout-lite',
+      export: 'onClickOutside',
+    }))
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/secret-password|private-stack|SsrRuntime\.js/)
+  })
+
+  it('does not copy identifier-looking fragments from spoofed application errors', () => {
+    const logger = { error: vi.fn() }
+    const failure = markSsrInitializationFailure(
+      new Error("The requested module 'secret-password' does not provide an export named 'privateToken'"),
+      'runtime-load'
+    )
+    safeSsrLog(logger, 'error', 'ssr.runtime.failed', { error: failure })
+    expect(logger.error).toHaveBeenCalledWith('ssr.runtime.failed', expect.objectContaining({
+      phase: 'runtime-load',
+      reason: 'runtime-load-failed',
+    }))
+    expect(logger.error.mock.calls[0]![1]).not.toHaveProperty('package')
+    expect(logger.error.mock.calls[0]![1]).not.toHaveProperty('export')
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/secret-password|privateToken/)
+  })
+
+  it('does not copy identifier-looking fragments from spoofed Vite prefixes or error codes', () => {
+    const logger = { error: vi.fn() }
+    for (const [error, reason] of [
+      [
+        new Error("[vite] Named export 'privateToken' not found. The requested module 'secret-password' is a CommonJS module, which may not support all module.exports as named exports."),
+        'missing-named-export',
+      ],
+      [
+        Object.assign(
+          new Error("Cannot find package 'secret-password' imported from /private/build/user/project/SsrRuntime.js"),
+          { code: 'ERR_MODULE_NOT_FOUND' }
+        ),
+        'missing-runtime-dependency',
+      ],
+    ] as const) {
+      logger.error.mockClear()
+      safeSsrLog(logger, 'error', 'ssr.runtime.failed', {
+        error: markSsrInitializationFailure(error, 'runtime-load'),
+      })
+      expect(logger.error).toHaveBeenCalledWith('ssr.runtime.failed', expect.objectContaining({ reason }))
+      const details = logger.error.mock.calls[0]![1] as Record<string, unknown>
+      expect(details).not.toHaveProperty('package')
+      expect(details).not.toHaveProperty('module')
+      expect(details).not.toHaveProperty('export')
+      expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/secret-password|privateToken/)
+    }
   })
 
   it('emits an actionable structured production origin error without a configured logger', () => {
