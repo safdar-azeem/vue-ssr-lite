@@ -5,7 +5,7 @@ import { build } from 'esbuild'
 import { nodeFileTrace } from '@vercel/nft'
 import { collectDeploymentStaticAssets, copyDeploymentFile, deploymentFiles, type DeploymentStaticAsset } from '../DeploymentAssets'
 import { DEPLOYMENT_METADATA_PATH, parseDeploymentMetadata } from '../DeploymentMetadata'
-import { createSsrVercelBootstrapDiagnosticSource } from '../../SsrRuntimeLoadDiagnostics'
+import { SSR_RUNTIME_LOAD_NODE_CODES } from '../../SsrRuntimeLoadDiagnostics'
 
 const posix = (path: string) => path.split(sep).join('/')
 const modulePath = (path: string) => { const value = posix(path); return value.startsWith('.') ? value : `./${value}` }
@@ -59,6 +59,43 @@ export const createVercelTraceWarningMessages = (
 
 const indentBootstrapSource = (source: string, indent: string): string =>
   source.split('\n').map((line) => (line ? indent + line : line)).join('\n')
+
+const VERCEL_BOOTSTRAP_ERROR_NAMES = [
+  'Error',
+  'TypeError',
+  'ReferenceError',
+  'RangeError',
+  'SyntaxError',
+  'URIError',
+  'SsrRuntimeLoadError',
+] as const
+
+/** Minimal bootstrap classification. Identifiers stay in the Core observability path. */
+const createSsrVercelBootstrapDiagnosticSource = (): string => [
+  `const codes = ${JSON.stringify(SSR_RUNTIME_LOAD_NODE_CODES)}`,
+  `const names = ${JSON.stringify(VERCEL_BOOTSTRAP_ERROR_NAMES)}`,
+  'let reason = "runtime-load-failed"',
+  'let errorType = "Error"',
+  'try {',
+  '  if (error && (typeof error === "object" || typeof error === "function")) {',
+  '    const name = typeof error.name === "string" ? error.name : ""',
+  '    const code = typeof error.code === "string" ? error.code : ""',
+  '    if (names.includes(name)) errorType = name',
+  '    if (typeof codes[code] === "string") reason = codes[code]',
+  '    else if (name === "SyntaxError") {',
+  '      const line = typeof error.message === "string" ? error.message.split(/\\r?\\n/, 1)[0] : ""',
+  '      if (line.includes("does not provide an export named") || line.startsWith("Named export ") || line.startsWith("[vite] Named export ")) reason = "missing-named-export"',
+  '      else if (line.includes("Cannot use import statement outside a module")) reason = "module-format-incompatibility"',
+  '      else if (/^(?:Unexpected |Invalid or unexpected token|missing \\) after argument list)/.test(line)) reason = "module-syntax-error"',
+  '    }',
+  '  }',
+  '} catch {}',
+  'try {',
+  '  console.error(JSON.stringify({ level: "error", event: "ssr.bootstrap.failed", phase: "runtime-load", errorType, reason }))',
+  '} catch {',
+  '  console.error("[vue-ssr-lite] Vercel function initialization or invocation failed.")',
+  '}',
+].join('\n')
 
 /** The function entry itself must cold-load without evaluating application code. */
 export const createVercelFunctionBootstrap = (
