@@ -3,6 +3,7 @@ import {
   serializeManagedHead,
   type ManagedHeadSnapshot,
 } from '../SsrManagedHead'
+import { isSsrErrorId } from '../SsrErrorDiagnostic'
 import {
   escapeSsrHtml,
   getSsrStateElementId,
@@ -446,8 +447,55 @@ export const injectSsrHtml = (
   )
 }
 
+export type SsrErrorDocumentDevelopmentDetails = {
+  name?: string
+  message?: string
+  stack?: string
+  pathname?: string
+}
+
+export type SsrErrorDocumentOptions = {
+  language?: string
+  errorId?: string
+  development?: SsrErrorDocumentDevelopmentDetails
+}
+
+const ssrErrorDocument = (
+  language: string,
+  title: string,
+  inner: string,
+  align: 'center' | 'left'
+): string =>
+  `<!doctype html><html lang="${escapeSsrHtml(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeSsrHtml(title)}</title></head><body><main id="main-content" style="min-height:70vh;display:grid;place-items:center;padding:2rem;text-align:${align};font-family:system-ui,sans-serif" tabindex="-1">${inner}</main></body></html>`
+
 export const renderSsrErrorDocument = (
   title: string,
   message: string,
-  language = 'en'
-): string => `<!doctype html><html lang="${escapeSsrHtml(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeSsrHtml(title)}</title></head><body><main id="main-content" style="min-height:70vh;display:grid;place-items:center;padding:2rem;text-align:center;font-family:system-ui,sans-serif" tabindex="-1"><div><h1>${escapeSsrHtml(title)}</h1><p>${escapeSsrHtml(message)}</p><p><a href="/">Return home</a></p></div></main></body></html>`
+  languageOrOptions: string | SsrErrorDocumentOptions = 'en'
+): string => {
+  const options: SsrErrorDocumentOptions = typeof languageOrOptions === 'string'
+    ? { language: languageOrOptions }
+    : languageOrOptions ?? {}
+  const language = options.language ?? 'en'
+  const errorId = isSsrErrorId(options.errorId) ? options.errorId : undefined
+  const errorIdHtml = errorId ? `<p>Error ID: ${escapeSsrHtml(errorId)}</p>` : ''
+  if (options.development) {
+    const name = options.development.name
+    const detail = options.development.message ?? message
+    const pathname = options.development.pathname
+    const stack = options.development.stack
+    return ssrErrorDocument(language, title, `<div style="max-width:56rem;width:100%"><h1>${escapeSsrHtml(title)}</h1>${
+      name ? `<p><strong>${escapeSsrHtml(name)}</strong></p>` : ''
+    }<p>${escapeSsrHtml(detail)}</p>${
+      pathname ? `<p>Path: ${escapeSsrHtml(pathname)}</p>` : ''
+    }${errorIdHtml}${
+      stack ? `<pre style="overflow:auto;white-space:pre-wrap;text-align:left">${escapeSsrHtml(stack)}</pre>` : ''
+    }</div>`, 'left')
+  }
+  return ssrErrorDocument(
+    language,
+    title,
+    `<div><h1>${escapeSsrHtml(title)}</h1><p>${escapeSsrHtml(message)}</p>${errorIdHtml}<p><a href="/">Return home</a></p></div>`,
+    'center'
+  )
+}
