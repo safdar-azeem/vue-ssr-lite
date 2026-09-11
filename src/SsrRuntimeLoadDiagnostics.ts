@@ -1,4 +1,4 @@
-/** Safe runtime-load diagnostics. Classify recognized loader failures; never copy exception text. */
+/** Safe runtime-load classification. Never copy exception text into structured fields; operator logs read name/message/stack separately. */
 
 export const SSR_RUNTIME_LOAD_REASONS = [
   'missing-runtime-dependency',
