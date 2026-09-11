@@ -5,6 +5,7 @@ import { dispatchServerRoute, matchServerRoute, SsrServerRouteBadRequest } from 
 import type { SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
 import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
+import { createSsrErrorDiagnostic, describeSsrThrownValue } from '../SsrErrorDiagnostic'
 import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../SsrObservability'
 import { prepareSsrCompiledMetadata } from './SsrCompiledMetadata'
 import { resolvePublicConfigValue } from '../SsrPublicConfig'
@@ -788,11 +789,18 @@ export const handleSsrRequest = async (
     if (error instanceof SsrLegacyInformationalResponse) return error.response
     if (error instanceof SsrRequestCancelledError) throw error
     const definition = activeDefinition
+    const diagnostic = createSsrErrorDiagnostic({
+      error,
+      requestId: request.requestId,
+      entryId: selectedEntryId,
+      pathname,
+    })
     safeSsrLog(definition.server.logger, 'error', 'ssr.request.failed', {
       requestId: request.requestId,
       entryId: selectedEntryId,
       pathname,
       error,
+      errorId: diagnostic.errorId,
     })
     let timeout =
       error instanceof SsrRequestTimeoutError ||
@@ -812,6 +820,7 @@ export const handleSsrRequest = async (
           () =>
             definition.server.renderError!({
               error,
+              errorId: diagnostic.errorId,
               kind: timeout ? 'timeout' : 'internal',
               production: runtime.production,
               request: activeRenderRequest,
@@ -835,25 +844,43 @@ export const handleSsrRequest = async (
           timeout = true
           statusCode = 504
         }
+        const renderDiagnostic = createSsrErrorDiagnostic({
+          error: renderError,
+          requestId: request.requestId,
+          entryId: selectedEntryId,
+          pathname,
+        })
         safeSsrLog(definition.server.logger, 'error', 'ssr.error-renderer.failed', {
           requestId: request.requestId,
           entryId: selectedEntryId,
           pathname,
           error: renderError,
+          errorId: renderDiagnostic.errorId,
         })
       }
     }
     if (isHtmlNavigation(request, pathname)) {
+      const thrown = describeSsrThrownValue(error)
+      const title = timeout ? 'Request timed out' : runtime.production ? 'Application unavailable' : 'Application error'
       return {
         statusCode,
-        body: renderSsrErrorDocument(
-          timeout ? 'Request timed out' : 'Application unavailable',
-          runtime.production
-            ? 'The application could not render this page. Please try again.'
-            : error instanceof Error
-              ? error.message
-              : 'Unknown rendering failure.'
-        ),
+        body: request.method === 'HEAD'
+          ? undefined
+          : renderSsrErrorDocument(
+            title,
+            runtime.production
+              ? 'The application could not render this page. Please try again.'
+              : thrown.message,
+            {
+              errorId: diagnostic.errorId,
+              development: runtime.production ? undefined : {
+                name: thrown.name,
+                message: thrown.message,
+                stack: thrown.stack,
+                pathname,
+              },
+            }
+          ),
         headers: {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'no-store',
@@ -861,7 +888,11 @@ export const handleSsrRequest = async (
         },
       }
     }
-    return jsonResponse(statusCode, { status: 'error', service: definition.name })
+    return jsonResponse(statusCode, {
+      status: 'error',
+      service: definition.name,
+      errorId: diagnostic.errorId,
+    })
   } finally {
     if (applicationRequest) timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
   }
