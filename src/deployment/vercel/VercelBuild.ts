@@ -5,6 +5,7 @@ import { build } from 'esbuild'
 import { nodeFileTrace } from '@vercel/nft'
 import { collectDeploymentStaticAssets, copyDeploymentFile, deploymentFiles, type DeploymentStaticAsset } from '../DeploymentAssets'
 import { DEPLOYMENT_METADATA_PATH, parseDeploymentMetadata } from '../DeploymentMetadata'
+import { createSsrVercelBootstrapDiagnosticSource } from '../../SsrRuntimeLoadDiagnostics'
 
 const posix = (path: string) => path.split(sep).join('/')
 const modulePath = (path: string) => { const value = posix(path); return value.startsWith('.') ? value : `./${value}` }
@@ -56,6 +57,9 @@ export const createVercelTraceWarningMessages = (
     )
 }
 
+const indentBootstrapSource = (source: string, indent: string): string =>
+  source.split('\n').map((line) => (line ? indent + line : line)).join('\n')
+
 /** The function entry itself must cold-load without evaluating application code. */
 export const createVercelFunctionBootstrap = (
   deployedProject: string,
@@ -67,17 +71,15 @@ export const createVercelFunctionBootstrap = (
   'const loadHandler = () => handlerPromise ??= import(' + JSON.stringify(deployedEntry) + ')',
   '  .then((module) => {',
   '    if (typeof module.default !== "function") {',
-  '      throw new Error("The generated Vercel entry must default-export a request handler.")',
+  '      throw Object.assign(new Error("The generated Vercel entry must default-export a request handler."), {',
+  '        code: "ERR_VUE_SSR_LITE_INVALID_RUNTIME_EXPORT",',
+  '      })',
   '    }',
   '    return module.default',
   '  })',
   '  .catch((error) => { handlerPromise = undefined; throw error })',
   'export default async function vueSsrLiteVercelFunction(request, response) {',
-  '  try {',
-  '    const handler = await loadHandler()',
-  '    return await handler(request, response)',
-  '  } catch {',
-  '    console.error("[vue-ssr-lite] Vercel function initialization or invocation failed.")',
+  '  const sendFailure = () => {',
   '    if (response.headersSent || response.writableEnded || response.destroyed) {',
   '      if (!response.destroyed && !response.writableEnded) response.destroy()',
   '      return',
@@ -86,6 +88,20 @@ export const createVercelFunctionBootstrap = (
   '    response.setHeader("content-type", "text/plain; charset=utf-8")',
   '    response.setHeader("cache-control", "no-store")',
   '    response.end(request.method === "HEAD" ? "" : "Internal Server Error")',
+  '  }',
+  '  let handler',
+  '  try {',
+  '    handler = await loadHandler()',
+  '  } catch (error) {',
+  indentBootstrapSource(createSsrVercelBootstrapDiagnosticSource(), '    '),
+  '    sendFailure()',
+  '    return',
+  '  }',
+  '  try {',
+  '    return await handler(request, response)',
+  '  } catch {',
+  '    console.error("[vue-ssr-lite] Vercel function initialization or invocation failed.")',
+  '    sendFailure()',
   '  }',
   '}',
   '',
@@ -143,13 +159,11 @@ export const buildVercelDeployment = async (options: {
     await build({
       stdin: {
         contents: [
-          `import { createVercelHandler } from ${JSON.stringify(runtimeEntry())}`,
+          `import { createVercelHandler, readVercelRuntimeConfig } from ${JSON.stringify(runtimeEntry())}`,
           'import { fileURLToPath } from "node:url"',
           `const root = fileURLToPath(new URL(${JSON.stringify(modulePath(relative(stage, root)) + '/')}, import.meta.url))`,
           'export default createVercelHandler({ root, loadRuntime: async () => {',
-          `  const loaded = await import(${JSON.stringify(runtimeSpecifier)})`,
-          '  const exported = loaded.default ?? loaded',
-          '  const config = typeof exported === "function" ? await exported() : exported',
+          `  const config = await readVercelRuntimeConfig(await import(${JSON.stringify(runtimeSpecifier)}))`,
           `  return { ...config, server: { ...config.server, root, clientOutDir: ${JSON.stringify(posix(relative(root, clientRoot)))} } }`,
           '} })',
         ].join('\n'),
