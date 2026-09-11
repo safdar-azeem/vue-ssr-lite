@@ -2,7 +2,26 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createSsrProductionRequestHandler } from '../../server/SsrProductionRequestRuntime'
 import { createSsrRequestBodySource, writeWebResponse } from '../../server/SsrWebHttpRuntime'
 import { safeSsrLog } from '../../SsrObservability'
+import {
+  assertSsrRuntimeModuleExport,
+  createSsrRuntimeLoadFailure,
+} from '../../SsrRuntimeLoadDiagnostics'
 import { normalizeDeploymentRequest } from '../DeploymentRequest'
+
+/** Unwrap the generated SsrRuntime.js contract without evaluating application rendering. */
+export const readVercelRuntimeConfig = async (
+  loaded: unknown
+): Promise<Record<string, unknown>> => {
+  assertSsrRuntimeModuleExport(loaded)
+  const exported = loaded && typeof loaded === 'object'
+    ? (loaded as { default?: unknown }).default ?? loaded
+    : loaded
+  const config = typeof exported === 'function' ? await exported() : exported
+  if (config == null || typeof config !== 'object' || Array.isArray(config)) {
+    throw createSsrRuntimeLoadFailure('invalid-runtime-export')
+  }
+  return config as Record<string, unknown>
+}
 
 /** Build Output API Nodejs launcher, with helpers/body parsing disabled. No listener. */
 export const createVercelHandler = (options: Parameters<typeof createSsrProductionRequestHandler>[0]) => {
