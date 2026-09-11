@@ -95,6 +95,9 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
   }), { a: { root: Shell }, b: { root: Shell } })
 }
 
+const FIXTURE_PACKAGE = 'fixture-runtime-package'
+const FIXTURE_EXPORT = 'missingExport'
+
 describe('shared production executor', () => {
   it.each([
     {
@@ -129,27 +132,27 @@ describe('shared production executor', () => {
       errorType: 'SyntaxError',
       loadRuntime: async () => {
         throw Object.assign(
-          new SyntaxError("The requested module 'clickout-lite' does not provide an export named 'onClickOutside'"),
+          new SyntaxError(`The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'`),
           {
-            stack: "SyntaxError: The requested module 'clickout-lite' does not provide an export named 'onClickOutside'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)",
+            stack: `SyntaxError: The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)`,
           }
         )
       },
-      expected: { package: 'clickout-lite', export: 'onClickOutside' },
+      expected: { package: FIXTURE_PACKAGE, export: FIXTURE_EXPORT },
     },
     {
       reason: 'missing-runtime-dependency',
       errorType: 'Error',
       loadRuntime: async () => {
         throw Object.assign(
-          new Error("Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js"),
+          new Error(`Cannot find package '${FIXTURE_PACKAGE}' imported from /private/build/user/project/SsrRuntime.js`),
           {
             code: 'ERR_MODULE_NOT_FOUND',
-            stack: "Error: Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js\n    at packageResolve (node:internal/modules/esm/resolve:123:9)",
+            stack: `Error: Cannot find package '${FIXTURE_PACKAGE}' imported from /private/build/user/project/SsrRuntime.js\n    at packageResolve (node:internal/modules/esm/resolve:123:9)`,
           }
         )
       },
-      expected: { package: 'clickout-lite' },
+      expected: { package: FIXTURE_PACKAGE },
     },
     {
       reason: 'invalid-runtime-export',
@@ -196,7 +199,9 @@ describe('shared production executor', () => {
     const html = await response.text()
     expect(response.status).toBe(500)
     expect(html).toContain('Application unavailable')
-    expect(html).not.toMatch(/clickout-lite|onClickOutside|SsrRuntime|private\/build|invalid-runtime-export/)
+    expect(html).not.toContain(FIXTURE_PACKAGE)
+    expect(html).not.toContain(FIXTURE_EXPORT)
+    expect(html).not.toMatch(/SsrRuntime|private\/build|invalid-runtime-export/)
     const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
     expect(diagnostic).toMatchObject({
       event: 'ssr.runtime.failed',
