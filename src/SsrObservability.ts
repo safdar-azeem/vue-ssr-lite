@@ -62,15 +62,8 @@ const failureType = (error: unknown): string => {
 const safeIdentifier = (value: unknown): string =>
   typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : 'unknown'
 
-const runtimeLoadDiagnostic = (
-  error: unknown,
-  initializationPhase: ReturnType<typeof readSsrInitializationPhase>
-): Record<string, unknown> => {
-  const classification = sanitizeSsrRuntimeLoadClassification(
-    readSsrRuntimeLoadFailure(error) ?? (
-      initializationPhase === 'runtime-load' ? classifySsrRuntimeLoadFailure(error) : undefined
-    )
-  )
+const runtimeLoadDiagnostic = (error: unknown): Record<string, unknown> => {
+  const classification = sanitizeSsrRuntimeLoadClassification(readRuntimeLoadFailure(error))
   if (!classification) return {}
   return {
     reason: classification.reason,
@@ -99,7 +92,7 @@ const diagnosticDetails = (details?: Record<string, unknown>): Record<string, un
     ...(initializationPhase ? { phase: initializationPhase } : {}),
     ...(productionFailure
       ? { code: productionFailure.code, artifact: productionFailure.artifact, reason: productionFailure.reason }
-      : runtimeLoadDiagnostic(details?.error, initializationPhase)),
+      : runtimeLoadDiagnostic(details?.error)),
   }
 }
 
