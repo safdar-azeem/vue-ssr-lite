@@ -26,38 +26,39 @@ const nodeError = (message: string, code?: string, name: 'Error' | 'SyntaxError'
   return error
 }
 
+const FIXTURE_PACKAGE = 'fixture-runtime-package'
+const FIXTURE_EXPORT = 'missingExport'
+const VITE_NAMED_EXPORT_MESSAGE =
+  `[vite] Named export '${FIXTURE_EXPORT}' not found. The requested module '${FIXTURE_PACKAGE}' is a CommonJS module, which may not support all module.exports as named exports.`
+
 describe('runtime-load classification', () => {
   it.each([
     {
       reason: 'missing-runtime-dependency',
       error: withNodeEsmStack(nodeError(
-        "Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js",
+        `Cannot find package '${FIXTURE_PACKAGE}' imported from /private/build/user/project/SsrRuntime.js`,
         'ERR_MODULE_NOT_FOUND'
       )),
-      details: { package: 'clickout-lite' },
+      details: { package: FIXTURE_PACKAGE },
     },
     {
       reason: 'missing-named-export',
       error: withNodeEsmStack(nodeError(
-        "The requested module 'clickout-lite' does not provide an export named 'onClickOutside'",
+        `The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'`,
         undefined,
         'SyntaxError'
       )),
-      details: { package: 'clickout-lite', export: 'onClickOutside' },
+      details: { package: FIXTURE_PACKAGE, export: FIXTURE_EXPORT },
     },
     {
       reason: 'missing-named-export',
-      error: nodeError(
-        "[vite] Named export 'onClickOutside' not found. The requested module 'clickout-lite' is a CommonJS module, which may not support all module.exports as named exports.",
-      ),
+      error: nodeError(VITE_NAMED_EXPORT_MESSAGE),
       details: {},
     },
     {
       reason: 'missing-named-export',
-      error: withViteStack(nodeError(
-        "[vite] Named export 'onClickOutside' not found. The requested module 'clickout-lite' is a CommonJS module, which may not support all module.exports as named exports.",
-      )),
-      details: { package: 'clickout-lite', export: 'onClickOutside' },
+      error: withViteStack(nodeError(VITE_NAMED_EXPORT_MESSAGE)),
+      details: { package: FIXTURE_PACKAGE, export: FIXTURE_EXPORT },
     },
     {
       reason: 'invalid-module-export',
@@ -97,18 +98,18 @@ describe('runtime-load classification', () => {
 
   it('keeps a validated package name and drops absolute paths from the same message', () => {
     expect(classifySsrRuntimeLoadFailure(withNodeEsmStack(nodeError(
-      "Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js\nRequire stack:\n- /private/build/index.js",
+      `Cannot find package '${FIXTURE_PACKAGE}' imported from /private/build/user/project/SsrRuntime.js\nRequire stack:\n- /private/build/index.js`,
       'ERR_MODULE_NOT_FOUND'
-    )))).toEqual({ reason: 'missing-runtime-dependency', package: 'clickout-lite' })
+    )))).toEqual({ reason: 'missing-runtime-dependency', package: FIXTURE_PACKAGE })
   })
 
   it('omits path-like specifiers and unbounded quoted values', () => {
     expect(classifySsrRuntimeLoadFailure(withNodeEsmStack(new SyntaxError(
-      "The requested module 'file:///private/build/runtime.js' does not provide an export named 'onClickOutside'"
-    )))).toEqual({ reason: 'missing-named-export', export: 'onClickOutside' })
+      `The requested module 'file:///private/build/runtime.js' does not provide an export named '${FIXTURE_EXPORT}'`
+    )))).toEqual({ reason: 'missing-named-export', export: FIXTURE_EXPORT })
     expect(classifySsrRuntimeLoadFailure(withNodeEsmStack(new SyntaxError(
-      "The requested module '/private/build/runtime.js' does not provide an export named 'onClickOutside'"
-    )))).toEqual({ reason: 'missing-named-export', export: 'onClickOutside' })
+      `The requested module '/private/build/runtime.js' does not provide an export named '${FIXTURE_EXPORT}'`
+    )))).toEqual({ reason: 'missing-named-export', export: FIXTURE_EXPORT })
     expect(classifySsrRuntimeLoadFailure(nodeError(
       "Cannot find module './secret.js' imported from /private/build/SsrRuntime.js",
       'ERR_MODULE_NOT_FOUND'
@@ -145,7 +146,7 @@ describe('runtime-load classification', () => {
       reason: 'runtime-load-failed',
     })
     const nested = Object.assign(new Error('wrapper'), {
-      cause: nodeError("Cannot find package 'clickout-lite' imported from /private/file.js", 'ERR_MODULE_NOT_FOUND'),
+      cause: nodeError(`Cannot find package '${FIXTURE_PACKAGE}' imported from /private/file.js`, 'ERR_MODULE_NOT_FOUND'),
     })
     expect(classifySsrRuntimeLoadFailure(nested)).toEqual({ reason: 'runtime-load-failed' })
   })
@@ -153,14 +154,14 @@ describe('runtime-load classification', () => {
   it('rejects planted identifiers that fail sanitization', () => {
     expect(sanitizeSsrRuntimeLoadClassification({
       reason: 'missing-named-export',
-      package: '/private/build/clickout-lite',
+      package: `/private/build/${FIXTURE_PACKAGE}`,
       module: 'https://evil.test/module',
-      export: 'onClickOutside; process.env',
+      export: `${FIXTURE_EXPORT}; process.env`,
     })).toEqual({ reason: 'missing-named-export' })
     expect(readSsrRuntimeLoadFailure({
       [Symbol.for('vue-ssr-lite.internal.runtime-load-failure')]: {
         reason: 'consumer-secret',
-        package: 'clickout-lite',
+        package: FIXTURE_PACKAGE,
       },
     })).toBeUndefined()
   })
