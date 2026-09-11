@@ -321,6 +321,8 @@ export interface SsrLogger {
 
 export interface SsrErrorRenderContext<TPublicConfig = unknown> {
   error: unknown
+  /** Framework-generated correlation id for this handled failure. */
+  errorId?: string
   kind: 'timeout' | 'internal'
   production: boolean
   request?: SsrHttpRequest<TPublicConfig>
