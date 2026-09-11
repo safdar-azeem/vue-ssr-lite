@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { createSsrOperatorLogDetails } from './SsrErrorDiagnostic'
+import { markSsrInitializationFailure } from './SsrProductionError'
 import {
   assertSsrRuntimeModuleExport,
   classifySsrRuntimeLoadFailure,
@@ -164,6 +166,29 @@ describe('runtime-load classification', () => {
         package: FIXTURE_PACKAGE,
       },
     })).toBeUndefined()
+  })
+
+  it('keeps classification structured while operator logs may include the loader message', () => {
+    const error = withNodeEsmStack(nodeError(
+      `The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'`,
+      undefined,
+      'SyntaxError'
+    ))
+    expect(classifySsrRuntimeLoadFailure(error)).toEqual({
+      reason: 'missing-named-export',
+      package: FIXTURE_PACKAGE,
+      export: FIXTURE_EXPORT,
+    })
+    const details = createSsrOperatorLogDetails({
+      error: markSsrInitializationFailure(error, 'runtime-load'),
+    })
+    expect(details).toMatchObject({
+      reason: 'missing-named-export',
+      package: FIXTURE_PACKAGE,
+      export: FIXTURE_EXPORT,
+      message: expect.stringContaining('does not provide an export named'),
+    })
+    expect(JSON.stringify(classifySsrRuntimeLoadFailure(error))).not.toContain('does not provide')
   })
 
   it('rejects module namespaces that do not default-export a runtime contract', () => {
