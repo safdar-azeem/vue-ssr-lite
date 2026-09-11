@@ -11,7 +11,7 @@ import { withSsrShells } from '../SsrTestFixtures'
 import { useSsrRequestContext } from '../SsrRequestContext'
 import { useSeo } from '../extensions/seo/useSeo'
 import { createSsrProductionRequestHandler } from './SsrProductionRequestRuntime'
-import { createVercelHandler } from '../deployment/vercel/VercelRuntime'
+import { createVercelHandler, readVercelRuntimeConfig } from '../deployment/vercel/VercelRuntime'
 import { normalizeDeploymentRequest } from '../deployment/DeploymentRequest'
 import { SsrRequestCancelledError } from './SsrRequestHandler'
 import type { ServerRoutesDefinition } from '../server-routes/SsrServerRouteTypes'
@@ -99,14 +99,17 @@ describe('shared production executor', () => {
   it.each([
     {
       expectedPhase: 'runtime-load',
+      expectedReason: 'runtime-load-failed',
       loadRuntime: async () => { throw new SyntaxError('private load detail /private/runtime.js') },
     },
     {
       expectedPhase: 'runtime-compile',
+      expectedReason: undefined,
       loadRuntime: async () => () => { throw new SyntaxError('private compile detail /private/server.ts') },
     },
   ])('classifies $expectedPhase failures without exposing raw exception details', async ({
     expectedPhase,
+    expectedReason,
     loadRuntime,
   }) => {
     const execute = createSsrProductionRequestHandler({ root, loadRuntime })
@@ -116,7 +119,93 @@ describe('shared production executor', () => {
     expect(await response.text()).toContain('Application unavailable')
     const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
     expect(diagnostic).toMatchObject({ phase: expectedPhase, errorType: 'SyntaxError' })
+    expect(diagnostic.reason).toBe(expectedReason)
     expect(JSON.stringify(diagnostic)).not.toMatch(/private (?:load|compile)|runtime\.js|server\.ts/)
+  })
+
+  it.each([
+    {
+      reason: 'missing-named-export',
+      errorType: 'SyntaxError',
+      loadRuntime: async () => {
+        throw Object.assign(
+          new SyntaxError("The requested module 'clickout-lite' does not provide an export named 'onClickOutside'"),
+          {
+            stack: "SyntaxError: The requested module 'clickout-lite' does not provide an export named 'onClickOutside'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)",
+          }
+        )
+      },
+      expected: { package: 'clickout-lite', export: 'onClickOutside' },
+    },
+    {
+      reason: 'missing-runtime-dependency',
+      errorType: 'Error',
+      loadRuntime: async () => {
+        throw Object.assign(
+          new Error("Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js"),
+          {
+            code: 'ERR_MODULE_NOT_FOUND',
+            stack: "Error: Cannot find package 'clickout-lite' imported from /private/build/user/project/SsrRuntime.js\n    at packageResolve (node:internal/modules/esm/resolve:123:9)",
+          }
+        )
+      },
+      expected: { package: 'clickout-lite' },
+    },
+    {
+      reason: 'invalid-runtime-export',
+      errorType: 'SsrRuntimeLoadError',
+      loadRuntime: async () => ({ [Symbol.toStringTag]: 'Module' }),
+      expected: {},
+    },
+    {
+      reason: 'invalid-module-export',
+      errorType: 'Error',
+      loadRuntime: async () => {
+        throw Object.assign(
+          new Error('Package subpath \'./secret\' is not defined by "exports" in /private/build/node_modules/pkg/package.json'),
+          { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' }
+        )
+      },
+      expected: {},
+    },
+    {
+      reason: 'module-format-incompatibility',
+      errorType: 'Error',
+      loadRuntime: async () => {
+        throw Object.assign(
+          new Error('require() of ES Module /private/build/file.js from /private/build/other.js not supported.'),
+          { code: 'ERR_REQUIRE_ESM' }
+        )
+      },
+      expected: {},
+    },
+    {
+      reason: 'module-syntax-error',
+      errorType: 'SyntaxError',
+      loadRuntime: async () => { throw new SyntaxError("Unexpected token '{'") },
+      expected: {},
+    },
+  ])('distinguishes $reason at runtime-load while returning generic HTML', async ({
+    reason,
+    errorType,
+    loadRuntime,
+    expected,
+  }) => {
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime })
+    const response = await execute(normalized('/'), new AbortController().signal)
+    const html = await response.text()
+    expect(response.status).toBe(500)
+    expect(html).toContain('Application unavailable')
+    expect(html).not.toMatch(/clickout-lite|onClickOutside|SsrRuntime|private\/build|invalid-runtime-export/)
+    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({
+      event: 'ssr.runtime.failed',
+      phase: 'runtime-load',
+      errorType,
+      reason,
+      ...expected,
+    })
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private\/build|SsrRuntime\.js|Cannot find package|Unexpected token/)
   })
 
   it('classifies production template preparation failures without exposing template details', async () => {
@@ -390,5 +479,18 @@ describe('Vercel Node transport', () => {
     expect(outgoing.statusCode).toBe(201)
     expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 255, 1, 128]))
     expect(headers.get('set-cookie')).toEqual(['one=1', 'two=2'])
+  })
+
+  it('rejects a loaded runtime that does not expose the generated export contract', async () => {
+    await expect(readVercelRuntimeConfig({
+      [Symbol.toStringTag]: 'Module',
+      default: null,
+    })).rejects.toMatchObject({ name: 'SsrRuntimeLoadError' })
+    await expect(readVercelRuntimeConfig({
+      default: async () => null,
+    })).rejects.toMatchObject({ name: 'SsrRuntimeLoadError' })
+    await expect(readVercelRuntimeConfig({
+      default: { applications: [] },
+    })).resolves.toEqual({ applications: [] })
   })
 })
