@@ -55,7 +55,7 @@ export const markSsrInitializationFailure = (
     const wrapped = new Error('SSR initialization failed.', { cause: error })
     try {
       const name = error instanceof Error ? error.name : ''
-      if (['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'URIError'].includes(name)) {
+      if (['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'URIError', 'SsrRuntimeLoadError'].includes(name)) {
         wrapped.name = name
       }
     } catch { /* A hostile error object cannot affect initialization. */ }
