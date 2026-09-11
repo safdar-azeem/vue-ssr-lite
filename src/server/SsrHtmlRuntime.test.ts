@@ -3,6 +3,7 @@ import { serializeJsonLd } from '../SsrManagedHead'
 import {
   injectSsrHtml,
   prepareSsrHtmlTemplate,
+  renderSsrErrorDocument,
 } from './SsrHtmlRuntime'
 
 describe('SSR HTML runtime', () => {
@@ -406,5 +407,46 @@ describe('SSR HTML runtime', () => {
         teleports: { '#app': '<dialog>Unsafe</dialog>' },
       })
     ).toThrow('cannot be the SSR application mount')
+  })
+})
+
+describe('SSR error documents', () => {
+  const errorId = 'vssl_8f3c2a7e1b0d4c56'
+
+  it('renders a generic production page with an error id and no exception details', () => {
+    const html = renderSsrErrorDocument(
+      'Application unavailable',
+      'The application could not render this page. Please try again.',
+      { errorId }
+    )
+    expect(html).toContain('noindex,nofollow')
+    expect(html).toContain('Application unavailable')
+    expect(html).toContain(`Error ID: ${errorId}`)
+    expect(html).toContain('id="main-content"')
+    expect(html).not.toContain('TypeError')
+    expect(html).not.toContain('Cannot read')
+  })
+
+  it('omits the error id when it is unavailable', () => {
+    const html = renderSsrErrorDocument('Application unavailable', 'Please try again.')
+    expect(html).not.toContain('Error ID:')
+  })
+
+  it('renders a development document with escaped name, message, stack and path', () => {
+    const html = renderSsrErrorDocument('Application error', 'fallback', {
+      errorId,
+      development: {
+        name: 'TypeError',
+        message: '<script>alert(1)</script>',
+        stack: 'TypeError: <script>alert(1)</script>\n    at render (/app/Page.vue:1:1)',
+        pathname: '/about/<img>',
+      },
+    })
+    expect(html).toContain('TypeError')
+    expect(html).toContain(`Error ID: ${errorId}`)
+    expect(html).toContain('Path: /about/&lt;img&gt;')
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain('at render (/app/Page.vue:1:1)')
+    expect(html).not.toContain('<script>alert(1)</script>')
   })
 })
