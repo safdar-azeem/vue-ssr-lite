@@ -85,7 +85,7 @@ const reportCleanupFailure = (
   const details = {
     requestId,
     applicationId,
-    error: error instanceof Error ? error.message : String(error),
+    error,
   }
   if (safeSsrLog(logger, 'error', event, details)) return
   try {
