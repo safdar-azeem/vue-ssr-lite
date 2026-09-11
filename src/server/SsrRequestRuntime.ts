@@ -395,7 +395,7 @@ export const createSsrRequestRuntime = async (
           isCurrentRevision = next.isCurrent
           if ('error' in next) {
             safeSsrLog(initialServerOptions.logger, 'error', 'ssr.runtime.reload.failed', {
-              error: next.error instanceof Error ? next.error.message : 'Unknown error',
+              error: next.error,
             })
           } else {
             lastDefinition = next.definition
