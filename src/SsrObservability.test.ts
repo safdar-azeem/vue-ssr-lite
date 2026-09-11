@@ -82,14 +82,16 @@ describe('safe operator diagnostics', () => {
 
   it('emits a structured runtime-load reason and allowlisted module identifiers', () => {
     const logger = { error: vi.fn() }
+    const fixturePackage = 'fixture-runtime-package'
+    const fixtureExport = 'missingExport'
     const failure = markSsrInitializationFailure(
       Object.assign(
         new SyntaxError(
-          "The requested module 'clickout-lite' does not provide an export named 'onClickOutside'"
+          `The requested module '${fixturePackage}' does not provide an export named '${fixtureExport}'`
         ),
         {
           cause: { password: 'secret-password', stack: 'private-stack /private/build/SsrRuntime.js' },
-          stack: "SyntaxError: The requested module 'clickout-lite' does not provide an export named 'onClickOutside'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)",
+          stack: `SyntaxError: The requested module '${fixturePackage}' does not provide an export named '${fixtureExport}'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)`,
         }
       ),
       'runtime-load'
@@ -99,10 +101,12 @@ describe('safe operator diagnostics', () => {
       phase: 'runtime-load',
       errorType: 'SyntaxError',
       reason: 'missing-named-export',
-      package: 'clickout-lite',
-      export: 'onClickOutside',
+      package: fixturePackage,
+      export: fixtureExport,
     }))
-    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/secret-password|private-stack|SsrRuntime\.js/)
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(
+      /secret-password|private-stack|SsrRuntime\.js|does not provide an export named|The requested module/
+    )
   })
 
   it('does not copy identifier-looking fragments from spoofed application errors', () => {
