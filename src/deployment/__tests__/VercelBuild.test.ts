@@ -282,6 +282,8 @@ export default async (_request, response) => response.end('ok')
     expect(source).toContain(
       '.catch((error) => { handlerPromise = undefined; throw error })'
     )
+    expect(source).toContain('let bootstrapIdFallback = 0')
+    expect(source).toContain('bootstrapIdFallback += 1')
   })
 
   it('allows later requests after a loaded handler fails before sending a response', async () => {
@@ -297,13 +299,42 @@ export default async (_request, response) => {
     const failed = createResponse()
     await generated.default({ method: 'GET' }, failed)
     expect(failed.statusCode).toBe(500)
-    expect(failed.body).toBe('Internal Server Error')
-    expect(error.mock.calls.flat().join(' ')).toContain('Vercel function initialization or invocation failed.')
-    expect(error.mock.calls.flat().join(' ')).not.toContain('temporary request failure')
+    expect(failed.body).not.toContain('temporary request failure')
+    const diagnostic = JSON.parse(String(error.mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({
+      event: 'ssr.invocation.failed',
+      message: 'temporary request failure',
+      errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+    })
+    expect(diagnostic).not.toHaveProperty('phase')
+    expect(diagnostic).not.toHaveProperty('reason')
+    expect(failed.body).toBe(`Internal Server Error\nError ID: ${diagnostic.errorId}`)
 
     const recovered = createResponse()
     await generated.default({ method: 'GET' }, recovered)
     expect(recovered.body).toBe('recovered')
+    error.mockRestore()
+  })
+
+  it('does not classify a loaded-handler exception as a runtime-load bootstrap failure', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const generated = await importGeneratedBootstrap(`
+export default async (_request, response) => {
+  throw new SyntaxError("The requested module 'fixture-runtime-package' does not provide an export named 'missingExport'")
+}
+`)
+    const response = createResponse()
+    await generated.default({ method: 'GET' }, response)
+    const diagnostic = JSON.parse(String(error.mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({
+      event: 'ssr.invocation.failed',
+      errorType: 'SyntaxError',
+      message: expect.stringContaining('does not provide an export named'),
+    })
+    expect(diagnostic).not.toHaveProperty('phase')
+    expect(diagnostic).not.toHaveProperty('reason')
+    expect(response.body).toBe(`Internal Server Error\nError ID: ${diagnostic.errorId}`)
+    expect(response.body).not.toContain('fixture-runtime-package')
     error.mockRestore()
   })
 
@@ -323,7 +354,11 @@ export default async (_request, response) => {
       event: 'ssr.bootstrap.failed',
       phase: 'runtime-load',
       reason: 'invalid-runtime-export',
+      errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
     })
+    expect(diagnostic.message).toEqual(expect.stringContaining('default-export a request handler'))
+    expect(response.body).not.toContain('default-export')
+    expect(response.body).not.toContain(diagnostic.errorId)
     expect(JSON.stringify(diagnostic)).not.toContain('/private/build')
     error.mockRestore()
   })
@@ -336,15 +371,17 @@ export default async (_request, response) => {
     })
     for (const response of result.responses) {
       expect(response.statusCode).toBe(500)
-      expect(response.body).toBe('Internal Server Error')
       const diagnostic = JSON.parse(String(response.logs.at(-1)))
       expect(diagnostic).toMatchObject({
         event: 'ssr.bootstrap.failed',
         phase: 'runtime-load',
         errorType: 'SyntaxError',
         reason: 'missing-named-export',
+        errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+        message: expect.stringMatching(/does not provide an export named|Named export/),
       })
-      expect(JSON.stringify(diagnostic)).not.toMatch(/dep\.mjs|does not provide|\/private/)
+      expect(response.body).toBe(`Internal Server Error\nError ID: ${diagnostic.errorId}`)
+      expect(response.body).not.toMatch(/does not provide|dep\.mjs/)
     }
   })
 
@@ -355,15 +392,17 @@ export default async (_request, response) => {
     })
     for (const response of result.responses) {
       expect(response.statusCode).toBe(500)
-      expect(response.body).toBe('Internal Server Error')
       const diagnostic = JSON.parse(String(response.logs.at(-1)))
       expect(diagnostic).toMatchObject({
         event: 'ssr.bootstrap.failed',
         phase: 'runtime-load',
         errorType: 'SyntaxError',
         reason: 'module-syntax-error',
+        errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+        message: expect.stringMatching(/Unexpected|token/),
       })
-      expect(JSON.stringify(diagnostic)).not.toMatch(/Unexpected token/)
+      expect(response.body).toBe(`Internal Server Error\nError ID: ${diagnostic.errorId}`)
+      expect(response.body).not.toMatch(/Unexpected token/)
     }
   })
 
