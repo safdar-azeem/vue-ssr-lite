@@ -15,6 +15,7 @@ import {
   readSsrProductionFailure,
   SsrProductionArtifactError,
 } from '../SsrProductionError'
+import { assertSsrRuntimeModuleExport } from '../SsrRuntimeLoadDiagnostics'
 import { isSsrTrustedLocalConnection } from './SsrLocalConnectionRuntime'
 import { createSsrPhaseTimings, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import type { SsrRenderedApplicationAsset } from '../SsrApplicationAssetRuntime'
@@ -257,6 +258,7 @@ export const createSsrRequestRuntime = async (
       let loaded: unknown
       try {
         loaded = await options.loadRuntime()
+        assertSsrRuntimeModuleExport(loaded)
       } catch (error) {
         if (isCurrent && !isCurrent()) continue
         return { error: markSsrInitializationFailure(error, 'runtime-load'), isCurrent }
