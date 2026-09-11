@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { dirname, join, parse, relative } from 'node:path'
 import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { build } from 'esbuild'
@@ -18,6 +20,50 @@ import { DEPLOYMENT_METADATA_PATH } from '../DeploymentMetadata'
 // compiler or repeating Vite's consumer-build test suite.
 vi.mock('esbuild', () => ({ build: vi.fn() }))
 vi.mock('@vercel/nft', () => ({ nodeFileTrace: vi.fn() }))
+
+const execFileAsync = promisify(execFile)
+
+const NATIVE_BOOTSTRAP_DRIVER = `
+const logs = []
+console.error = (...args) => {
+  logs.push(args.map((value) => typeof value === 'string' ? value : String(value)).join(' '))
+}
+const createResponse = () => {
+  const headers = Object.create(null)
+  return {
+    statusCode: 200,
+    headersSent: false,
+    writableEnded: false,
+    destroyed: false,
+    body: undefined,
+    setHeader(name, value) { headers[name] = value },
+    getHeader(name) { return headers[name] },
+    writeHead(status) { this.statusCode = status; this.headersSent = true },
+    end(body = '') { this.body = body; this.writableEnded = true },
+    destroy() { this.destroyed = true },
+    headers,
+  }
+}
+const bootstrap = await import(process.argv[2])
+const method = process.argv[3] || 'GET'
+const requestCount = Number(process.argv[4] || 1)
+const responses = []
+for (let index = 0; index < requestCount; index += 1) {
+  const start = logs.length
+  const response = createResponse()
+  await bootstrap.default({ method }, response)
+  responses.push({
+    statusCode: response.statusCode,
+    body: response.body ?? null,
+    headersSent: response.headersSent,
+    writableEnded: response.writableEnded,
+    destroyed: response.destroyed,
+    headers: { ...response.headers },
+    logs: logs.slice(start),
+  })
+}
+process.stdout.write(JSON.stringify({ responses }))
+`
 
 let root = ''
 afterEach(async () => {
@@ -172,6 +218,45 @@ const importGeneratedBootstrap = async (entrySource: string) => {
   }
 }
 
+const invokeNativeGeneratedBootstrap = async (options: {
+  entrySource: string
+  extraFiles?: Record<string, string>
+  method?: string
+  requests?: number
+}) => {
+  root = await mkdtemp(join(tmpdir(), 'ssr-vercel-bootstrap-'))
+  for (const [file, source] of Object.entries(options.extraFiles ?? {})) {
+    const path = join(root, file)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, source)
+  }
+  const bootstrap = join(root, 'index.mjs')
+  const driver = join(root, 'invoke-bootstrap.mjs')
+  await writeFile(join(root, 'entry.mjs'), options.entrySource)
+  await writeFile(bootstrap, createVercelFunctionBootstrap('./', './entry.mjs'))
+  await writeFile(driver, NATIVE_BOOTSTRAP_DRIVER)
+  const env = { ...process.env }
+  delete env.NODE_OPTIONS
+  const { stdout } = await execFileAsync(process.execPath, [
+    driver,
+    pathToFileURL(bootstrap).href,
+    options.method ?? 'GET',
+    String(options.requests ?? 1),
+  ], {
+    env,
+    timeout: 15000,
+    encoding: 'utf8',
+  })
+  return JSON.parse(stdout) as {
+    responses: Array<{
+      statusCode: number
+      body: string | null
+      headers: Record<string, string>
+      logs: string[]
+    }>
+  }
+}
+
 describe('generated Vercel function bootstrap', () => {
   it('loads lazily and caches the successfully initialized handler', async () => {
     const key = `__vueSsrLiteBootstrap${Date.now()}${Math.random()}`
@@ -213,6 +298,8 @@ export default async (_request, response) => {
     await generated.default({ method: 'GET' }, failed)
     expect(failed.statusCode).toBe(500)
     expect(failed.body).toBe('Internal Server Error')
+    expect(error.mock.calls.flat().join(' ')).toContain('Vercel function initialization or invocation failed.')
+    expect(error.mock.calls.flat().join(' ')).not.toContain('temporary request failure')
 
     const recovered = createResponse()
     await generated.default({ method: 'GET' }, recovered)
@@ -231,8 +318,53 @@ export default async (_request, response) => {
     expect(response.body).toBe('')
     expect(response.getHeader('cache-control')).toBe('no-store')
     expect(response.getHeader('content-type')).toBe('text/plain; charset=utf-8')
-    expect(error.mock.calls.flat().join(' ')).not.toContain('/private/build')
+    const diagnostic = JSON.parse(String(error.mock.calls.at(-1)![0]))
+    expect(diagnostic).toMatchObject({
+      event: 'ssr.bootstrap.failed',
+      phase: 'runtime-load',
+      reason: 'invalid-runtime-export',
+    })
+    expect(JSON.stringify(diagnostic)).not.toContain('/private/build')
     error.mockRestore()
+  })
+
+  it('classifies generated entry module-load failures without leaking loader text', async () => {
+    const result = await invokeNativeGeneratedBootstrap({
+      extraFiles: { 'dep.mjs': 'export const present = true\n' },
+      entrySource: "import { missing } from './dep.mjs'\nexport default async (_request, response) => response.end('ok')\n",
+      requests: 2,
+    })
+    for (const response of result.responses) {
+      expect(response.statusCode).toBe(500)
+      expect(response.body).toBe('Internal Server Error')
+      const diagnostic = JSON.parse(String(response.logs.at(-1)))
+      expect(diagnostic).toMatchObject({
+        event: 'ssr.bootstrap.failed',
+        phase: 'runtime-load',
+        errorType: 'SyntaxError',
+        reason: 'missing-named-export',
+      })
+      expect(JSON.stringify(diagnostic)).not.toMatch(/dep\.mjs|does not provide|\/private/)
+    }
+  })
+
+  it('classifies generated entry syntax errors without leaking source', async () => {
+    const result = await invokeNativeGeneratedBootstrap({
+      entrySource: 'export default async () => {}\n{{{\n',
+      requests: 2,
+    })
+    for (const response of result.responses) {
+      expect(response.statusCode).toBe(500)
+      expect(response.body).toBe('Internal Server Error')
+      const diagnostic = JSON.parse(String(response.logs.at(-1)))
+      expect(diagnostic).toMatchObject({
+        event: 'ssr.bootstrap.failed',
+        phase: 'runtime-load',
+        errorType: 'SyntaxError',
+        reason: 'module-syntax-error',
+      })
+      expect(JSON.stringify(diagnostic)).not.toMatch(/Unexpected token/)
+    }
   })
 
   it('does not write a second response after the loaded handler has started one', async () => {
