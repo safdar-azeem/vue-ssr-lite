@@ -45,7 +45,17 @@ afterEach(async () => {
 const normalized = (path: string, host = 'a.test', cookie = 'session=A', protocol: 'http' | 'https' = 'https') =>
   normalizeDeploymentRequest({ method: 'GET', url: path, host, protocol, headers: { cookie, accept: 'text/html' } })
 
-const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serverRoutes?: ServerRoutesDefinition[]; timeout?: number } = {}) => {
+const withRequestId = (path: string, requestId: string) =>
+  Object.freeze({ ...normalized(path), requestId })
+
+const definition = (options: {
+  allowHttpOrigin?: boolean
+  fetch?: boolean
+  serverRoutes?: ServerRoutesDefinition[]
+  timeout?: number
+  logger?: { error?: (...args: unknown[]) => void }
+  renderError?: (...args: any[]) => any
+} = {}) => {
   const Page = defineComponent({
     setup() {
       const context = useSsrRequestContext<Record<string, never>, { marker: string }>()
@@ -56,6 +66,13 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
     },
   })
   const ErrorPage = defineComponent({ setup() { throw new Error('private-token /private/source.ts') } })
+  const TypeErrorPage = defineComponent({
+    setup() { throw new TypeError("Cannot read properties of undefined (reading 'items')") },
+  })
+  const StringErrorPage = defineComponent({ setup() { throw 'plain string failure' } })
+  const BoomPage = defineComponent({ setup() { throw 'boom' } })
+  const sharedUnavailable = new Error('Database unavailable')
+  const SharedErrorPage = defineComponent({ setup() { throw sharedUnavailable } })
   const SpaPage = defineComponent({ setup() { throw new Error('SPA component must not execute on the server') } })
   const RedirectPage = defineComponent({
     setup() {
@@ -73,7 +90,12 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
     routes: [
       { path: '/', component: Page }, { path: '/about', component: Page },
       { path: '/dashboard', component: SpaPage, meta: { render: 'spa' } },
-      { path: '/error', component: ErrorPage }, { path: '/redirect', component: RedirectPage },
+      { path: '/error', component: ErrorPage },
+      { path: '/type-error', component: TypeErrorPage },
+      { path: '/string-error', component: StringErrorPage },
+      { path: '/boom', component: BoomPage },
+      { path: '/shared-error', component: SharedErrorPage },
+      { path: '/redirect', component: RedirectPage },
       { path: '/router-redirect', redirect: '/about' },
     ],
     serverRoutes: options.serverRoutes ?? [{ prefix: '/api', routes: {
@@ -84,7 +106,12 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
     endpoints: [{ id: 'legacy', match: (request) => request.pathname === '/legacy', handle: () => ({ statusCode: 202, body: 'legacy' }) }],
   }))
   return withSsrShells(defineServer({
-    server: { requestTimeoutMs: options.timeout ?? 15000, trustProxy: true },
+    server: {
+      requestTimeoutMs: options.timeout ?? 15000,
+      trustProxy: true,
+      ...(options.logger ? { logger: options.logger } : {}),
+      ...(options.renderError ? { renderError: options.renderError } : {}),
+    },
     serverMiddleware: [defineServerMiddleware(async (request, _context, next) => {
       const path = new URL(request.url).pathname
       if (path === '/middleware-redirect') return new Response(null, { status: 307, headers: { location: '/about' } })
@@ -97,6 +124,12 @@ const definition = (options: { allowHttpOrigin?: boolean; fetch?: boolean; serve
 
 const FIXTURE_PACKAGE = 'fixture-runtime-package'
 const FIXTURE_EXPORT = 'missingExport'
+
+const lastOperatorDiagnostic = () => {
+  const call = vi.mocked(console.error).mock.calls.at(-1)
+  expect(String(call?.[0])).toMatch(/^\[vue-ssr-lite\] /)
+  return call![1] as Record<string, unknown>
+}
 
 describe('shared production executor', () => {
   it.each([
@@ -119,11 +152,15 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/'), new AbortController().signal)
 
     expect(response.status).toBe(500)
-    expect(await response.text()).toContain('Application unavailable')
-    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    const html = await response.text()
+    expect(html).toContain('Application unavailable')
+    expect(html).not.toMatch(/private (?:load|compile)|runtime\.js|server\.ts/)
+    const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({ phase: expectedPhase, errorType: 'SyntaxError' })
     expect(diagnostic.reason).toBe(expectedReason)
-    expect(JSON.stringify(diagnostic)).not.toMatch(/private (?:load|compile)|runtime\.js|server\.ts/)
+    expect(diagnostic.errorId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(String(diagnostic.message)).toMatch(/private (?:load|compile)/)
   })
 
   it.each([
@@ -202,15 +239,19 @@ describe('shared production executor', () => {
     expect(html).not.toContain(FIXTURE_PACKAGE)
     expect(html).not.toContain(FIXTURE_EXPORT)
     expect(html).not.toMatch(/SsrRuntime|private\/build|invalid-runtime-export/)
-    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    const diagnostic = lastOperatorDiagnostic()
+    expect(String(vi.mocked(console.error).mock.calls.at(-1)![0])).toBe('[vue-ssr-lite] ssr.runtime.failed')
     expect(diagnostic).toMatchObject({
-      event: 'ssr.runtime.failed',
       phase: 'runtime-load',
       errorType,
       reason,
       ...expected,
     })
-    expect(JSON.stringify(diagnostic)).not.toMatch(/private\/build|SsrRuntime\.js|Cannot find package|Unexpected token/)
+    expect(diagnostic.errorId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    if (reason === 'missing-named-export' || reason === 'missing-runtime-dependency') {
+      expect(String(diagnostic.message)).toMatch(/does not provide an export named|Cannot find package/)
+    }
   })
 
   it('classifies production template preparation failures without exposing template details', async () => {
@@ -222,10 +263,14 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/'), new AbortController().signal)
 
     expect(response.status).toBe(500)
-    expect(await response.text()).toContain('Application unavailable')
-    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    const html = await response.text()
+    expect(html).toContain('Application unavailable')
+    expect(html).not.toMatch(/private-template-content|dist\/client|index\.html/)
+    const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({ phase: 'template-preflight', errorType: 'Error' })
-    expect(JSON.stringify(diagnostic)).not.toMatch(/private-template-content|dist\/client|index\.html/)
+    expect(diagnostic.errorId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private-template-content/)
     expect(JSON.stringify(diagnostic)).not.toContain(root)
   })
 
@@ -244,10 +289,12 @@ describe('shared production executor', () => {
     const html = await response.text()
     expect(html).toContain('Application unavailable')
     expect(html).not.toMatch(/manifest|secret|invalid-json|invalid-schema|SsrProductionArtifactError/)
-    const diagnostic = JSON.parse(String(vi.mocked(console.error).mock.calls.at(-1)![0]))
+    const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({
       phase: 'artifact-preflight', artifact, reason, code: `${artifact}.${reason}`,
     })
+    expect(diagnostic.errorId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
     expect(JSON.stringify(diagnostic)).not.toContain(root)
   })
 
@@ -449,6 +496,208 @@ describe('shared production executor', () => {
     expect(failing).toHaveBeenCalledTimes(2)
   })
 
+  it('correlates an application TypeError through a generic page and private logs', async () => {
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition() })
+    const response = await execute(normalized('/type-error'), new AbortController().signal)
+    const html = await response.text()
+    const diagnostic = lastOperatorDiagnostic()
+    expect(response.status).toBe(500)
+    expect(html).toContain('Application unavailable')
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(html).not.toContain('Cannot read properties')
+    expect(html).not.toContain('TypeError')
+    expect(html).not.toMatch(/at |stack/)
+    expect(String(diagnostic.errorType)).toMatch(/TypeError|Error/)
+    expect(String(diagnostic.message)).toContain('Cannot read properties of undefined')
+    expect(String(diagnostic.stack ?? '')).toContain('TypeError')
+  })
+
+  it('keeps string throws generic in production HTML and useful in operator logs', async () => {
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition() })
+    const response = await execute(normalized('/string-error'), new AbortController().signal)
+    const html = await response.text()
+    const diagnostic = lastOperatorDiagnostic()
+    expect(html).toContain('Application unavailable')
+    expect(html).not.toContain('plain string failure')
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(String(diagnostic.message)).toMatch(/plain string failure|Non-Error value was thrown/)
+  })
+
+  it('returns a bodyless HEAD response for initialization and render failures', async () => {
+    const failing = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => { throw new TypeError("Cannot read properties of undefined (reading 'boot')") },
+    })
+    const initHead = await failing({ ...normalized('/'), method: 'HEAD' }, new AbortController().signal)
+    expect(initHead.status).toBe(500)
+    expect(initHead.headers.get('cache-control')).toBe('no-store')
+    expect(await initHead.text()).toBe('')
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition() })
+    const renderHead = await execute({ ...normalized('/error'), method: 'HEAD' }, new AbortController().signal)
+    expect(renderHead.status).toBe(500)
+    expect(await renderHead.text()).toBe('')
+  })
+
+  it('gives a custom logger the correlation id and actionable error fields', async () => {
+    const logger = { error: vi.fn() }
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger }),
+    })
+    const response = await execute(normalized('/type-error'), new AbortController().signal)
+    const html = await response.text()
+    expect(logger.error).toHaveBeenCalledWith('ssr.request.failed', expect.objectContaining({
+      message: expect.stringContaining('Cannot read properties of undefined'),
+      errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+    }))
+    const details = logger.error.mock.calls.find(([event]) => event === 'ssr.request.failed')![1] as Record<string, unknown>
+    expect(html).toContain(`Error ID: ${details.errorId}`)
+    expect(details.stack).toEqual(expect.stringContaining('TypeError'))
+  })
+
+  it('passes the original error and error id to custom renderError', async () => {
+    const renderError = vi.fn(({ error, errorId }) => ({
+      statusCode: 503,
+      body: `handled:${errorId}`,
+    }))
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ renderError }),
+    })
+    const response = await execute(normalized('/error'), new AbortController().signal)
+    expect(response.status).toBe(503)
+    const body = await response.text()
+    expect(renderError).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.any(Error),
+      errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+      kind: 'internal',
+      production: true,
+    }))
+    const context = renderError.mock.calls[0]![0]
+    expect(String((context.error as Error).message)).toContain('private-token')
+    expect(body).toBe(`handled:${context.errorId}`)
+    expect(body).not.toContain('private-token')
+  })
+
+  it('correlates a reused Error independently on each request', async () => {
+    const logger = { error: vi.fn() }
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger }),
+    })
+    const first = await execute(normalized('/shared-error'), new AbortController().signal)
+    const second = await execute(normalized('/shared-error'), new AbortController().signal)
+    const firstHtml = await first.text()
+    const secondHtml = await second.text()
+    const events = logger.error.mock.calls.filter(([event]) => event === 'ssr.request.failed')
+    expect(events).toHaveLength(2)
+    const firstId = (events[0]![1] as { errorId: string }).errorId
+    const secondId = (events[1]![1] as { errorId: string }).errorId
+    expect(firstId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(secondId).toMatch(/^vssl_[a-f0-9]{16}$/)
+    expect(firstId).not.toBe(secondId)
+    expect(firstHtml).toContain(`Error ID: ${firstId}`)
+    expect(secondHtml).toContain(`Error ID: ${secondId}`)
+    expect(firstHtml).not.toContain('Database unavailable')
+    expect(secondHtml).not.toContain('Database unavailable')
+  })
+
+  it('correlates a reused Error independently when two HTTP requests share x-request-id', async () => {
+    const logger = { error: vi.fn() }
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger }),
+    })
+    const first = await execute(withRequestId('/shared-error', 'upstream-request'), new AbortController().signal)
+    const second = await execute(withRequestId('/shared-error', 'upstream-request'), new AbortController().signal)
+    const events = logger.error.mock.calls.filter(([event]) => event === 'ssr.request.failed')
+    expect(events).toHaveLength(2)
+    const firstId = (events[0]![1] as { errorId: string }).errorId
+    const secondId = (events[1]![1] as { errorId: string }).errorId
+    expect(firstId).not.toBe(secondId)
+    expect(await first.text()).toContain(`Error ID: ${firstId}`)
+    expect(await second.text()).toContain(`Error ID: ${secondId}`)
+  })
+
+  it('correlates a reused Error independently when supplied request ids sanitize to unknown', async () => {
+    const logger = { error: vi.fn() }
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger }),
+    })
+    const first = await execute(withRequestId('/shared-error', '***'), new AbortController().signal)
+    const second = await execute(withRequestId('/shared-error', 'not a valid id'), new AbortController().signal)
+    const events = logger.error.mock.calls.filter(([event]) => event === 'ssr.request.failed')
+    expect(events).toHaveLength(2)
+    expect(events[0]![1]).toMatchObject({ requestId: 'unknown' })
+    expect(events[1]![1]).toMatchObject({ requestId: 'unknown' })
+    const firstId = (events[0]![1] as { errorId: string }).errorId
+    const secondId = (events[1]![1] as { errorId: string }).errorId
+    expect(firstId).not.toBe(secondId)
+    expect(await first.text()).toContain(`Error ID: ${firstId}`)
+    expect(await second.text()).toContain(`Error ID: ${secondId}`)
+  })
+
+  it('logs a broken renderError independently from a primitive application throw', async () => {
+    const logger = { error: vi.fn() }
+    const renderError = vi.fn(() => { throw new Error('boom') })
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger, renderError }),
+    })
+    const response = await execute(normalized('/boom'), new AbortController().signal)
+    const html = await response.text()
+    const requestFailed = logger.error.mock.calls.filter(([event]) => event === 'ssr.request.failed')
+    const rendererFailed = logger.error.mock.calls.filter(([event]) => event === 'ssr.error-renderer.failed')
+    expect(requestFailed).toHaveLength(1)
+    expect(rendererFailed).toHaveLength(1)
+    const requestId = (requestFailed[0]![1] as { errorId: string }).errorId
+    const rendererId = (rendererFailed[0]![1] as { errorId: string }).errorId
+    expect(requestId).not.toBe(rendererId)
+    expect(renderError).toHaveBeenCalledWith(expect.objectContaining({ error: 'boom', errorId: requestId }))
+    expect(html).toContain(`Error ID: ${requestId}`)
+    expect(html).not.toContain('boom')
+  })
+
+  it('logs two independent primitive throws with the same value in one request', async () => {
+    const logger = { error: vi.fn() }
+    const renderError = vi.fn(() => { throw 'plain string failure' })
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({ logger, renderError }),
+    })
+    await execute(normalized('/string-error'), new AbortController().signal)
+    const requestFailed = logger.error.mock.calls.filter(([event]) => event === 'ssr.request.failed')
+    const rendererFailed = logger.error.mock.calls.filter(([event]) => event === 'ssr.error-renderer.failed')
+    expect(requestFailed).toHaveLength(1)
+    expect(rendererFailed).toHaveLength(1)
+    expect((requestFailed[0]![1] as { errorId: string }).errorId)
+      .not.toBe((rendererFailed[0]![1] as { errorId: string }).errorId)
+    expect(requestFailed[0]![1]).toMatchObject({ message: 'plain string failure' })
+    expect(rendererFailed[0]![1]).toMatchObject({ message: 'plain string failure' })
+    expect(renderError).toHaveBeenCalledWith(expect.objectContaining({ error: 'plain string failure' }))
+  })
+
+  it('keeps an undefined throw generic in production HTML and useful in operator logs', async () => {
+    const execute = createSsrProductionRequestHandler({
+      root,
+      loadRuntime: async () => definition({
+        serverRoutes: [{ routes: { '/undefined-error': { GET: () => { throw undefined } } } }],
+      }),
+    })
+    const response = await execute(normalized('/undefined-error'), new AbortController().signal)
+    const html = await response.text()
+    const diagnostic = lastOperatorDiagnostic()
+    expect(html).toContain('Application unavailable')
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(html).not.toContain('undefined')
+    expect(diagnostic).toMatchObject({
+      errorType: 'Error',
+      message: 'undefined',
+      errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+    })
+  })
+
   it('aborts a pending response stream when the client disconnects', async () => {
     const cancel = vi.fn()
     const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition({
@@ -463,6 +712,40 @@ describe('shared production executor', () => {
     expect(cancel).toHaveBeenCalledOnce()
   })
 })
+
+const invokeFailingVercelStream = async (failure: unknown) => {
+  const logger = { error: vi.fn() }
+  const handler = createVercelHandler({
+    root,
+    loadRuntime: async () => definition({
+      logger,
+      serverRoutes: [{ routes: { '/fail-stream': { GET: () => new Response(new ReadableStream({
+        pull(controller) { controller.error(failure) },
+      })) } } }],
+    }),
+  })
+  const incoming = Object.assign(new PassThrough(), {
+    method: 'GET', url: '/fail-stream', headers: {
+      host: 'a.test', 'x-forwarded-proto': 'https', accept: 'text/html',
+    },
+  })
+  incoming.end()
+  const outgoing = Object.assign(new PassThrough(), {
+    statusCode: 200,
+    setHeader: () => undefined,
+  })
+  await handler(incoming as unknown as IncomingMessage, outgoing as unknown as ServerResponse)
+  const fromLogger = logger.error.mock.calls.filter(([event]) => event === 'ssr.transport.failed')
+  const fromConsole = vi.mocked(console.error).mock.calls.filter((call) =>
+    String(call[0]).includes('ssr.transport.failed')
+  )
+  return {
+    fromLogger,
+    fromConsole,
+    transportEvents: fromLogger.length + fromConsole.length,
+    diagnostic: (fromLogger[0]?.[1] ?? fromConsole[0]?.[1]) as Record<string, unknown> | undefined,
+  }
+}
 
 describe('Vercel Node transport', () => {
   it('passes raw bytes and authoritative hosts to Core and preserves status and multiple cookies without a listener', async () => {
@@ -484,6 +767,32 @@ describe('Vercel Node transport', () => {
     expect(outgoing.statusCode).toBe(201)
     expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 255, 1, 128]))
     expect(headers.get('set-cookie')).toEqual(['one=1', 'two=2'])
+  })
+
+  it('logs a streamed transport failure once when Vercel writes the response', async () => {
+    const result = await invokeFailingVercelStream(new TypeError('stream exploded'))
+    expect(result.transportEvents).toBe(1)
+    expect(result.diagnostic).toMatchObject({
+      message: expect.stringContaining('stream exploded'),
+    })
+  })
+
+  it('does not duplicate a non-extensible streamed transport failure', async () => {
+    const result = await invokeFailingVercelStream(
+      Object.preventExtensions(new TypeError('stream exploded'))
+    )
+    expect(result.transportEvents).toBe(1)
+    expect(result.diagnostic).toMatchObject({
+      message: expect.stringContaining('stream exploded'),
+    })
+  })
+
+  it('does not duplicate a primitive streamed transport failure', async () => {
+    const result = await invokeFailingVercelStream('stream exploded')
+    expect(result.transportEvents).toBe(1)
+    expect(result.diagnostic).toMatchObject({
+      message: expect.stringContaining('stream exploded'),
+    })
   })
 
   it('rejects a loaded runtime that does not expose the generated export contract', async () => {
