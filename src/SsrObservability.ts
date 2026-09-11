@@ -3,13 +3,29 @@ import type {
   SsrRenderMetrics,
 } from './SsrRuntimeTypes'
 import { readSsrInitializationPhase, readSsrProductionFailure } from './SsrProductionError'
+import {
+  classifySsrRuntimeLoadFailure,
+  readSsrRuntimeLoadFailure,
+  SSR_RUNTIME_LOAD_MESSAGES,
+  sanitizeSsrRuntimeLoadClassification,
+} from './SsrRuntimeLoadDiagnostics'
 
 type SsrLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 /** Never echo arbitrary exception text: it can contain upstream bodies or credentials. */
+const readRuntimeLoadFailure = (error: unknown) => {
+  const attached = readSsrRuntimeLoadFailure(error)
+  if (attached) return attached
+  return readSsrInitializationPhase(error) === 'runtime-load'
+    ? classifySsrRuntimeLoadFailure(error)
+    : undefined
+}
+
 export const describeSsrFailure = (error: unknown): string => {
   const productionFailure = readSsrProductionFailure(error)
   if (productionFailure) return productionFailure.message
+  const runtimeLoadFailure = readRuntimeLoadFailure(error)
+  if (runtimeLoadFailure) return SSR_RUNTIME_LOAD_MESSAGES[runtimeLoadFailure.reason]
   let message = ''
   try { message = error instanceof Error ? error.message : typeof error === 'string' ? error : '' } catch { /* hostile getter */ }
   if (message.includes('localhost origin in production')) {
@@ -38,13 +54,31 @@ const failureType = (error: unknown): string => {
   if (readSsrProductionFailure(error)) return 'SsrProductionArtifactError'
   try {
     if (error instanceof Error && ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError',
-      'URIError', 'SsrRequestTimeoutError', 'SeoProviderFailure'].includes(error.name)) return error.name
+      'URIError', 'SsrRequestTimeoutError', 'SeoProviderFailure', 'SsrRuntimeLoadError'].includes(error.name)) return error.name
   } catch { /* Do not invoke an untrusted error serializer. */ }
   return 'Error'
 }
 
 const safeIdentifier = (value: unknown): string =>
   typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : 'unknown'
+
+const runtimeLoadDiagnostic = (
+  error: unknown,
+  initializationPhase: ReturnType<typeof readSsrInitializationPhase>
+): Record<string, unknown> => {
+  const classification = sanitizeSsrRuntimeLoadClassification(
+    readSsrRuntimeLoadFailure(error) ?? (
+      initializationPhase === 'runtime-load' ? classifySsrRuntimeLoadFailure(error) : undefined
+    )
+  )
+  if (!classification) return {}
+  return {
+    reason: classification.reason,
+    ...(classification.package ? { package: classification.package } : {}),
+    ...(classification.module ? { module: classification.module } : {}),
+    ...(classification.export ? { export: classification.export } : {}),
+  }
+}
 
 const diagnosticDetails = (details?: Record<string, unknown>): Record<string, unknown> => {
   // Only these fields may reach the default sink. Never serialize unknown
@@ -63,7 +97,9 @@ const diagnosticDetails = (details?: Record<string, unknown>): Record<string, un
     pathname: pathname.startsWith('/') && !pathname.startsWith('//') ? pathname : '/',
     ...(details?.error === undefined ? {} : { error: describeSsrFailure(details.error), errorType: failureType(details.error) }),
     ...(initializationPhase ? { phase: initializationPhase } : {}),
-    ...(productionFailure ? { code: productionFailure.code, artifact: productionFailure.artifact, reason: productionFailure.reason } : {}),
+    ...(productionFailure
+      ? { code: productionFailure.code, artifact: productionFailure.artifact, reason: productionFailure.reason }
+      : runtimeLoadDiagnostic(details?.error, initializationPhase)),
   }
 }
 
