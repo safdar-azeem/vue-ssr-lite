@@ -8,7 +8,7 @@ import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
 import { createDeploymentBuild } from '../deployment/DeploymentRuntime'
-import { safeSsrLog } from '../SsrObservability'
+import { reportSsrCliFatal } from './SsrCliFatal'
 
 const runServer = async (options: SsrCliOptions, production: boolean) => {
   const startupTimings = production ? undefined : createSsrPhaseTimings()
@@ -73,10 +73,6 @@ const main = async () => {
 }
 
 main().catch((error) => {
-  if (process.argv[2] === 'start') {
-    safeSsrLog(undefined, 'error', 'ssr.start.failed', { requestId: 'startup', error })
-  } else {
-    console.error('fatal error', error)
-  }
+  reportSsrCliFatal(process.argv[2], error)
   process.exitCode = 1
 })
