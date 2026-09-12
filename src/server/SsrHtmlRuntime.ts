@@ -451,7 +451,12 @@ export type SsrErrorDocumentDevelopmentDetails = {
   name?: string
   message?: string
   stack?: string
+  requestPathname?: string
   pathname?: string
+  source?: string
+  plugin?: string
+  location?: string
+  frame?: string
 }
 
 export type SsrErrorDocumentOptions = {
@@ -482,15 +487,29 @@ export const renderSsrErrorDocument = (
   if (options.development) {
     const name = options.development.name
     const detail = options.development.message ?? message
-    const pathname = options.development.pathname
+    const plugin = options.development.plugin
+    const source = options.development.source
+    const location = options.development.location
+    const requestPathname = options.development.requestPathname ?? options.development.pathname
+    const frame = options.development.frame
     const stack = options.development.stack
+    const pre = (value?: string) =>
+      value
+        ? `<pre style="overflow:auto;white-space:pre-wrap;text-align:left">${escapeSsrHtml(value)}</pre>`
+        : ''
+    const labeled = (label: string, value?: string) =>
+      value ? `<p>${escapeSsrHtml(label)}: ${escapeSsrHtml(value)}</p>` : ''
     return ssrErrorDocument(language, title, `<div style="max-width:56rem;width:100%"><h1>${escapeSsrHtml(title)}</h1>${
+      plugin ? `<p>[plugin:${escapeSsrHtml(plugin)}]</p>` : ''
+    }${
       name ? `<p><strong>${escapeSsrHtml(name)}</strong></p>` : ''
     }<p>${escapeSsrHtml(detail)}</p>${
-      pathname ? `<p>Path: ${escapeSsrHtml(pathname)}</p>` : ''
-    }${errorIdHtml}${
-      stack ? `<pre style="overflow:auto;white-space:pre-wrap;text-align:left">${escapeSsrHtml(stack)}</pre>` : ''
-    }</div>`, 'left')
+      labeled('Source', source)
+    }${
+      labeled('Location', location)
+    }${
+      labeled('Request', requestPathname)
+    }${errorIdHtml}${pre(frame)}${pre(stack)}</div>`, 'left')
   }
   return ssrErrorDocument(
     language,
