@@ -5,15 +5,9 @@ import {
   type RouterHistory,
   type RouterScrollBehavior,
 } from 'vue-router'
-import {
-  createExtensionRuntime,
-  SSR_EXTENSION_RUNTIME,
-} from './core/extensions/ExtensionRuntime'
-import { resolveBuiltInExtensions } from './extensions/resolveBuiltInExtensions'
-import {
-  recomputeSeoResponseStatus,
-  type SeoState,
-} from './extensions/seo/state'
+import type { ExtensionRuntime, ExtensionRuntimeOptions } from './core/extensions/ExtensionRuntime'
+import { SSR_EXTENSION_RUNTIME } from './core/extensions/ExtensionRuntimeKey'
+import type { SeoSiteDefaults } from './extensions/seo/types'
 import { isPrivateSeoMode, isSeoEnabled } from './extensions/seo/types'
 import {
   isSsrProduction,
@@ -36,18 +30,20 @@ import {
   type SsrResolutionController,
 } from './SsrRequestResolution'
 import { installCrossRenderNavigation } from './SsrRouteRenderRuntime'
-import {
-  createSsrMiddlewareExecutionController,
-  type SsrMiddlewareExecutionController,
-  type SsrMiddlewareInstallation,
+import type {
+  SsrMiddlewareExecutionController,
+  SsrMiddlewareInstallation,
 } from './middleware/SsrMiddlewareRuntime'
-import {
-  createSsrNavigationRuntime,
-  SSR_NAVIGATION_RUNTIME,
-} from './navigation/SsrNavigationRuntime'
+import { SSR_NAVIGATION_RUNTIME } from './navigation/SsrNavigationContext'
 import type { SsrNavigationRuntime } from './navigation/SsrNavigationTypes'
-import { SSR_FETCH_RUNTIME, SsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntime'
-import { bindSsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntimeScope'
+import type { SsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntime'
+import {
+  FETCH_HYDRATION_KEY,
+  SSR_FETCH_RUNTIME,
+  SSR_FETCH_OWNER,
+  bindSsrFetchRuntime,
+  type SsrFetchOwner,
+} from './data/fetch/runtime/SsrFetchRuntimeScope'
 import type {
   SsrCreatedApplication,
   SsrHydrationState,
@@ -125,10 +121,23 @@ export interface SsrCreateApplicationOptions<
   ) => T
 }
 
-/** Host-owned capabilities keep server reconciliation out of browser bootstrap. */
+export interface SsrApplicationExtensions {
+  runtime: ExtensionRuntime
+  routeChanged?(response: SsrRequestContext['response'], route: Router['currentRoute']['value']): void
+}
+
+/** Host-owned capabilities keep execution implementations out of browser bootstrap. */
 export interface SsrApplicationHost {
   createHistory(): RouterHistory
   createResolution(): SsrResolutionController
+  createFetchRuntime?(owner: SsrFetchOwner): SsrFetchRuntime
+  createMiddleware(options: { server: boolean; request: SsrRenderRequest<any> }): SsrMiddlewareExecutionController
+  createNavigation(options: { router: Router; server: boolean; diagnostics: boolean }): SsrNavigationRuntime | Promise<SsrNavigationRuntime>
+  createExtensions(
+    definition: SsrResolvedApplicationDefinition<any, any>,
+    defaults: SeoSiteDefaults | undefined,
+    options: ExtensionRuntimeOptions
+  ): SsrApplicationExtensions | null | Promise<SsrApplicationExtensions | null>
   observe?(application: Pick<SsrCreatedApplication<any, any>, 'context' | 'hydration' | 'managedHead' | 'resolution'>): void
 }
 
@@ -282,51 +291,55 @@ export const createSsrApplicationCore = async <
     resolution,
   }
   host.observe?.({ context, hydration, managedHead, resolution })
-  const extensionRuntime = createExtensionRuntime(
-    resolveBuiltInExtensions(
-      definition,
-      options.hydrationState?.siteSeo ?? options.request.siteSeo
-    ),
-    definition.extensions ?? [],
-    {
-      applicationId: definition.id,
-      server: options.server,
-      production,
-      getRoute: () => router?.currentRoute.value ?? null,
-      getSiteOrigin: () => siteOrigin,
-      getPathname: () => router?.currentRoute.value.path ?? context.url.pathname,
-      getResponseStatus: () => context.response.statusCode,
-      getRedirected: () => Boolean(context.response.redirect),
-      managedHead,
-    }
-  )
-  Object.assign(context, {
-    managedHead,
-    [SSR_EXTENSION_RUNTIME]: extensionRuntime,
-  })
-
+  let extensions: SsrApplicationExtensions | null = null
   const ownsMiddlewareController = Boolean(router && !options.middlewareController)
   const middlewareController = router
     ? options.middlewareController ??
-      createSsrMiddlewareExecutionController({
+      host.createMiddleware({
         server: options.server,
         request: options.request,
       })
     : undefined
   let middlewareInstallation: SsrMiddlewareInstallation | undefined
   try {
+    extensions = await host.createExtensions(
+      definition,
+      options.hydrationState?.siteSeo ?? options.request.siteSeo,
+      {
+        applicationId: definition.id,
+        server: options.server,
+        production,
+        getRoute: () => router?.currentRoute.value ?? null,
+        getSiteOrigin: () => siteOrigin,
+        getPathname: () => router?.currentRoute.value.path ?? context.url.pathname,
+        getResponseStatus: () => context.response.statusCode,
+        getRedirected: () => Boolean(context.response.redirect),
+        managedHead,
+      }
+    )
+    Object.assign(context, { managedHead, [SSR_EXTENSION_RUNTIME]: extensions?.runtime })
     const app = options.spa
       ? createApp(definition.root)
       : createSSRApp(definition.root)
-    const fetchRuntime = new SsrFetchRuntime(
-      options.server,
+    const fetchOwner: SsrFetchOwner = {
+      server: options.server,
       context,
       hydration,
-      !options.server && Boolean(options.hydrationState) && !options.spa
-    )
-    app.provide(SSR_FETCH_RUNTIME, fetchRuntime)
-    const unbindFetchRuntime = bindSsrFetchRuntime(fetchRuntime, options.server)
-    hydration.onDispose(unbindFetchRuntime)
+      hydrating: !options.server && Boolean(options.hydrationState) && !options.spa,
+      disposed: false,
+    }
+    // Server hosts retain eager execution and AsyncLocalStorage ownership. The
+    // browser provides only data until useFetch/setContext imports execution.
+    fetchOwner.runtime = host.createFetchRuntime?.(fetchOwner)
+    if (fetchOwner.runtime) app.provide(SSR_FETCH_RUNTIME, fetchOwner.runtime)
+    app.provide(SSR_FETCH_OWNER, fetchOwner)
+    hydration.onHydrated(() => {
+      fetchOwner.hydrating = false
+      // An unused capability still relinquishes its serialized continuation.
+      if (!fetchOwner.runtime) hydration.forget(FETCH_HYDRATION_KEY)
+    })
+    hydration.onDispose(() => { fetchOwner.disposed = true })
+    hydration.onDispose(bindSsrFetchRuntime(fetchOwner.runtime ?? fetchOwner, options.server))
     const initialize = async () => {
       if (!options.server) app.onUnmount(() => hydration.dispose())
       if (router) {
@@ -334,7 +347,7 @@ export const createSsrApplicationCore = async <
         // guards and route resolution. Successful navigation hands its loading
         // clock to the selected RouterView until native page Suspense resolves;
         // middleware still owns cancellation and its AbortSignal lifecycle.
-        navigationRuntime = createSsrNavigationRuntime({
+        navigationRuntime = await host.createNavigation({
           router,
           server: options.server,
           diagnostics: Boolean(
@@ -373,8 +386,7 @@ export const createSsrApplicationCore = async <
         router.afterEach((to, _from, failure) => {
           if (failure) return
           resolveResponseStatusForRoute(context.response, to)
-          const seoState = extensionRuntime.getState<SeoState>('seo')
-          if (seoState) recomputeSeoResponseStatus(seoState, context.response, to)
+          extensions?.routeChanged?.(context.response, to)
           if (!options.server) managedHead.invalidate()
         })
       }
@@ -401,14 +413,14 @@ export const createSsrApplicationCore = async <
           server: options.server,
         })
       )
-      extensionRuntime.setup()
+      extensions?.runtime.setup()
       // Vue Router starts its initial browser navigation from `install()`. Keep
       // that installation behind the (possibly async) application initializer so
       // Consumer middleware is registered before any route-level guard can
       // observe incomplete application setup.
       if (router) app.use(router)
       hydration.onDispose(() => {
-        extensionRuntime.dispose()
+        extensions?.runtime.dispose()
         managedHead.dispose()
       })
 
@@ -420,16 +432,19 @@ export const createSsrApplicationCore = async <
         resolution,
         managedHead,
         middleware: middlewareController ?? null,
-        fetchRuntime,
+        get fetchRuntime() {
+          if (!fetchOwner.runtime) throw new Error('Fetch execution has not been activated for this application.')
+          return fetchOwner.runtime
+        },
       }
     }
     return await (options.runWithFetchRuntime
-      ? options.runWithFetchRuntime(fetchRuntime, initialize)
+      ? options.runWithFetchRuntime(fetchOwner.runtime!, initialize)
       : initialize())
   } catch (error) {
     navigationRuntime?.dispose()
     if (ownsMiddlewareController) middlewareController?.dispose()
-    extensionRuntime.dispose()
+    extensions?.runtime.dispose()
     managedHead.dispose()
     hydration.dispose()
     throw error
