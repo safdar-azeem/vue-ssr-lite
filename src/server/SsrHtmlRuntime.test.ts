@@ -421,7 +421,7 @@ describe('SSR error documents', () => {
       { errorId }
     )
     expect(html).toContain('noindex,nofollow')
-    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('background:#000')
     expect(html).toContain('Application unavailable')
     expect(html).toContain('The application could not render this page. Please try again.')
     expect(html).toContain(`Error ID: ${errorId}`)
@@ -437,7 +437,6 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('<details')
     expect(html).not.toContain('Request:')
     expect(html).not.toContain('Return home')
-    expect(html).not.toMatch(/#(?:f00|ff0000|e11d48|dc2626)/i)
     expect(html).not.toContain('<svg')
   })
 
@@ -456,7 +455,10 @@ describe('SSR error documents', () => {
         requestPathname: '/about/<img>',
       },
     })
-    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('background:#000')
+    expect(html).toContain('.eyebrow{margin:0 0 0.6rem')
+    expect(html).toContain('color:#ff0000')
+    expect(html).toContain('h1{margin:0 0 1rem')
     expect(html).toContain('<p class="eyebrow">Application error</p>')
     expect(html).toContain('<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>')
     expect(html).toContain('<p class="pill">TypeError</p>')
@@ -472,7 +474,6 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('Source:')
     expect(html).not.toContain('<svg')
     expect(html).not.toContain('__open-in-editor')
-    expect(html).not.toMatch(/#(?:f00|ff0000|e11d48|dc2626)/i)
   })
 
   it('renders a clickable project-relative source and collapsed compiler details', () => {
@@ -497,7 +498,7 @@ describe('SSR error documents', () => {
       line: 10,
       column: 1,
     })
-    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('background:#000')
     expect(html).toContain('flex-direction:column')
     expect(html).toContain('<div class="stack">')
     expect(html).toContain('Single file component can contain only one &lt;template&gt; element')
@@ -567,7 +568,7 @@ describe('SSR error documents', () => {
       { errorId }
     )
     expect(html).toContain('<h1>Request timed out</h1>')
-    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('background:#000')
     expect(html).not.toContain('Show details')
     expect(html).not.toContain('vscode:')
     expect(html).not.toContain('__open-in-editor')
