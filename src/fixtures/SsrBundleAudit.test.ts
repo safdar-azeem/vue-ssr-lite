@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { OutputBundle, OutputChunk } from 'rollup'
 import { bundleModuleOwner, inspectSsrBundle } from './SsrBundleAudit'
-import { assertCompleteCriticalPayload, assertReviewedClientModules, PERFORMANCE_BUDGETS } from './SsrPerformanceContracts'
+import { assertAttributedClientModules, assertBrowserActivationAccounting, assertCapabilityGraph, assertCapabilityPagePayload, assertCompleteCriticalPayload, assertInstalledCapabilityParity, assertReviewedClientModules, PERFORMANCE_BUDGETS } from './SsrPerformanceContracts'
 
 const chunk = (fileName: string, imports: string[] = [], dynamicImports: string[] = []): OutputChunk => ({
   type: 'chunk', fileName, name: fileName, code: `console.log(${JSON.stringify(fileName)})`,
@@ -87,5 +87,76 @@ describe('bundle attribution', () => {
     const combinedOverflow = audit.critical(['entry.js'])
     combinedOverflow.total.gzip = PERFORMANCE_BUDGETS.pageGzip + 1
     expect(() => assertCompleteCriticalPayload(combinedOverflow)).toThrow('exceeds budget')
+  })
+})
+
+
+describe('capability attribution contracts', () => {
+  const module = { renderedLength: 1, originalLength: 1, renderedExports: ['run'], removedExports: [], code: '1' }
+
+  it('does not charge mixed external-peer pages against the framework-only bootstrap ceiling', () => {
+    const entry = chunk('entry.js', ['vue', 'vue-router'])
+    const page = inspectSsrBundle({ 'entry.js': entry }, '/framework').critical(['entry.js'])
+    // Fixture/application growth may exceed both bootstrap limits without
+    // establishing a framework regression. Completeness still must be checked.
+    page.js.bytes = PERFORMANCE_BUDGETS.frameworkBootstrapBytes + 1
+    page.js.gzip = PERFORMANCE_BUDGETS.frameworkBootstrapGzip + 1
+    expect(() => assertCapabilityPagePayload(page, true)).not.toThrow()
+    expect(() => assertCapabilityPagePayload({ ...page, external: ['missing.js'] }, true)).toThrow('Incomplete')
+    expect(() => assertCapabilityPagePayload({ ...page, unresolvedCss: ['missing.css'] }, true)).toThrow('Incomplete')
+    expect(() => assertCapabilityPagePayload(page, false)).toThrow('Incomplete')
+    expect(() => assertCapabilityPagePayload({ ...page, external: [], total: { ...page.total, gzip: PERFORMANCE_BUDGETS.pageGzip + 1 } }, false))
+      .toThrow('exceeds budget')
+  })
+
+  it.each(['source', 'installed'] as const)('requires activation accounting for new %s framework dynamic imports', (mode) => {
+    const entry = chunk('entry.js')
+    const source = 'SsrBrowserRuntime.ts'
+    const known = 'navigation/SsrNavigationRuntime.ts'
+    const unexpected = 'SsrReactivityRuntime.ts'
+    const id = (name: string) => mode === 'source' ? `/framework/src/${name}`
+      : `/consumer/node_modules/vue-ssr-lite/dist/${name.replace(/\.ts$/, '.mjs')}`
+    entry.modules = { [id(source)]: module }
+    const inspect = (target: string) => inspectSsrBundle({ 'entry.js': entry }, '/framework', {
+      moduleSources: Object.fromEntries([source, known, unexpected].map((name) => [name.replace(/\.ts$/, '.mjs'), [name]])),
+      moduleInfo: () => ({ importedIds: [], dynamicallyImportedIds: [id(target)] }),
+    })
+    expect(() => assertBrowserActivationAccounting(inspect(known))).not.toThrow()
+    // Even an already-reviewed client module needs an activation decision if
+    // bootstrap starts acquiring it dynamically. No new byte limit is needed.
+    expect(() => assertBrowserActivationAccounting(inspect(unexpected))).toThrow('Unaccounted browser capability import')
+  })
+
+  it('attributes installed code by emitted provenance and rejects opaque shared chunks', () => {
+    const entry = chunk('entry.js')
+    entry.modules = { '/consumer/node_modules/vue-ssr-lite/dist/data/fetch/runtime/SsrFetchRuntime.mjs': module }
+    const report = inspectSsrBundle({ 'entry.js': entry }, '/framework', {
+      moduleSources: { 'data/fetch/runtime/SsrFetchRuntime.mjs': ['data/fetch/runtime/SsrFetchRuntime.ts'] },
+    })
+    expect(report.chunks[0]!.modules[0]).toMatchObject({ owner: 'framework-fetch', sources: ['data/fetch/runtime/SsrFetchRuntime.ts'] })
+    expect(() => assertAttributedClientModules(report)).not.toThrow()
+    const opaque = inspectSsrBundle({ 'entry.js': entry }, '/framework')
+    expect(() => assertAttributedClientModules(opaque)).toThrow('opaque installed browser implementation')
+    const fused = inspectSsrBundle({ 'entry.js': entry }, '/framework', {
+      moduleSources: { 'data/fetch/runtime/SsrFetchRuntime.mjs': ['data/fetch/runtime/SsrFetchRuntime.ts', 'extensions/seo/state.ts'] },
+    })
+    expect(() => assertAttributedClientModules(fused)).toThrow('opaque installed browser implementation')
+  })
+
+  it('counts activated dynamic modules in the critical closure without charging unneeded features', () => {
+    const entry = chunk('entry.js', [], ['fetch.js'])
+    entry.modules = { '/framework/src/SsrBrowserResolution.ts': module }
+    const fetch = chunk('fetch.js')
+    fetch.modules = { '/framework/src/data/fetch/runtime/SsrFetchRuntime.ts': module }
+    const report = inspectSsrBundle({ 'entry.js': entry, 'fetch.js': fetch }, '/framework')
+    expect(() => assertCapabilityGraph('minimal', report, report.critical(['entry.js']))).not.toThrow()
+    const activated = report.critical(['entry.js', 'fetch.js'])
+    expect(activated.js.gzip).toBe(report.chunks.reduce((total, chunk) => total + chunk.sizes.gzip, 0))
+    expect(() => assertCapabilityGraph('minimal', report, activated)).toThrow('fetch implementation must be absent')
+  })
+
+  it('rejects package-only implementation retention independently of compressed byte counts', () => {
+    expect(() => assertInstalledCapabilityParity(['client.ts'], ['client.ts', 'data/fetch/runtime/SsrFetchRuntime.ts'], 'minimal'))
+      .toThrow('package-only framework retention')
   })
 })
