@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { serializeJsonLd } from '../SsrManagedHead'
 import {
+  createSsrDevelopmentOpenInEditorHref,
   injectSsrHtml,
   prepareSsrHtmlTemplate,
   renderSsrErrorDocument,
@@ -413,18 +414,31 @@ describe('SSR HTML runtime', () => {
 describe('SSR error documents', () => {
   const errorId = 'vssl_8f3c2a7e1b0d4c56'
 
-  it('renders a generic production page with an error id and no exception details', () => {
+  it('renders a dark production page with an error id and no exception details', () => {
     const html = renderSsrErrorDocument(
       'Application unavailable',
       'The application could not render this page. Please try again.',
       { errorId }
     )
     expect(html).toContain('noindex,nofollow')
+    expect(html).toContain('background:#090b0e')
     expect(html).toContain('Application unavailable')
+    expect(html).toContain('The application could not render this page. Please try again.')
     expect(html).toContain(`Error ID: ${errorId}`)
     expect(html).toContain('id="main-content"')
     expect(html).not.toContain('TypeError')
     expect(html).not.toContain('Cannot read')
+    expect(html).not.toContain('vite:vue')
+    expect(html).not.toContain('HomeHero.vue')
+    expect(html).not.toContain('vscode:')
+    expect(html).not.toContain('__open-in-editor')
+    expect(html).not.toContain('data-ssr-open-source')
+    expect(html).not.toContain('Show details')
+    expect(html).not.toContain('<details')
+    expect(html).not.toContain('Request:')
+    expect(html).not.toContain('Return home')
+    expect(html).not.toMatch(/#(?:f00|ff0000|e11d48|dc2626)/i)
+    expect(html).not.toContain('<svg')
   })
 
   it('omits the error id when it is unavailable', () => {
@@ -432,7 +446,7 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('Error ID:')
   })
 
-  it('renders a development document with escaped name, message, stack and request path', () => {
+  it('renders a dark development document with the message as the primary heading', () => {
     const html = renderSsrErrorDocument('Application error', 'fallback', {
       errorId,
       development: {
@@ -442,38 +456,153 @@ describe('SSR error documents', () => {
         requestPathname: '/about/<img>',
       },
     })
-    expect(html).toContain('TypeError')
+    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('<p class="eyebrow">Application error</p>')
+    expect(html).toContain('<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>')
+    expect(html).toContain('<p class="pill">TypeError</p>')
     expect(html).toContain(`Error ID: ${errorId}`)
     expect(html).toContain('Request: /about/&lt;img&gt;')
-    expect(html).not.toContain('Path: /')
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain('<details>')
+    expect(html).not.toContain('<details open')
+    expect(html).toContain('<summary>Show details</summary>')
     expect(html).toContain('at render (/app/Page.vue:1:1)')
+    expect(html).not.toContain('Path: /')
     expect(html).not.toContain('<script>alert(1)</script>')
+    expect(html).not.toContain('Open in VS Code')
+    expect(html).not.toContain('Source:')
+    expect(html).not.toContain('<svg')
+    expect(html).not.toContain('__open-in-editor')
+    expect(html).not.toMatch(/#(?:f00|ff0000|e11d48|dc2626)/i)
   })
 
-  it('renders escaped plugin, source, location and frame on the development page', () => {
+  it('renders a clickable project-relative source and collapsed compiler details', () => {
     const html = renderSsrErrorDocument('Application error', 'fallback', {
       errorId,
+      viteBase: '/',
       development: {
         name: 'SyntaxError',
         message: 'Single file component can contain only one <template> element',
         plugin: 'vite:vue',
         source: '/project/src/<img>/HomeHero.vue',
-        location: 'HomeHero.vue:10:1',
+        displaySource: 'src/<img>/HomeHero.vue',
+        line: 10,
+        column: 1,
         requestPathname: '/',
         frame: '<script>alert(1)</script>\n  9 | <template>',
         stack: 'SyntaxError: Single file component can contain only one <template> element',
       },
     })
-    expect(html).toContain('[plugin:vite:vue]')
-    expect(html).toContain('Source: /project/src/&lt;img&gt;/HomeHero.vue')
-    expect(html).toContain('Location: HomeHero.vue:10:1')
+    const openHref = createSsrDevelopmentOpenInEditorHref({
+      displaySource: 'src/<img>/HomeHero.vue',
+      line: 10,
+      column: 1,
+    })
+    expect(html).toContain('background:#090b0e')
+    expect(html).toContain('flex-direction:column')
+    expect(html).toContain('<div class="stack">')
+    expect(html).toContain('Single file component can contain only one &lt;template&gt; element')
+    expect(html).toContain('vite:vue · SyntaxError')
+    expect(html).not.toContain('[plugin:vite:vue]')
+    expect(html).toContain('src/&lt;img&gt;/HomeHero.vue:10:1')
+    expect(html).toContain(`href="${openHref}"`)
+    expect(html).toContain('data-ssr-open-source')
+    expect(html).toContain('__open-in-editor?file=')
+    expect(html).toContain('fetch(link.href')
+    expect(html).not.toContain('vscode:')
+    expect(html).not.toContain('Source:')
+    expect(html).not.toContain('Location:')
     expect(html).toContain('Request: /')
     expect(html).toContain(`Error ID: ${errorId}`)
+    expect(html).toContain('<details>')
+    expect(html).not.toContain('<details open')
+    expect(html).toContain('<summary>Show details</summary>')
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(html).toContain('  9 | &lt;template&gt;')
-    expect(html).toContain('SyntaxError: Single file component can contain only one &lt;template&gt; element')
     expect(html).not.toContain('<script>alert(1)</script>')
+    expect(html).not.toContain('Open in VS Code')
     expect(html).not.toContain('Path: /')
+    expect(html.indexOf('src/&lt;img&gt;/HomeHero.vue:10:1'))
+      .toBeLessThan(html.indexOf('vite:vue · SyntaxError'))
+    expect(html.indexOf('class="source"'))
+      .toBeLessThan(html.indexOf('class="pill"'))
+  })
+
+  it('omits empty source, plugin, and details rows for an ordinary TypeError', () => {
+    const html = renderSsrErrorDocument('Application error', 'Cannot read properties of undefined (reading \'items\')', {
+      errorId,
+      development: {
+        name: 'TypeError',
+        message: 'Cannot read properties of undefined (reading \'items\')',
+        requestPathname: '/',
+      },
+    })
+    expect(html).toContain('<p class="pill">TypeError</p>')
+    expect(html).not.toContain('class="source"')
+    expect(html).not.toContain('__open-in-editor')
+    expect(html).not.toContain('fetch(link.href')
+    expect(html).not.toContain('Show details')
+    expect(html).not.toContain('<details')
+    expect(html).toContain('Request: /')
+    expect(html).toContain(`Error ID: ${errorId}`)
+  })
+
+  it('renders a project-relative source without inventing a location', () => {
+    const html = renderSsrErrorDocument('Application error', 'failed', {
+      development: {
+        displaySource: 'src/HomeHero.vue',
+        source: '/project/src/HomeHero.vue',
+      },
+    })
+    expect(html).toContain('>src/HomeHero.vue<')
+    expect(html).toContain('href="/__open-in-editor?file=src%2FHomeHero.vue"')
+    expect(html).not.toContain('src/HomeHero.vue:10')
+    expect(html).not.toContain('Open in VS Code')
+    expect(html).not.toContain('vscode:')
+  })
+
+  it('keeps semantic titles such as Request timed out on the dark production shell', () => {
+    const html = renderSsrErrorDocument(
+      'Request timed out',
+      'The application could not render this page. Please try again.',
+      { errorId }
+    )
+    expect(html).toContain('<h1>Request timed out</h1>')
+    expect(html).toContain('background:#090b0e')
+    expect(html).not.toContain('Show details')
+    expect(html).not.toContain('vscode:')
+    expect(html).not.toContain('__open-in-editor')
+    expect(html).not.toContain('data-ssr-open-source')
+  })
+
+  it('keeps unsafe or non-project sources readable without an editor-opening link', () => {
+    for (const displaySource of ['javascript:alert(1)', '../secret.vue', '/etc/passwd', 'https://example.com/HomeHero.vue']) {
+      const html = renderSsrErrorDocument('Application error', 'failed', {
+        development: { displaySource },
+      })
+      expect(html).toContain(`<span class="source">${displaySource}</span>`)
+      expect(html).not.toContain('__open-in-editor')
+      expect(html).not.toContain('href="javascript:')
+      expect(html).not.toContain('data-ssr-open-source')
+      expect(html).not.toContain('<a ')
+    }
+  })
+
+  it('builds an editor-neutral Vite open-in-editor href from a project-local file', () => {
+    expect(createSsrDevelopmentOpenInEditorHref({
+      displaySource: 'src/My File.vue',
+      line: 4,
+      column: 2,
+    }, '/app')).toBe('/app/__open-in-editor?file=src%2FMy%20File.vue%3A4%3A2')
+    expect(createSsrDevelopmentOpenInEditorHref({
+      displaySource: 'src/HomeHero.vue',
+    })).toBe('/__open-in-editor?file=src%2FHomeHero.vue')
+    expect(createSsrDevelopmentOpenInEditorHref({
+      displaySource: '../outside.vue',
+      line: 1,
+      column: 1,
+    })).toBeUndefined()
+    expect(createSsrDevelopmentOpenInEditorHref({
+      displaySource: 'javascript:alert(1)',
+    })).toBeUndefined()
   })
 })
