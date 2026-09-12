@@ -1213,7 +1213,7 @@ On **Vercel**, deploy as a normal Vite project with the existing build command. 
 
 ## Diagnostics
 
-Development (`vue-ssr-lite dev`) shows a rich but minimal dark error page in the browser and one concise active error in the terminal. Source and compiler metadata appear when Vite provides them. The HTTP server stays running for recoverable application errors, Vite retries automatically after a source fix, and fixing one blocking error may reveal the next. When a trustworthy project-local source path is available, the browser file path stays readable and can ask Vite to open that file in the developer's editor. Production (`vue-ssr-lite start`) remains fail-fast.
+Development (`vue-ssr-lite dev`) shows a rich but minimal dark error page in the browser and one concise active error in the terminal. Source and compiler metadata appear when Vite provides them. Request path and Error ID stay inside the collapsed Show details disclosure. The HTTP server stays running for recoverable application errors, Vite retries automatically after a source fix, and fixing one blocking error may reveal the next. When a trustworthy project-local source path is available, the browser file path stays readable and can ask Vite to open that file in the developer's editor. Production (`vue-ssr-lite start`) remains fail-fast.
 
 The default development terminal does not print the full stack or duplicate structured `ssr.runtime.unavailable` / `ssr.request.failed` objects for the same active compiler failure.
 
