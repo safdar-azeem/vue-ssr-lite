@@ -12,7 +12,7 @@ import {
   generateSsrRuntimeModule,
   loadSsrConfigFile,
   normalizeSsrConfig,
-  resolveSsrConfigPath,
+  resolveSsrSelectedConfigPath,
   SSR_CLIENT_VIRTUAL_PREFIX,
   SSR_HTML_VIRTUAL_PREFIX,
   SSR_RENDERER_VIRTUAL_ID,
@@ -30,6 +30,13 @@ import {
   prepareSsrViteComponentAssets,
   resolveApplicationStyleDependencies,
 } from './SsrViteAssetRuntime'
+import { readSsrViteCliConfig } from './SsrViteCliConfig'
+import { attachSsrViteResolvedConfigPath } from './SsrViteResolvedConfigPath'
+
+export {
+  attachSsrViteResolvedConfigPath,
+  readSsrViteResolvedConfigPath,
+} from './SsrViteResolvedConfigPath'
 
 export interface SsrVitePluginOptions {
   /** Optional path to `server.ts` (auto-discovered when omitted). */
@@ -213,6 +220,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let root = resolve(options.root || process.cwd())
   let resolvedBase = '/'
   let configuredBuildBase: string | undefined
+  let cliConfig: string | undefined
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
   let entriesDirty = false
@@ -272,7 +280,10 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     loadingEntries = (async () => {
       for (;;) {
         const revision = entriesRevision
-        const nextPath = await resolveSsrConfigPath(root, options.config)
+        const nextPath = await resolveSsrSelectedConfigPath(root, {
+          cli: cliConfig,
+          plugin: options.config,
+        })
         const config = await loadSsrConfigFile(root, nextPath)
         const next = extractSsrViteEntries(config, { root })
         if (revision !== entriesRevision) continue
@@ -349,6 +360,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         assertSupportedDeploymentEnvironment(resolveDeploymentEnvironment(process.env))
       }
       root = resolve(options.root || userConfig.root || process.cwd())
+      cliConfig = readSsrViteCliConfig(userConfig)
       if (userConfig.base !== undefined) configuredBuildBase = userConfig.base
       const resolved = await ensureEntries()
       if (environment.command === 'serve') {
@@ -440,6 +452,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         next()
       })
       await ensureEntries()
+      attachSsrViteResolvedConfigPath(server, configPath)
       if (configPath) server.watcher.add(configPath)
       server.watcher.add([...configDependencies])
     },
@@ -461,6 +474,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       invalidateVirtualModules(server)
       invalidateConfigCache()
       await ensureEntries()
+      attachSsrViteResolvedConfigPath(server, configPath)
       if (configPath) server.watcher.add(configPath)
       server.watcher.add([...configDependencies])
       invalidateVirtualModules(server)
@@ -505,7 +519,11 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (id === RESOLVED_RUNTIME) {
         const resolved = await ensureEntries()
         const absoluteConfig =
-          configPath ?? (await resolveSsrConfigPath(root, options.config))
+          configPath ??
+          (await resolveSsrSelectedConfigPath(root, {
+            cli: cliConfig,
+            plugin: options.config,
+          }))
         // Capture the same resolved root used by plugin-vue's SSR registrations
         // and Vite's client SSR manifest. Keep it private in the server runtime;
         // deployment relocation must not change module identity resolution.
