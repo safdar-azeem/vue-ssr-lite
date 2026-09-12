@@ -3,7 +3,7 @@ import {
   createSsrApplication,
   snapshotSsrReconciliationState,
 } from './SsrApplicationRuntime'
-import { createSsrResolutionController } from './SsrRequestResolution'
+import { createSsrResolutionController } from './SsrServerResolution'
 import { createSsrMiddlewareExecutionController } from './middleware/SsrMiddlewareRuntime'
 import { collectSsrRenderDiagnostics, readSsrPhaseTimings } from './SsrDiagnosticsRuntime'
 import { resolveResponseStatusForRoute } from './SsrResponseStatus'
