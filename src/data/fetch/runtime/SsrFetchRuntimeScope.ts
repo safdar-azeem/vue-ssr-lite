@@ -1,8 +1,24 @@
-import { hasInjectionContext, inject } from 'vue'
-import {
-  SSR_FETCH_RUNTIME,
-  type SsrFetchRuntime,
-} from './SsrFetchRuntime'
+import { hasInjectionContext, inject, type InjectionKey } from 'vue'
+import type { SsrHydrationController } from '../../../SsrHydrationRuntime'
+import type { SsrRequestContext } from '../../../SsrRuntimeTypes'
+import type { SsrFetchRuntime } from './SsrFetchRuntime'
+
+export const FETCH_HYDRATION_KEY = 'vue-ssr-lite:fetch'
+
+export const SSR_FETCH_RUNTIME = Symbol.for('vue-ssr:fetch-runtime') as InjectionKey<SsrFetchRuntime>
+export const SSR_FETCH_OWNER = Symbol.for('vue-ssr:fetch-owner') as InjectionKey<SsrFetchOwner>
+
+/** Data only: importing application ownership must never import fetch execution. */
+export interface SsrFetchOwner {
+  server: boolean
+  context: SsrRequestContext
+  hydration: SsrHydrationController
+  hydrating: boolean
+  disposed: boolean
+  runtime?: SsrFetchRuntime
+}
+
+type FetchBinding = SsrFetchRuntime | SsrFetchOwner
 
 /** Shared across managed-server and Vite application module graphs. */
 export const SSR_FETCH_ASYNC_RUNTIME = Symbol.for(
@@ -18,7 +34,7 @@ interface AsyncRuntimeStorage {
 }
 
 interface BrowserRuntimeSlot {
-  runtimes: SsrFetchRuntime[]
+  runtimes: FetchBinding[]
 }
 
 const registry = (): Record<PropertyKey, unknown> =>
@@ -31,7 +47,7 @@ const readAsyncRuntime = (): SsrFetchRuntime | null => {
   return storage?.getStore() ?? null
 }
 
-const readBrowserRuntime = (): SsrFetchRuntime | null => {
+const readBrowserRuntime = (): FetchBinding | null => {
   if (typeof window === 'undefined') return null
   const slot = registry()[SSR_FETCH_BROWSER_RUNTIME] as
     | BrowserRuntimeSlot
@@ -41,7 +57,7 @@ const readBrowserRuntime = (): SsrFetchRuntime | null => {
 
 /** Bind the single document-owning browser application until its disposal. */
 export const bindSsrFetchRuntime = (
-  runtime: SsrFetchRuntime,
+  runtime: FetchBinding,
   server: boolean
 ): (() => void) => {
   if (server) return () => undefined
@@ -56,10 +72,11 @@ export const bindSsrFetchRuntime = (
   }
 }
 
-/** Resolve setup, request-scoped server, then mounted-browser ownership. */
-export const resolveSsrFetchRuntime = (): SsrFetchRuntime | null => {
+/** Injection wins over the legacy document fallback, including disposed owners. */
+export const readSsrFetchBinding = (setupOnly = false): FetchBinding | null => {
   const injected = hasInjectionContext()
-    ? inject(SSR_FETCH_RUNTIME, null)
+    ? inject(SSR_FETCH_RUNTIME, null) ?? inject(SSR_FETCH_OWNER, null)
     : null
-  return injected ?? readAsyncRuntime() ?? readBrowserRuntime()
+  return injected ?? (setupOnly ? null : readAsyncRuntime() ?? readBrowserRuntime())
 }
+
