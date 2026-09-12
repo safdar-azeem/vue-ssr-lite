@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createSsrDevelopmentConsole,
   formatSsrDevelopmentConsoleFailure,
@@ -16,10 +16,15 @@ const compilerError = (message: string, file = '/cli-console-root/src/HomeHero.v
 
 afterEach(() => {
   resetSsrDevelopmentConsole(ROOT)
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
 })
 
 describe('SsrCliDevelopmentConsole', () => {
+  beforeEach(() => {
+    vi.stubEnv('NO_COLOR', '1')
+  })
+
   it('formats an ordinary TypeError without empty plugin or file rows', () => {
     expect(formatSsrDevelopmentConsoleFailure(
       new TypeError("Cannot read properties of undefined (reading 'items')"),
@@ -111,5 +116,64 @@ describe('SsrCliDevelopmentConsole', () => {
     expect(createSsrDevelopmentConsole({ root: ROOT, write: second }).reportFailure(compilerError('shared'))).toBe(false)
     expect(first).toHaveBeenCalledTimes(1)
     expect(second).not.toHaveBeenCalled()
+  })
+})
+
+describe('SsrCliDevelopmentConsole color', () => {
+  const coloredLabel = '\u001b[1;31mERROR:\u001b[0m'
+
+  it('styles only the ERROR label when color output is appropriate', () => {
+    vi.stubEnv('FORCE_COLOR', '1')
+    vi.stubEnv('NO_COLOR', '')
+    const formatted = formatSsrDevelopmentConsoleFailure(
+      compilerError('Single file component can contain only one <template> element'),
+      ROOT
+    )
+    expect(formatted).toBe([
+      `${coloredLabel} Single file component can contain only one <template> element`,
+      'Plugin: vite:vue',
+      'File: src/HomeHero.vue:84:1',
+    ].join('\n'))
+    expect(formatted).not.toContain(`${coloredLabel}Plugin:`)
+    expect(formatted).not.toContain('\u001b[1;31mSingle file component')
+  })
+
+  it('keeps a plain ERROR label when NO_COLOR is set', () => {
+    vi.stubEnv('FORCE_COLOR', '1')
+    vi.stubEnv('NO_COLOR', '1')
+    const formatted = formatSsrDevelopmentConsoleFailure(
+      compilerError('Single file component can contain only one <template> element'),
+      ROOT
+    )
+    expect(formatted).toBe([
+      'ERROR: Single file component can contain only one <template> element',
+      'Plugin: vite:vue',
+      'File: src/HomeHero.vue:84:1',
+    ].join('\n'))
+    expect(formatted).not.toContain('\u001b')
+  })
+
+  it('keeps a plain ERROR label in CI and when stdout is not a TTY', () => {
+    vi.stubEnv('NO_COLOR', '')
+    vi.stubEnv('FORCE_COLOR', '')
+    vi.stubEnv('CI', 'true')
+    const stdout = process.stdout
+    const originalTty = Object.getOwnPropertyDescriptor(stdout, 'isTTY')
+    Object.defineProperty(stdout, 'isTTY', { configurable: true, value: true })
+    try {
+      expect(formatSsrDevelopmentConsoleFailure(
+        new TypeError("Cannot read properties of undefined (reading 'items')"),
+        ROOT
+      )).toBe("ERROR: Cannot read properties of undefined (reading 'items')")
+      vi.stubEnv('CI', '')
+      Object.defineProperty(stdout, 'isTTY', { configurable: true, value: false })
+      expect(formatSsrDevelopmentConsoleFailure(
+        new TypeError("Cannot read properties of undefined (reading 'items')"),
+        ROOT
+      )).toBe("ERROR: Cannot read properties of undefined (reading 'items')")
+    } finally {
+      if (originalTty) Object.defineProperty(stdout, 'isTTY', originalTty)
+      else delete (stdout as { isTTY?: boolean }).isTTY
+    }
   })
 })
