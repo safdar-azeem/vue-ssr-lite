@@ -45,6 +45,7 @@ export const markSsrInitializationFailure = (
   error: unknown,
   phase: SsrInitializationPhase
 ): unknown => {
+  if (readSsrInitializationPhase(error) === phase) return error
   const failure = error && (typeof error === 'object' || typeof error === 'function')
     ? error
     : new Error('SSR initialization failed.', { cause: error })
@@ -52,6 +53,7 @@ export const markSsrInitializationFailure = (
     Object.defineProperty(failure, INITIALIZATION_PHASE, { value: phase })
     return failure
   } catch {
+    if (readSsrInitializationPhase(failure) === phase) return failure
     const wrapped = new Error('SSR initialization failed.', { cause: error })
     try {
       const name = error instanceof Error ? error.name : ''
