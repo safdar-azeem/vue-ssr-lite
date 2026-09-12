@@ -32,7 +32,7 @@ import {
   viewDepthKey,
   type RouteLocationNormalizedLoaded,
 } from 'vue-router'
-import { SSR_NAVIGATION_RUNTIME } from './SsrNavigationRuntime'
+import { SSR_NAVIGATION_RUNTIME } from './SsrNavigationContext'
 import type {
   SsrNavigationBoundarySubscriber,
   SsrNavigationTransaction,
