@@ -12,7 +12,7 @@ import {
   rememberLegacyResponseHeaders, unchangedLegacyResponseHeaders,
 } from '../server-routes/SsrServerResponseRuntime'
 import { carrySsrFailure, createSsrErrorDiagnostic, observeSsrFailure } from '../SsrErrorDiagnostic'
-import { renderSsrErrorDocument } from './SsrHtmlRuntime'
+import { renderSsrPublicErrorDocument } from './SsrHtmlRuntime'
 import { safeSsrLog } from '../SsrObservability'
 
 /** A failed cold start is retryable; concurrent cold requests share one attempt. */
@@ -139,9 +139,8 @@ export const createSsrProductionRequestHandler = (options: {
         error,
         errorId: diagnostic.errorId,
       })
-      return new Response(request.method === 'HEAD' ? null : renderSsrErrorDocument(
-        'Application unavailable',
-        'The application could not render this page. Please try again.',
+      return new Response(request.method === 'HEAD' ? null : renderSsrPublicErrorDocument(
+        500,
         { errorId: diagnostic.errorId },
       ), {
         status: 500,
