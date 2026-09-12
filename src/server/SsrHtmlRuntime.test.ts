@@ -432,21 +432,48 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('Error ID:')
   })
 
-  it('renders a development document with escaped name, message, stack and path', () => {
+  it('renders a development document with escaped name, message, stack and request path', () => {
     const html = renderSsrErrorDocument('Application error', 'fallback', {
       errorId,
       development: {
         name: 'TypeError',
         message: '<script>alert(1)</script>',
         stack: 'TypeError: <script>alert(1)</script>\n    at render (/app/Page.vue:1:1)',
-        pathname: '/about/<img>',
+        requestPathname: '/about/<img>',
       },
     })
     expect(html).toContain('TypeError')
     expect(html).toContain(`Error ID: ${errorId}`)
-    expect(html).toContain('Path: /about/&lt;img&gt;')
+    expect(html).toContain('Request: /about/&lt;img&gt;')
+    expect(html).not.toContain('Path: /')
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
     expect(html).toContain('at render (/app/Page.vue:1:1)')
     expect(html).not.toContain('<script>alert(1)</script>')
+  })
+
+  it('renders escaped plugin, source, location and frame on the development page', () => {
+    const html = renderSsrErrorDocument('Application error', 'fallback', {
+      errorId,
+      development: {
+        name: 'SyntaxError',
+        message: 'Single file component can contain only one <template> element',
+        plugin: 'vite:vue',
+        source: '/project/src/<img>/HomeHero.vue',
+        location: 'HomeHero.vue:10:1',
+        requestPathname: '/',
+        frame: '<script>alert(1)</script>\n  9 | <template>',
+        stack: 'SyntaxError: Single file component can contain only one <template> element',
+      },
+    })
+    expect(html).toContain('[plugin:vite:vue]')
+    expect(html).toContain('Source: /project/src/&lt;img&gt;/HomeHero.vue')
+    expect(html).toContain('Location: HomeHero.vue:10:1')
+    expect(html).toContain('Request: /')
+    expect(html).toContain(`Error ID: ${errorId}`)
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain('  9 | &lt;template&gt;')
+    expect(html).toContain('SyntaxError: Single file component can contain only one &lt;template&gt; element')
+    expect(html).not.toContain('<script>alert(1)</script>')
+    expect(html).not.toContain('Path: /')
   })
 })
