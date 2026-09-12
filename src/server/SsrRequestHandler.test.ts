@@ -795,9 +795,133 @@ describe('transport-independent SSR request handler', () => {
       expect(html).toContain('Application error')
       expect(html).toContain('TypeError')
       expect(html).toContain('Cannot read properties of undefined (reading &quot;x&quot;)')
-      expect(html).toContain('Path: /boom')
+      expect(html).toContain('Request: /boom')
+      expect(html).not.toContain('Path: /boom')
       expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
       expect(html).toContain('TypeError: Cannot read properties of undefined')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('renders Vite compiler metadata on the development error page', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const definition = compiledDefinition({
+      id: 'hero',
+      match: (request) => request.pathname === '/',
+      handle: () => {
+        throw Object.assign(
+          new SyntaxError('Single file component can contain only one <template> element'),
+          {
+            plugin: 'vite:vue',
+            pluginCode: '<script>alert(1)</script>',
+            id: '/project/src/modules/Public/components/HomeHero.vue?vue&type=template',
+            loc: { file: '/project/src/modules/Public/components/HomeHero.vue', line: 10, column: 1 },
+            frame: '  8 | <template>\n  9 | <script>alert(1)</script>',
+            stack: 'SyntaxError: Single file component can contain only one <template> element\n    at compile',
+          }
+        )
+      },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/'),
+        handlerRuntime(scope, definition)
+      )
+      const html = String(response?.body)
+      expect(html).toContain('Application error')
+      expect(html).toContain('[plugin:vite:vue]')
+      expect(html).toContain('Single file component can contain only one &lt;template&gt; element')
+      expect(html).toContain('Source: /project/src/modules/Public/components/HomeHero.vue')
+      expect(html).toContain('Location: HomeHero.vue:10:1')
+      expect(html).toContain('Request: /')
+      expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+      expect(html).toContain('  8 | &lt;template&gt;')
+      expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+      expect(html).toContain('at compile')
+      expect(html).not.toContain('Path: /')
+      expect(html).not.toContain('<script>alert(1)</script>')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('does not expose Vite compiler metadata on production error pages', async () => {
+    const logger = { error: vi.fn() }
+    const definition = compiledDefinition({
+      id: 'hero',
+      match: (request) => request.pathname === '/',
+      handle: () => {
+        throw Object.assign(
+          new SyntaxError('Single file component can contain only one <template> element'),
+          {
+            plugin: 'vite:vue',
+            id: '/project/src/HomeHero.vue',
+            loc: { file: '/project/src/HomeHero.vue', line: 10, column: 1 },
+            frame: '  8 | <template>\n  9 | <template>',
+            stack: 'SyntaxError: Single file component can contain only one <template> element',
+          }
+        )
+      },
+    })
+    Object.assign(definition.server, { logger })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/'),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      const html = String(response?.body)
+      expect(html).toContain('Application unavailable')
+      expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+      expect(html).not.toContain('vite:vue')
+      expect(html).not.toContain('HomeHero.vue')
+      expect(html).not.toContain('<template>')
+      expect(html).not.toContain('plugin')
+      expect(html).not.toContain('Source:')
+      expect(html).not.toContain('Location:')
+      expect(html).not.toContain('Request:')
+      expect(html).not.toContain('Path:')
+      const details = logger.error.mock.calls.find(([event]) => event === 'ssr.request.failed')?.[1] as
+        | Record<string, unknown>
+        | undefined
+      expect(details).toMatchObject({
+        errorType: 'SyntaxError',
+        message: 'Single file component can contain only one <template> element',
+      })
+      expect(details).not.toHaveProperty('plugin')
+      expect(details).not.toHaveProperty('source')
+      expect(details).not.toHaveProperty('frame')
+      expect(details).not.toHaveProperty('location')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('still renders a development page when Vite-like getters are hostile', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const error = new TypeError('Cannot read properties of undefined (reading "x")')
+    for (const key of ['plugin', 'id', 'loc', 'frame']) {
+      Object.defineProperty(error, key, { get() { throw new Error(`hostile ${key}`) } })
+    }
+    const definition = compiledDefinition({
+      id: 'hostile',
+      match: (request) => request.pathname === '/hostile',
+      handle: () => { throw error },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/hostile'),
+        handlerRuntime(scope, definition)
+      )
+      const html = String(response?.body)
+      expect(response?.statusCode).toBe(500)
+      expect(html).toContain('Application error')
+      expect(html).toContain('TypeError')
+      expect(html).toContain('Request: /hostile')
+      expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
     } finally {
       scope.dispose()
     }
