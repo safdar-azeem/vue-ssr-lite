@@ -8,10 +8,17 @@ export interface SsrCliOptions {
   command: SsrCliCommand
   root: string
   /**
-   * Absolute path to optional `server.ts`. Production `start`
-   * loads the baked runtime and never reads source config.
+   * Absolute path to the resolved server config. For `dev` / `build` this is
+   * either an explicit `--config` path or a convention-discovered `server.ts`.
+   * Production `start` never reads source config.
    */
   config?: string
+  /**
+   * Absolute path from an explicit `--config` flag. Distinct from `config`,
+   * which may be convention-discovered. Only this value is authoritative for
+   * the Vite runtime graph.
+   */
+  cliConfig?: string
   serverOutput: string
   hmrPort?: string
 }
@@ -72,11 +79,13 @@ export const parseSsrCliArguments = async (
     }
   }
 
-  const config = await resolveSsrConfigPath(root, readFlag(args, '--config'))
+  const configFlag = readFlag(args, '--config')
+  const config = await resolveSsrConfigPath(root, configFlag)
   return {
     command: command as Exclude<SsrCliCommand, 'start'>,
     root,
     config,
+    cliConfig: configFlag ? config : undefined,
     serverOutput,
     hmrPort,
   }
