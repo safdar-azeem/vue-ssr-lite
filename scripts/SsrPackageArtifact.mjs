@@ -15,6 +15,7 @@ export const assertPackedArtifact = ({ record, manifest, assert }) => {
     'dist/index.mjs',
     'dist/index.d.ts',
     'dist/client.mjs',
+    'dist/module-attribution.json',
     'dist/client.d.ts',
     'dist/server.mjs',
     'dist/server.d.ts',
@@ -110,7 +111,8 @@ export const assertInstalledArtifactHygiene = async ({
       !relativePath.endsWith('.mjs') &&
       !relativePath.endsWith('.d.ts') &&
       !relativePath.endsWith('.map') &&
-      relativePath !== 'package.json'
+      relativePath !== 'package.json' &&
+      relativePath !== 'dist/module-attribution.json'
     ) {
       continue
     }
