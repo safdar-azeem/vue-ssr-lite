@@ -1,6 +1,5 @@
 import {
   hasInjectionContext,
-  getCurrentInstance,
   inject,
   watch,
   watchEffect,
@@ -11,10 +10,7 @@ import {
 } from 'vue'
 import {
   SSR_REQUEST_RESOLUTION,
-  fingerprintSsrReactivityValues,
-  registerSsrReactivitySource,
-  requestSsrReactivityEffectPass,
-  requestSsrReactivityPass,
+  SSR_SERVER_REACTIVITY,
   type SsrResolutionController,
   type SsrRequestResolution,
 } from './SsrRequestResolution'
@@ -39,76 +35,6 @@ const resolveSsrResolution = (): SsrRequestResolution | null =>
   hasInjectionContext()
     ? inject<SsrRequestResolution | null>(SSR_REQUEST_RESOLUTION, null)
     : null
-
-const runSsrReactivityCallback = <T>(
-  resolution: SsrRequestResolution | null,
-  callback: () => T
-): T => {
-  const controller = resolution as Partial<SsrResolutionController> | null
-  controller?.beginReactivityCallback?.()
-  try {
-    return callback()
-  } finally {
-    controller?.endReactivityCallback?.()
-  }
-}
-
-const resolveComponentTypeIdentity = (type: {
-  name?: string
-  __name?: string
-  __file?: string
-  __scopeId?: string
-  setup?: unknown
-  render?: unknown
-}): string => {
-  const label = type.__file || type.__scopeId || type.name || type.__name || 'anonymous'
-  const implementation =
-    typeof type === 'function'
-      ? String(type)
-      : typeof type.setup === 'function'
-      ? String(type.setup)
-      : typeof type.render === 'function'
-        ? String(type.render)
-        : ''
-  return JSON.stringify([label, implementation])
-}
-
-const resolveReactivityIdentity = (): {
-  identity: string
-  deduplicable: boolean
-} => {
-  const segments: string[] = []
-  let instance = getCurrentInstance()
-  let deduplicable = true
-  while (instance) {
-    const type = instance.type as {
-      name?: string
-      __name?: string
-      __file?: string
-      __scopeId?: string
-      setup?: unknown
-      render?: unknown
-    }
-    const typeIdentity = resolveComponentTypeIdentity(type)
-    const key = instance.vnode.key
-    const props = fingerprintSsrReactivityValues([instance.vnode.props ?? {}])
-    const root = instance.parent === null
-    // An unkeyed non-root instance can exchange structural position with a
-    // sibling on a later pass. Its invalidations remain conservatively eligible
-    // rather than relying on traversal order or props to prove identity.
-    if (!root && key == null) deduplicable = false
-    if (props === null) deduplicable = false
-    segments.push(
-      `${typeIdentity}:${key == null ? '' : String(key)}:${props ?? 'uncertain'}`
-    )
-    instance = instance.parent
-  }
-  return {
-    identity: segments.reverse().join('/') || 'anonymous',
-    deduplicable,
-  }
-}
-
 
 /**
  * SSR-safe reactivity.
@@ -202,30 +128,17 @@ export function ssrWatch(
   options?: SsrWatchOptions
 ): WatchStopHandle {
   const resolution = resolveSsrResolution()
-  const { identity, deduplicable } = resolveReactivityIdentity()
-  const reactivitySource =
-    resolution?.server
-      ? registerSsrReactivitySource(resolution, identity, deduplicable)
-      : null
+  if (!resolution?.server) return watch(source, callback, { ...options, flush: 'sync' })
+  const implementation = (resolution as Partial<SsrResolutionController>)[SSR_SERVER_REACTIVITY]
+  if (implementation) return implementation.watch(resolution, source, callback, options)
+  // A third-party host may implement only the public resolution contract. Keep
+  // its conservative additional-pass behavior without importing Core's engine.
   let created = false
-  const wrapped = (...args: any[]) => {
-    const controller = resolution as Partial<SsrResolutionController> | null
-    const beforeCheckpoint =
-      created && resolution?.server
-        ? controller?.reactivityCheckpoint?.()
-        : undefined
-    const result = runSsrReactivityCallback(resolution, () => callback(...args))
-    if (created && resolution?.server) {
-      requestSsrReactivityPass(
-        resolution,
-        reactivitySource,
-        args.slice(0, 2),
-        beforeCheckpoint
-      )
-    }
+  const stop = watch(source, (...args: any[]) => {
+    const result = callback(...args)
+    if (created) resolution.requestAdditionalPass()
     return result
-  }
-  const stop = watch(source, wrapped, { ...options, flush: 'sync' })
+  }, { ...options, flush: 'sync' })
   created = true
   return stop
 }
@@ -245,24 +158,15 @@ export const ssrWatchEffect = (
   options?: Omit<NonNullable<Parameters<typeof watchEffect>[1]>, 'flush'>
 ): WatchStopHandle => {
   const resolution = resolveSsrResolution()
-  const { identity, deduplicable } = resolveReactivityIdentity()
-  const reactivitySource =
-    resolution?.server
-      ? registerSsrReactivitySource(resolution, identity, deduplicable)
-      : null
+  if (!resolution?.server) return watchEffect(effect, { ...options, flush: 'sync' })
+  const implementation = (resolution as Partial<SsrResolutionController>)[SSR_SERVER_REACTIVITY]
+  if (implementation) return implementation.watchEffect(resolution, effect, options)
   let created = false
-  const stop = watchEffect(
-    ((onCleanup: any) => {
-      const result = runSsrReactivityCallback(resolution, () =>
-        (effect as any)(onCleanup)
-      )
-      if (created && resolution?.server) {
-        requestSsrReactivityEffectPass(resolution, reactivitySource)
-      }
-      return result
-    }) as Parameters<typeof watchEffect>[0],
-    { ...options, flush: 'sync' }
-  )
+  const stop = watchEffect((onCleanup) => {
+    const result = effect(onCleanup)
+    if (created) resolution.requestAdditionalPass()
+    return result
+  }, { ...options, flush: 'sync' })
   created = true
   return stop
 }
