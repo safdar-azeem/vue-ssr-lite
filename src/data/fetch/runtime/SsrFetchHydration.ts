@@ -4,7 +4,7 @@ import type { UseFetchError } from '../types/SsrFetchTypes'
 import type { FetchEntry, SsrFetchCache } from './SsrFetchCache'
 import type { FetchIdentity } from './SsrFetchIdentity'
 
-export const FETCH_HYDRATION_KEY = 'vue-ssr-lite:fetch'
+export { FETCH_HYDRATION_KEY } from './SsrFetchRuntimeScope'
 
 export interface HydratedFetchRecord {
   state: { data: unknown; pending: boolean; error: UseFetchError | null }
