@@ -3,6 +3,7 @@ import type { OutputAsset, OutputBundle, Plugin } from 'rollup'
 
 export type BundleOwner = 'vue' | 'vue-router' | 'framework-core' | 'framework-fetch' |
   'framework-seo' | 'framework-middleware' | 'framework-navigation' |
+  'framework-extensions' | 'framework-reactivity' |
   'application' | 'third-party' | 'bundler'
 
 const normalize = (id: string) => id.replaceAll('\\', '/')
@@ -13,8 +14,12 @@ export const bundleModuleOwner = (id: string, frameworkRoot: string): BundleOwne
   const framework = path.startsWith(`${root}/src/`) || path.startsWith(`${root}/dist/`) ||
     /\/node_modules\/vue-ssr-lite\//.test(path)
   if (framework) {
+    if (/SsrFetchRuntimeScope|ExtensionRuntimeKey|SsrNavigationContext/.test(path)) return 'framework-core'
+    if (/SsrReactivityRuntime/.test(path)) return 'framework-reactivity'
+    if (/\/core\/extensions\//.test(path)) return 'framework-extensions'
     if (/\/data\/fetch\/|SsrFetch/.test(path)) return 'framework-fetch'
     if (/\/extensions\/seo\//.test(path)) return 'framework-seo'
+    if (/SsrBrowserMiddleware/.test(path)) return 'framework-core'
     if (/\/middleware\/|SsrMiddleware/.test(path)) return 'framework-middleware'
     if (/\/navigation\/|SsrNavigation/.test(path)) return 'framework-navigation'
     return 'framework-core'
@@ -43,7 +48,23 @@ const sumSizes = (values: readonly ReturnType<typeof sizes>[]) => values.reduce(
  * emitted into public assets. Rollup renderedLength attributes pre-minifier
  * characters, NOT compressed bytes. Compression is meaningful per whole file.
  */
-export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string) => {
+export interface BundleAuditOptions {
+  /** Emitted by the library build; maps dist files to original implementation ids. */
+  moduleSources?: Record<string, string[]>
+  moduleInfo?: (id: string) => { importedIds: readonly string[]; dynamicallyImportedIds: readonly string[] } | null
+}
+
+export const frameworkModuleSources = (id: string, frameworkRoot: string, options: BundleAuditOptions = {}): string[] => {
+  const path = normalize(id).split('?', 1)[0]!
+  const root = normalize(frameworkRoot).replace(/\/$/, '')
+  if (path.startsWith(`${root}/src/`)) return [path.slice(`${root}/src/`.length)]
+  const distribution = path.startsWith(`${root}/dist/`)
+    ? path.slice(`${root}/dist/`.length)
+    : path.split('/node_modules/vue-ssr-lite/dist/')[1]
+  return distribution ? options.moduleSources?.[distribution] ?? [] : []
+}
+
+export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, options: BundleAuditOptions = {}) => {
   const chunks = Object.values(bundle).filter((item) => item.type === 'chunk').map((chunk) => ({
     file: chunk.fileName,
     entry: chunk.isEntry,
@@ -53,7 +74,16 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string) =>
     sizes: sizes(chunk.code),
     modules: Object.entries(chunk.modules).map(([id, module]) => ({
       id,
-      owner: bundleModuleOwner(id, frameworkRoot),
+      sources: frameworkModuleSources(id, frameworkRoot, options),
+      owner: bundleModuleOwner(
+        frameworkModuleSources(id, frameworkRoot, options).length === 1
+          ? `${frameworkRoot}/src/${frameworkModuleSources(id, frameworkRoot, options)[0]}` : id,
+        frameworkRoot
+      ),
+      imports: [...(options.moduleInfo?.(id)?.importedIds ?? [])],
+      dynamicImports: [...(options.moduleInfo?.(id)?.dynamicallyImportedIds ?? [])],
+      dynamicImportSources: (options.moduleInfo?.(id)?.dynamicallyImportedIds ?? [])
+        .flatMap((target) => frameworkModuleSources(target, frameworkRoot, options)),
       renderedLength: module.renderedLength,
       originalLength: module.originalLength,
       renderedExports: module.renderedExports,
@@ -108,8 +138,11 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string) =>
 /** Observe a user's normal build without overriding output/chunking settings. */
 export const ssrBundleAudit = (
   frameworkRoot: string,
-  receive: (audit: ReturnType<typeof inspectSsrBundle>) => void
+  receive: (audit: ReturnType<typeof inspectSsrBundle>) => void,
+  options: BundleAuditOptions = {}
 ): Plugin => ({
   name: 'vue-ssr-lite:test-bundle-audit',
-  generateBundle(_options, bundle) { receive(inspectSsrBundle(bundle, frameworkRoot)) },
+  generateBundle(_options, bundle) {
+    receive(inspectSsrBundle(bundle, frameworkRoot, { ...options, moduleInfo: (id) => this.getModuleInfo(id) }))
+  },
 })
