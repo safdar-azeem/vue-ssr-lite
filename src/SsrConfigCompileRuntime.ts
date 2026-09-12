@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -45,9 +45,11 @@ import {
   SSR_RENDERER_VIRTUAL_ID,
   attachClientGraph,
   normalizeSsrConfig,
+  resolveSsrDevelopmentControlPlane,
   toProjectRelative,
   type NormalizeSsrConfigOptions,
   type SsrNormalizedConfig,
+  type SsrResolvedServerOptions,
   type SsrViteApplicationEntry,
   type SsrViteEntries,
 } from './SsrRuntimeConfigCompile'
@@ -68,6 +70,7 @@ export {
   SSR_RENDERER_VIRTUAL_ID,
   SSR_RUNTIME_VIRTUAL_ID,
   compileSsrConfig,
+  resolveSsrDevelopmentControlPlane,
   isStaticSiteSeo,
   normalizeRobotsConfig,
   normalizeSiteSeoConfig,
@@ -251,6 +254,53 @@ export const resolveSsrConfigPath = async (
     }
   }
   return undefined
+}
+
+export interface SsrSelectedConfigIdentities {
+  /** Explicit `vue-ssr-lite --config` path. */
+  cli?: string
+  /** Explicit `vueSsrLite({ config })` path. */
+  plugin?: string
+}
+
+export const SSR_CONFLICTING_CONFIG_IDENTITY =
+  'vue-ssr-lite received conflicting server configs'
+
+const isSameSsrConfigIdentity = async (left: string, right: string) => {
+  if (left === right) return true
+  try {
+    return (await realpath(left)) === (await realpath(right))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One authoritative server-config path for the Vite runtime graph and the
+ * failed-startup control plane. Explicit CLI and plugin paths must agree;
+ * otherwise convention discovery applies.
+ */
+export const resolveSsrSelectedConfigPath = async (
+  root: string,
+  identities: SsrSelectedConfigIdentities = {}
+): Promise<string | undefined> => {
+  const cli = identities.cli
+    ? await resolveSsrConfigPath(root, identities.cli)
+    : undefined
+  const plugin = identities.plugin
+    ? await resolveSsrConfigPath(root, identities.plugin)
+    : undefined
+  if (cli && plugin && !(await isSameSsrConfigIdentity(cli, plugin))) {
+    throw new Error(
+      [
+        `${SSR_CONFLICTING_CONFIG_IDENTITY}.`,
+        `  --config: ${cli}`,
+        `  vueSsrLite({ config }): ${plugin}`,
+        'Use one explicit server config, or make both paths refer to the same file.',
+      ].join('\n')
+    )
+  }
+  return resolveSsrConfigPath(root, cli ?? plugin)
 }
 
 const assertConventionFiles = async (
@@ -496,6 +546,24 @@ export const loadSsrConfigFile = async (root: string, configPath?: string): Prom
     enumerable: false,
   })
   return config
+}
+
+/**
+ * Development listen options from the specialized config compiler.
+ * Vue, routes, and other application modules are stubbed; only server.ts and
+ * config-evaluated defineApplication modules run. Missing server.ts uses
+ * convention defaults. A present but invalid server config remains fatal.
+ */
+export const resolveSsrDevelopmentControlPlaneFromRoot = async (
+  root: string,
+  configPath?: string
+): Promise<SsrResolvedServerOptions> => {
+  const absoluteConfig = await resolveSsrConfigPath(root, configPath)
+  if (!absoluteConfig) {
+    return resolveSsrDevelopmentControlPlane({ default: () => ({}) }, { root })
+  }
+  const config = await loadSsrConfigFile(root, absoluteConfig)
+  return resolveSsrDevelopmentControlPlane({ default: () => config }, { root })
 }
 
 export const extractSsrViteEntries = (
