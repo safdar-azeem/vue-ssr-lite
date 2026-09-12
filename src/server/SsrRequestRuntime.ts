@@ -8,7 +8,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { existsSync } from 'node:fs'
 import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { compileSsrConfig, type SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
+import { resolveSsrDevelopmentControlPlaneFromRoot } from '../SsrConfigCompileRuntime'
+import {
+  compileSsrConfig,
+  type SsrCompiledConfig,
+  type SsrResolvedServerOptions,
+} from '../SsrRuntimeConfigCompile'
+import { carrySsrFailure, observeSsrFailure } from '../SsrErrorDiagnostic'
 import { safeSsrLog } from '../SsrObservability'
 import {
   markSsrInitializationFailure,
@@ -60,6 +66,8 @@ import {
 export interface SsrRequestRuntimeOptions {
   production: boolean
   root: string
+  /** Same selected server-config identity used by the Vite/runtime graph. */
+  config?: string
   loadRuntime: () => Promise<unknown>
   development?: SsrRequestDevelopmentRuntime
   startupTimings?: SsrPhaseTimings
@@ -67,6 +75,7 @@ export interface SsrRequestRuntimeOptions {
 
 export interface SsrRequestDevelopmentRuntime {
   importModule: (specifier: string) => Promise<Record<string, unknown>>
+  resolvedConfigPath?: () => string | undefined
   watchTemplateStructure: (onChange: (file: string) => void) => () => void
   captureRuntimeRevision: (loaded?: unknown) => (() => boolean) | undefined
   transformIndexHtml: (url: string, html: string, requestUrl: string) => Promise<string>
@@ -281,43 +290,101 @@ export const createSsrRequestRuntime = async (
       }
     }
   }
+  type SsrApplicationRuntimeState =
+    | { status: 'ready'; definition: SsrCompiledConfig }
+    | { status: 'failed'; error: unknown }
+
+  // Prefer the path vueSsrLite already selected for the Vite runtime graph.
+  // That selection includes an explicit `--config` because the CLI injects it
+  // before Vite resolves the plugin. Fall back to the managed/CLI path only
+  // when Vite has not published one. Never rediscover from root alone when
+  // either identity is present.
+  const loadDevelopmentControlPlane = () =>
+    resolveSsrDevelopmentControlPlaneFromRoot(
+      options.root,
+      options.development?.resolvedConfigPath?.() ?? options.config
+    )
+
   const initialRevision = await loadRuntimeRevision()
-  if ('error' in initialRevision) {
-    detachTemplateWatcher()
-    throw initialRevision.error
+  let lastDefinition: SsrCompiledConfig | undefined
+  let isCurrentRevision = initialRevision.isCurrent
+  let applicationRuntime: SsrApplicationRuntimeState
+  let controlPlane: SsrResolvedServerOptions
+  let unavailableLogged = false
+  let unavailableCarrier: unknown
+
+  const reportRuntimeUnavailable = (error: unknown) => {
+    const observed = observeSsrFailure(error)
+    unavailableCarrier = carrySsrFailure(error, observed.occurrence)
+    safeSsrLog(controlPlane.logger, 'error', 'ssr.runtime.unavailable', {
+      error,
+      errorId: observed.occurrence.errorId,
+    })
+    if (unavailableLogged) return
+    unavailableLogged = true
+    console.log(
+      [
+        '',
+        '⚠  Application runtime unavailable',
+        '',
+        '  The development server is still running.',
+        '  Fix the source error and Vite will retry automatically.',
+        '',
+      ].join('\n')
+    )
   }
-  const initialRuntime = initialRevision.definition
-  trackRuntimeTemplates(initialRuntime)
-  const initialServerOptions = initialRuntime.server
+
+  if ('error' in initialRevision) {
+    if (options.production) {
+      detachTemplateWatcher()
+      throw initialRevision.error
+    }
+    try {
+      controlPlane = await loadDevelopmentControlPlane()
+    } catch (error) {
+      detachTemplateWatcher()
+      throw error
+    }
+    applicationRuntime = { status: 'failed', error: initialRevision.error }
+    reportRuntimeUnavailable(initialRevision.error)
+  } else {
+    lastDefinition = initialRevision.definition
+    applicationRuntime = { status: 'ready', definition: initialRevision.definition }
+    controlPlane = initialRevision.definition.server
+    trackRuntimeTemplates(initialRevision.definition)
+  }
+
   startupTimings?.mark('runtime')
   const ssrAdmission = createSsrAdmissionController({
-    maxConcurrent: initialServerOptions.maxConcurrentSsrRequests,
-    maxQueued: initialServerOptions.maxQueuedSsrRequests,
+    maxConcurrent: controlPlane.maxConcurrentSsrRequests,
+    maxQueued: controlPlane.maxQueuedSsrRequests,
     onEvent: (event: SsrAdmissionEvent) => {
       const details: Record<string, unknown> = { ...event }
       if (event.type === 'rejected') {
-        safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.admission.rejected', details)
+        safeSsrLog(controlPlane.logger, 'warn', 'ssr.admission.rejected', details)
       } else if (event.type === 'queued') {
-        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.queued', details)
+        safeSsrLog(controlPlane.logger, 'info', 'ssr.admission.queued', details)
       } else if (event.type === 'admitted') {
-        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.admitted', details)
+        safeSsrLog(controlPlane.logger, 'info', 'ssr.admission.admitted', details)
       } else if (event.type === 'cancelled') {
-        safeSsrLog(initialServerOptions.logger, 'debug', 'ssr.admission.cancelled', details)
+        safeSsrLog(controlPlane.logger, 'debug', 'ssr.admission.cancelled', details)
       } else if (event.type === 'disposed' && event.rejectedQueuedCount > 0) {
-        safeSsrLog(initialServerOptions.logger, 'info', 'ssr.admission.disposed', details)
+        safeSsrLog(controlPlane.logger, 'info', 'ssr.admission.disposed', details)
       }
     },
   })
-  const clientRoot = resolve(initialServerOptions.root, initialServerOptions.clientOutDir)
+  const clientRoot = resolve(controlPlane.root, controlPlane.clientOutDir)
   const hasEnabledSsrApplications =
     options.production &&
-    initialRuntime.applications.some(
-      (application) => application.kind === 'ssr' || application.hasRouteRenderOverrides
+    Boolean(
+      lastDefinition?.applications.some(
+        (application) => application.kind === 'ssr' || application.hasRouteRenderOverrides
+      )
     )
   let ssrManifest: SsrViteManifest | undefined
   const viteBase = hasEnabledSsrApplications
-    ? assertSupportedSsrViteBase(initialRuntime.viteBase)
-    : initialRuntime.viteBase || '/'
+    ? assertSupportedSsrViteBase(lastDefinition!.viteBase)
+    : lastDefinition?.viteBase || '/'
   let immutableAssetPaths: ReadonlySet<string> = new Set()
   if (options.production) {
     const clientManifestPath = resolve(clientRoot, '.vite/manifest.json')
@@ -335,7 +402,7 @@ export const createSsrRequestRuntime = async (
       }
       // A manually assembled client directory remains servable, but without
       // authoritative build metadata every file gets conservative caching.
-      safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
+      safeSsrLog(controlPlane.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
     }
     try {
       revisionedAssets = parseSsrProductionAssetMetadata(
@@ -346,7 +413,7 @@ export const createSsrRequestRuntime = async (
       if (readSsrProductionFailure(error)?.code !== 'asset-cache-metadata.missing') {
         throw markSsrInitializationFailure(error, 'artifact-preflight')
       }
-      safeSsrLog(initialServerOptions.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
+      safeSsrLog(controlPlane.logger, 'warn', 'ssr.artifact.unavailable', { requestId: 'startup', error })
     }
     immutableAssetPaths = resolveSsrImmutableAssetPaths(manifestAssets, revisionedAssets)
   }
@@ -371,20 +438,21 @@ export const createSsrRequestRuntime = async (
   const productionTemplatePaths = new Map<string, string>()
   const templatePaths = new WeakMap<SsrCompiledConfig['applications'][number], string>()
   const resolveProductionAssets = ssrManifest
-    ? createSsrRenderedAssetResolver(ssrManifest, viteBase, initialRuntime.moduleRoot)
+    ? createSsrRenderedAssetResolver(ssrManifest, viteBase, lastDefinition!.moduleRoot)
     : undefined
 
   // Reuse compiled code/metadata until Vite invalidates its dependency graph.
   // A refresh belongs to the server, so cancelling one waiter cannot cancel
   // shared compilation or publish a partially constructed definition.
-  let lastDefinition = initialRuntime
-  let isCurrentRevision = initialRevision.isCurrent
   let loadingDefinition: Promise<SsrCompiledConfig> | null = null
 
   const loadDefinition = (): Promise<SsrCompiledConfig> => {
-    if (options.production) return Promise.resolve(initialRuntime)
+    if (options.production) return Promise.resolve(lastDefinition!)
     if (loadingDefinition) return loadingDefinition
-    if (isCurrentRevision?.()) return Promise.resolve(lastDefinition)
+    if (isCurrentRevision?.()) {
+      if (lastDefinition) return Promise.resolve(lastDefinition)
+      throw unavailableCarrier ?? (applicationRuntime.status === 'failed' ? applicationRuntime.error : new Error('SSR application runtime is unavailable.'))
+    }
     loadingDefinition = (async () => {
       try {
         for (;;) {
@@ -394,13 +462,34 @@ export const createSsrRequestRuntime = async (
           if (next.isCurrent && !next.isCurrent()) continue
           isCurrentRevision = next.isCurrent
           if ('error' in next) {
-            safeSsrLog(initialServerOptions.logger, 'error', 'ssr.runtime.reload.failed', {
-              error: next.error,
-            })
-          } else {
-            lastDefinition = next.definition
-            trackRuntimeTemplates(lastDefinition)
+            if (lastDefinition) {
+              safeSsrLog(controlPlane.logger, 'error', 'ssr.runtime.reload.failed', {
+                error: next.error,
+              })
+              applicationRuntime = { status: 'ready', definition: lastDefinition }
+              return lastDefinition
+            }
+            if (
+              applicationRuntime.status === 'failed' &&
+              unavailableCarrier &&
+              next.error === applicationRuntime.error
+            ) {
+              applicationRuntime = { status: 'failed', error: next.error }
+              throw unavailableCarrier
+            }
+            applicationRuntime = { status: 'failed', error: next.error }
+            reportRuntimeUnavailable(next.error)
+            throw unavailableCarrier ?? next.error
           }
+          lastDefinition = next.definition
+          applicationRuntime = { status: 'ready', definition: next.definition }
+          // Listener host/port, admission limits, and clientRoot stay at the
+          // values captured during startup. Logger and request/shutdown
+          // timeouts follow the recovered compiled server options.
+          controlPlane = next.definition.server
+          trackRuntimeTemplates(lastDefinition)
+          unavailableLogged = false
+          unavailableCarrier = undefined
           return lastDefinition
         }
       } finally {
@@ -496,13 +585,15 @@ export const createSsrRequestRuntime = async (
 
   // Startup preflight validates applications and module shape without running
   // network readiness probes. `/readyz` owns external dependency checks.
-  const initialTemplatePaths = [
-    ...new Set(
-      initialRuntime.applications
-        .filter((application) => options.production || !application.templateMissing)
-        .map((application) => resolveTemplatePath(initialRuntime, application))
-    ),
-  ]
+  const initialTemplatePaths = lastDefinition
+    ? [
+        ...new Set(
+          lastDefinition.applications
+            .filter((application) => options.production || !application.templateMissing)
+            .map((application) => resolveTemplatePath(lastDefinition!, application))
+        ),
+      ]
+    : []
   const validateInitialTemplatePaths = async () => {
     await Promise.all(
       initialTemplatePaths.map(async (templatePath) => {
@@ -518,8 +609,9 @@ export const createSsrRequestRuntime = async (
   }
   const prepareInitialProductionTemplates = async () => {
     if (!productionTemplates) return
-    await Promise.all(initialRuntime.applications.map(async (application) => {
-      const path = resolveTemplatePath(initialRuntime, application)
+    if (!lastDefinition) return
+    await Promise.all(lastDefinition.applications.map(async (application) => {
+      const path = resolveTemplatePath(lastDefinition!, application)
       const canonical = productionTemplatePaths.get(path) ?? path
       if (application.kind === 'ssr' || application.hasRouteRenderOverrides) {
         await productionTemplates.prepare(canonical, application.mountSelector)
@@ -540,12 +632,12 @@ export const createSsrRequestRuntime = async (
   }
 
   startupTimings?.mark('template preflight')
-  if (options.development && !options.production) {
+  if (options.development && !options.production && lastDefinition) {
     // The SSR entry and its static imports were evaluated by loadRuntimeRevision.
     // Prepare the corresponding client shells without executing browser code
     // or following dynamic imports. Reuse the asset pipeline's eager graph so
     // the first template request also inherits its completed style analysis.
-    await Promise.all(initialRuntime.applications.map(async (application) => {
+    await Promise.all(lastDefinition.applications.map(async (application) => {
       try {
         await options.development!.warmApplicationStyles(
           application.id, `/@vue-ssr-lite/client/${application.id}`
@@ -553,7 +645,7 @@ export const createSsrRequestRuntime = async (
       } catch (error) {
         // Warmup is best effort. A client transform error must retain Vite's
         // normal request/HMR recovery rather than prevent the server starting.
-        safeSsrLog(initialServerOptions.logger, 'debug', 'ssr.warmup.failed', {
+        safeSsrLog(controlPlane.logger, 'debug', 'ssr.warmup.failed', {
           applicationId: application.id,
           error: error instanceof Error ? error.message : String(error),
         })
@@ -561,8 +653,8 @@ export const createSsrRequestRuntime = async (
     }))
   }
   startupTimings?.mark('client shell warmup')
-  if (initialServerOptions.diagnostics) {
-    startupTimings?.report(initialServerOptions.logger, 'startup', 'all', {
+  if (controlPlane.diagnostics) {
+    startupTimings?.report(controlPlane.logger, 'startup', 'all', {
       lifecycle: 'startup',
       scope: inheritedStartupTimings ? 'development server including Vite' : 'managed server',
     })
@@ -576,6 +668,7 @@ export const createSsrRequestRuntime = async (
     scope,
     loadDefinition,
     fallbackDefinition: () => lastDefinition,
+    fallbackLogger: () => controlPlane.logger,
     shuttingDown: () => shuttingDown,
     assertReady,
     ssrAdmission,
@@ -607,15 +700,15 @@ export const createSsrRequestRuntime = async (
   })
 
   const createManagedServer = (): SsrManagedServer => {
-    const host = resolveManagedServerHost(initialServerOptions.host)
-    const port = resolveManagedServerPort(initialServerOptions.port)
+    const host = resolveManagedServerHost(controlPlane.host)
+    const port = resolveManagedServerPort(controlPlane.port)
     const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
       activeRequestCount += 1
       const startedAt = Date.now()
       const requestId =
         String(request.headers['x-request-id'] || '').trim() ||
         startedAt.toString(36) + '-' + Math.random().toString(36).slice(2, 10)
-      const scope = createSsrRequestScope(lastDefinition.server.requestTimeoutMs)
+      const scope = createSsrRequestScope(controlPlane.requestTimeoutMs)
       const bodySource = createSsrRequestBodySource(request, scope.signal)
       const cancelDisconnectedRequest = () => scope.cancel()
       const cancelClosedResponse = () => {
@@ -669,7 +762,7 @@ export const createSsrRequestRuntime = async (
           if (!response.destroyed) response.destroy()
           return
         }
-        safeSsrLog(lastDefinition.server.logger, 'error', 'ssr.transport.failed', {
+        safeSsrLog(controlPlane.logger, 'error', 'ssr.transport.failed', {
           requestId,
           pathname: request.url,
           error,
@@ -707,7 +800,7 @@ export const createSsrRequestRuntime = async (
       // remain valid until their actual Vue render work settles.
       ssrAdmission.dispose()
       shutdownPromise = (async () => {
-        const timeoutMs = initialServerOptions.shutdownTimeoutMs
+        const timeoutMs = controlPlane.shutdownTimeoutMs
         let forced: ReturnType<typeof setTimeout> | undefined
         let viteClosePromise: Promise<void> | undefined
         const closeVite = (): Promise<void> => {
@@ -741,7 +834,11 @@ export const createSsrRequestRuntime = async (
             ssrAdmission.waitForIdle(),
           ])
           // A disconnected waiter can leave server-owned compilation in flight.
-          await loadingDefinition
+          try {
+            await loadingDefinition
+          } catch {
+            // A failed application reload must not prevent shutdown.
+          }
           // On a cold start Vite may have already moved from dependency scanning
           // into an optimizer batch. Cancelling at that boundary can leave
           // Vite 7's close() waiting on the cancelled batch indefinitely. Drain
@@ -817,5 +914,18 @@ export const createSsrRequestRuntime = async (
     }
   }
 
-  return { execute, definition: () => lastDefinition, createManagedServer }
+  return {
+    execute,
+    definition: () => {
+      if (!lastDefinition) {
+        throw unavailableCarrier ?? (
+          applicationRuntime.status === 'failed'
+            ? applicationRuntime.error
+            : new Error('SSR application runtime is unavailable.')
+        )
+      }
+      return lastDefinition
+    },
+    createManagedServer,
+  }
 }
