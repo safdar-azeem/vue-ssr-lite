@@ -62,6 +62,7 @@ describe('parseSsrCliArguments', () => {
     const options = await parseSsrCliArguments(['dev', '--root', root])
     expect(options.command).toBe('dev')
     expect(options.config).toBeUndefined()
+    expect(options.cliConfig).toBeUndefined()
   })
 
   it('build resolves an existing server.ts', async () => {
@@ -72,6 +73,7 @@ describe('parseSsrCliArguments', () => {
 
     expect(options.command).toBe('build')
     expect(options.config).toBe(resolve(await realpath(root), 'server.ts'))
+    expect(options.cliConfig).toBeUndefined()
   })
 
   it('does not auto-discover server.mts or ssr.config.ts', async () => {
@@ -95,6 +97,28 @@ describe('parseSsrCliArguments', () => {
       'server.mts',
     ])
     expect(options.config).toBe(resolve(await realpath(root), 'server.mts'))
+    expect(options.cliConfig).toBe(options.config)
+  })
+
+  it('keeps an explicit --config distinct from a conventional server.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-cli-config-authority-'))
+    await mkdir(join(root, 'config'), { recursive: true })
+    await writeFile(join(root, 'server.ts'), 'export default {}\n')
+    await writeFile(join(root, 'config/platform.ts'), 'export default {}\n')
+
+    const discovered = await parseSsrCliArguments(['dev', '--root', root])
+    expect(discovered.config).toBe(resolve(await realpath(root), 'server.ts'))
+    expect(discovered.cliConfig).toBeUndefined()
+
+    const explicit = await parseSsrCliArguments([
+      'dev',
+      '--root',
+      root,
+      '--config',
+      'config/platform.ts',
+    ])
+    expect(explicit.config).toBe(resolve(await realpath(root), 'config/platform.ts'))
+    expect(explicit.cliConfig).toBe(explicit.config)
   })
 
   it('canonicalizes a symlinked project root before Vite owns lifecycle resources', async () => {
