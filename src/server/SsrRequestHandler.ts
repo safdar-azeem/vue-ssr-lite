@@ -28,7 +28,12 @@ import {
   resolveSsrForwardedHost,
   resolveSsrForwardedProtocol,
 } from './SsrHostRuntime'
-import { injectSsrHtml, renderSsrErrorDocument } from './SsrHtmlRuntime'
+import {
+  injectSsrHtml,
+  renderSsrErrorDocument,
+  renderSsrPublicErrorDocument,
+  type SsrPublicErrorStatusCode,
+} from './SsrHtmlRuntime'
 import { isSsrResponseCacheable, resolveSsrResponseCacheKey } from './SsrResponseCacheRuntime'
 import {
   readPublicUrl,
@@ -249,6 +254,22 @@ const jsonResponse = (statusCode: number, payload: Record<string, unknown>): Ssr
   },
 })
 
+const publicErrorResponse = (
+  request: SsrNormalizedRequest,
+  statusCode: SsrPublicErrorStatusCode,
+  errorId?: string
+): SsrHttpResponse => ({
+  statusCode,
+  body: request.method === 'HEAD'
+    ? undefined
+    : renderSsrPublicErrorDocument(statusCode, { errorId }),
+  headers: {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    ...htmlSecurityHeaders,
+  },
+})
+
 const validateSsrHttpResponse = (response: SsrHttpResponse): SsrHttpResponse => {
   if (
     !Number.isInteger(response.statusCode) ||
@@ -377,13 +398,12 @@ export const handleSsrRequest = async (
     )
     if (!incomingHost) {
       const html = isHtmlNavigation(request, pathname)
+      if (html) return publicErrorResponse(request, 400)
       return {
         statusCode: 400,
-        body: html
-          ? renderSsrErrorDocument('Invalid request', 'The Host header is invalid.')
-          : JSON.stringify({ status: 'error', message: 'Invalid Host header.' }),
+        body: JSON.stringify({ status: 'error', message: 'Invalid Host header.' }),
         headers: {
-          'content-type': html ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8',
+          'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
           ...htmlSecurityHeaders,
         },
@@ -391,6 +411,9 @@ export const handleSsrRequest = async (
     }
     const hostResolution = metadata.resolveHost(incomingHost)
     if (!hostResolution) {
+      if (isHtmlNavigation(request, pathname)) {
+        return publicErrorResponse(request, 421)
+      }
       return jsonResponse(421, {
         status: 'error',
         service: definition.name,
@@ -613,6 +636,9 @@ export const handleSsrRequest = async (
         )
       if (admission.status === 'rejected') {
         if (admission.error instanceof SsrAdmissionUnavailableError) {
+          if (isHtmlNavigation(request, pathname)) {
+            return publicErrorResponse(request, 503)
+          }
           return jsonResponse(503, {
             status: 'error',
             service: definition.name,
@@ -780,7 +806,11 @@ export const handleSsrRequest = async (
     const terminal = async (): Promise<SsrHttpResponse | Response> => {
       let match
       try { match = matchServerRoute(entry.serverRoutes, pathname) } catch (error) {
-        if (error instanceof SsrServerRouteBadRequest) return new Response(null, { status: 400 })
+        if (error instanceof SsrServerRouteBadRequest) {
+          return isHtmlNavigation(request, pathname)
+            ? publicErrorResponse(request, 400)
+            : new Response(null, { status: 400 })
+        }
         throw error
       }
       return match ? dispatchServerRoute(match, webRequest, context) : fallback()
@@ -821,7 +851,7 @@ export const handleSsrRequest = async (
         /^\/sitemap-[1-9]\d*\.xml$/.test(pathname)
       )
     )
-    let statusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
+    let statusCode: SsrPublicErrorStatusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
     if (definition && definition.server.renderError) {
       try {
         const renderedError = await runBoundedErrorRenderer(
@@ -868,21 +898,22 @@ export const handleSsrRequest = async (
       }
     }
     if (isHtmlNavigation(request, pathname)) {
+      if (runtime.production) {
+        return publicErrorResponse(request, statusCode, diagnostic.errorId)
+      }
       const thrown = describeSsrThrownValue(error)
-      const title = timeout ? 'Request timed out' : runtime.production ? 'Application unavailable' : 'Application error'
+      const title = timeout ? 'Request timed out' : 'Application error'
       return {
         statusCode,
         body: request.method === 'HEAD'
           ? undefined
           : renderSsrErrorDocument(
             title,
-            runtime.production
-              ? 'The application could not render this page. Please try again.'
-              : thrown.message,
+            thrown.message,
             {
               errorId: diagnostic.errorId,
-              viteBase: runtime.production ? undefined : runtime.viteBase,
-              development: runtime.production ? undefined : {
+              viteBase: runtime.viteBase,
+              development: {
                 name: thrown.name,
                 message: thrown.message,
                 stack: thrown.stack,
