@@ -1213,7 +1213,9 @@ On **Vercel**, deploy as a normal Vite project with the existing build command. 
 
 ## Diagnostics
 
-Development (`vue-ssr-lite dev`) shows a detailed error page and prints the same exception name, message, and stack in the terminal. This is local developer tooling. If the application graph is already invalid when the process starts, the HTTP server still listens, the same development error page is served, and Vite retries automatically after the source is fixed. Production (`vue-ssr-lite start`) remains fail-fast.
+Development (`vue-ssr-lite dev`) shows a rich but minimal dark error page in the browser and one concise active error in the terminal. Source and compiler metadata appear when Vite provides them. The HTTP server stays running for recoverable application errors, Vite retries automatically after a source fix, and fixing one blocking error may reveal the next. When a trustworthy project-local source path is available, the browser file path stays readable and can ask Vite to open that file in the developer's editor. Production (`vue-ssr-lite start`) remains fail-fast.
+
+The default development terminal does not print the full stack or duplicate structured `ssr.runtime.unavailable` / `ssr.request.failed` objects for the same active compiler failure.
 
 Production (`vue-ssr-lite start`, generic Node, and Vercel) keeps two channels separate:
 
@@ -1224,7 +1226,7 @@ There is no query-string or header switch that exposes production stacks to a pu
 
 On **Vercel**, open the project **Logs / Runtime Logs** and search for the error ID. `console.error` from the generated function is enough; no vue-ssr-lite-specific Vercel logging configuration is required. If the function cannot load Core, the bootstrap fallback logs `ssr.bootstrap.failed` and the safe text response includes only `Internal Server Error` plus that error ID. After Core has loaded, later failures use Core/request diagnostics; a last-resort invocation catch is `ssr.invocation.failed`, not a runtime-load bootstrap failure.
 
-When no `server.logger` is configured, the built-in console path prints:
+When no `server.logger` is configured, production and other operator consoles still print:
 
 ```text
 [vue-ssr-lite] ssr.request.failed
