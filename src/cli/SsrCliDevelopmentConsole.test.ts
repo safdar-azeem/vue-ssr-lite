@@ -122,59 +122,90 @@ describe('SsrCliDevelopmentConsole', () => {
 describe('SsrCliDevelopmentConsole color', () => {
   const colorizeErrorLine = (message: string) =>
     `\u001b[1;31mERROR: ${message}\u001b[0m`
+  const colorizeFilePath = (file: string) =>
+    `File: \u001b[34m${file}\u001b[0m`
+  const compilerFailure = compilerError(
+    'Single file component can contain only one <template> element'
+  )
+  const typeError = new TypeError("Cannot read properties of undefined (reading 'items')")
+  const styledCompilerFailure = [
+    colorizeErrorLine('Single file component can contain only one <template> element'),
+    'Plugin: vite:vue',
+    colorizeFilePath('src/HomeHero.vue:84:1'),
+  ].join('\n')
+  const plainCompilerFailure = [
+    'ERROR: Single file component can contain only one <template> element',
+    'Plugin: vite:vue',
+    'File: src/HomeHero.vue:84:1',
+  ].join('\n')
+  const plainTypeError = "ERROR: Cannot read properties of undefined (reading 'items')"
 
-  it('styles the complete ERROR line when color output is appropriate', () => {
-    vi.stubEnv('FORCE_COLOR', '1')
-    vi.stubEnv('NO_COLOR', '')
-    const formatted = formatSsrDevelopmentConsoleFailure(
-      compilerError('Single file component can contain only one <template> element'),
-      ROOT
-    )
-    expect(formatted).toBe([
-      colorizeErrorLine('Single file component can contain only one <template> element'),
-      'Plugin: vite:vue',
-      'File: src/HomeHero.vue:84:1',
-    ].join('\n'))
-    expect(formatted).not.toContain('\u001b[1;31mPlugin:')
-    expect(formatted).not.toContain('\u001b[1;31mFile:')
-  })
+  const withoutNoColor = (run: () => void) => {
+    const present = Object.prototype.hasOwnProperty.call(process.env, 'NO_COLOR')
+    const previous = process.env.NO_COLOR
+    delete process.env.NO_COLOR
+    try {
+      run()
+    } finally {
+      if (present) process.env.NO_COLOR = previous
+      else delete process.env.NO_COLOR
+    }
+  }
 
-  it('keeps a plain ERROR line when NO_COLOR is set', () => {
-    vi.stubEnv('FORCE_COLOR', '1')
-    vi.stubEnv('NO_COLOR', '1')
-    const formatted = formatSsrDevelopmentConsoleFailure(
-      compilerError('Single file component can contain only one <template> element'),
-      ROOT
-    )
-    expect(formatted).toBe([
-      'ERROR: Single file component can contain only one <template> element',
-      'Plugin: vite:vue',
-      'File: src/HomeHero.vue:84:1',
-    ].join('\n'))
-    expect(formatted).not.toContain('\u001b')
-  })
-
-  it('keeps a plain ERROR line in CI and when stdout is not a TTY', () => {
-    vi.stubEnv('NO_COLOR', '')
-    vi.stubEnv('FORCE_COLOR', '')
-    vi.stubEnv('CI', 'true')
+  const withStdoutTty = (isTTY: boolean, run: () => void) => {
     const stdout = process.stdout
     const originalTty = Object.getOwnPropertyDescriptor(stdout, 'isTTY')
-    Object.defineProperty(stdout, 'isTTY', { configurable: true, value: true })
+    Object.defineProperty(stdout, 'isTTY', { configurable: true, value: isTTY })
     try {
-      expect(formatSsrDevelopmentConsoleFailure(
-        new TypeError("Cannot read properties of undefined (reading 'items')"),
-        ROOT
-      )).toBe("ERROR: Cannot read properties of undefined (reading 'items')")
-      vi.stubEnv('CI', '')
-      Object.defineProperty(stdout, 'isTTY', { configurable: true, value: false })
-      expect(formatSsrDevelopmentConsoleFailure(
-        new TypeError("Cannot read properties of undefined (reading 'items')"),
-        ROOT
-      )).toBe("ERROR: Cannot read properties of undefined (reading 'items')")
+      run()
     } finally {
       if (originalTty) Object.defineProperty(stdout, 'isTTY', originalTty)
       else delete (stdout as { isTTY?: boolean }).isTTY
     }
+  }
+
+  it('styles the ERROR line red and only the file path blue when NO_COLOR is absent', () => {
+    withoutNoColor(() => {
+      vi.stubEnv('FORCE_COLOR', '1')
+      const formatted = formatSsrDevelopmentConsoleFailure(compilerFailure, ROOT)
+      expect(formatted).toBe(styledCompilerFailure)
+      expect(formatted).not.toContain('\u001b[1;31mPlugin:')
+      expect(formatted).not.toContain('\u001b[34mFile:')
+      expect(formatted).not.toContain('\u001b[1;31mFile:')
+    })
+  })
+
+  it('keeps plain output when NO_COLOR=1 even if FORCE_COLOR is set', () => {
+    vi.stubEnv('FORCE_COLOR', '1')
+    vi.stubEnv('NO_COLOR', '1')
+    expect(formatSsrDevelopmentConsoleFailure(compilerFailure, ROOT)).toBe(plainCompilerFailure)
+    expect(formatSsrDevelopmentConsoleFailure(compilerFailure, ROOT)).not.toContain('\u001b')
+  })
+
+  it('keeps plain output when NO_COLOR is present as an empty string', () => {
+    vi.stubEnv('FORCE_COLOR', '1')
+    vi.stubEnv('NO_COLOR', '')
+    expect(formatSsrDevelopmentConsoleFailure(compilerFailure, ROOT)).toBe(plainCompilerFailure)
+    expect(formatSsrDevelopmentConsoleFailure(compilerFailure, ROOT)).not.toContain('\u001b')
+  })
+
+  it('keeps plain output in CI when NO_COLOR is absent', () => {
+    withoutNoColor(() => {
+      vi.stubEnv('FORCE_COLOR', '')
+      vi.stubEnv('CI', 'true')
+      withStdoutTty(true, () => {
+        expect(formatSsrDevelopmentConsoleFailure(typeError, ROOT)).toBe(plainTypeError)
+      })
+    })
+  })
+
+  it('keeps plain output for non-TTY stdout when NO_COLOR is absent', () => {
+    withoutNoColor(() => {
+      vi.stubEnv('FORCE_COLOR', '')
+      vi.stubEnv('CI', '')
+      withStdoutTty(false, () => {
+        expect(formatSsrDevelopmentConsoleFailure(typeError, ROOT)).toBe(plainTypeError)
+      })
+    })
   })
 })
