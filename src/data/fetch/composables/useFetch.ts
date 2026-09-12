@@ -1,6 +1,5 @@
 import {
   getCurrentInstance,
-  inject,
   onScopeDispose,
   onServerPrefetch,
   shallowReadonly,
@@ -9,7 +8,7 @@ import {
   type MaybeRefOrGetter,
   type ShallowRef,
 } from 'vue'
-import { SSR_FETCH_RUNTIME } from '../runtime/SsrFetchRuntime'
+import { resolveSsrFetchRuntime } from '../runtime/resolveSsrFetchRuntime'
 import type {
   UseFetchOptions,
   UseFetchOptionsBase,
@@ -24,7 +23,7 @@ export function useFetch<TData = unknown, TVariables extends object = UseFetchVa
   ...parameters: UseFetchOptionsParameter<TData, TVariables>
 ): UseFetchResult<TData> {
   const instance = getCurrentInstance()
-  const runtime = instance ? inject(SSR_FETCH_RUNTIME, null) : null
+  const runtime = instance ? resolveSsrFetchRuntime(true) : null
   if (!instance || !runtime) {
     throw new Error('useFetch() must run synchronously from component setup() or <script setup> in an active vue-ssr-lite application.')
   }
