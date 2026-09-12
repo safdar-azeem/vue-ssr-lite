@@ -14,8 +14,12 @@ import {
   type SsrCompiledConfig,
   type SsrResolvedServerOptions,
 } from '../SsrRuntimeConfigCompile'
+import {
+  createSsrDevelopmentConsole,
+  resetSsrDevelopmentConsole,
+} from '../cli/SsrCliDevelopmentConsole'
 import { carrySsrFailure, observeSsrFailure } from '../SsrErrorDiagnostic'
-import { safeSsrLog } from '../SsrObservability'
+import { bindSsrDevelopmentLogger, safeSsrLog } from '../SsrObservability'
 import {
   markSsrInitializationFailure,
   readSsrProductionFailure,
@@ -228,6 +232,13 @@ export const createSsrRequestRuntime = async (
   // measure their managed-server startup from this boundary instead.
   const inheritedStartupTimings = !options.production ? options.startupTimings : undefined
   const startupTimings = !options.production ? inheritedStartupTimings ?? createSsrPhaseTimings() : undefined
+  const developmentConsole = options.production
+    ? undefined
+    : createSsrDevelopmentConsole({ root: options.root })
+  const adoptServerOptions = (server: SsrResolvedServerOptions) => {
+    if (!options.production) server.logger = bindSsrDevelopmentLogger(server.logger)
+    return server
+  }
   let shuttingDown = false
   let shutdownPromise: Promise<void> | undefined
   let activeRequestCount = 0
@@ -310,7 +321,6 @@ export const createSsrRequestRuntime = async (
   let isCurrentRevision = initialRevision.isCurrent
   let applicationRuntime: SsrApplicationRuntimeState
   let controlPlane: SsrResolvedServerOptions
-  let unavailableLogged = false
   let unavailableCarrier: unknown
 
   const reportRuntimeUnavailable = (error: unknown) => {
@@ -320,18 +330,7 @@ export const createSsrRequestRuntime = async (
       error,
       errorId: observed.occurrence.errorId,
     })
-    if (unavailableLogged) return
-    unavailableLogged = true
-    console.log(
-      [
-        '',
-        '⚠  Application runtime unavailable',
-        '',
-        '  The development server is still running.',
-        '  Fix the source error and Vite will retry automatically.',
-        '',
-      ].join('\n')
-    )
+    developmentConsole?.reportFailure(error)
   }
 
   if ('error' in initialRevision) {
@@ -340,7 +339,7 @@ export const createSsrRequestRuntime = async (
       throw initialRevision.error
     }
     try {
-      controlPlane = await loadDevelopmentControlPlane()
+      controlPlane = adoptServerOptions(await loadDevelopmentControlPlane())
     } catch (error) {
       detachTemplateWatcher()
       throw error
@@ -350,7 +349,7 @@ export const createSsrRequestRuntime = async (
   } else {
     lastDefinition = initialRevision.definition
     applicationRuntime = { status: 'ready', definition: initialRevision.definition }
-    controlPlane = initialRevision.definition.server
+    controlPlane = adoptServerOptions(initialRevision.definition.server)
     trackRuntimeTemplates(initialRevision.definition)
   }
 
@@ -466,6 +465,7 @@ export const createSsrRequestRuntime = async (
               safeSsrLog(controlPlane.logger, 'error', 'ssr.runtime.reload.failed', {
                 error: next.error,
               })
+              developmentConsole?.reportFailure(next.error)
               applicationRuntime = { status: 'ready', definition: lastDefinition }
               return lastDefinition
             }
@@ -486,10 +486,10 @@ export const createSsrRequestRuntime = async (
           // Listener host/port, admission limits, and clientRoot stay at the
           // values captured during startup. Logger and request/shutdown
           // timeouts follow the recovered compiled server options.
-          controlPlane = next.definition.server
+          controlPlane = adoptServerOptions(next.definition.server)
           trackRuntimeTemplates(lastDefinition)
-          unavailableLogged = false
           unavailableCarrier = undefined
+          developmentConsole?.reportRecovery()
           return lastDefinition
         }
       } finally {
@@ -669,6 +669,10 @@ export const createSsrRequestRuntime = async (
     loadDefinition,
     fallbackDefinition: () => lastDefinition,
     fallbackLogger: () => controlPlane.logger,
+    root: options.root,
+    reportDevelopmentFailure: developmentConsole
+      ? (error) => { developmentConsole.reportFailure(error) }
+      : undefined,
     shuttingDown: () => shuttingDown,
     assertReady,
     ssrAdmission,
@@ -795,6 +799,7 @@ export const createSsrRequestRuntime = async (
     const close = (): Promise<void> => {
       if (shutdownPromise) return shutdownPromise
       shuttingDown = true
+      if (!options.production) resetSsrDevelopmentConsole(options.root)
       detachTemplateWatcher()
       // Stop new SSR admission and detach every queued request. Active leases
       // remain valid until their actual Vue render work settles.
