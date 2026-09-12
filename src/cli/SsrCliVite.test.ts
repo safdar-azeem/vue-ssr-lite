@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createSsrViteCliConfigMarker,
   readSsrViteCliConfig,
@@ -14,7 +14,12 @@ import { createSsrCliDevelopmentViteConfig, createSsrCliDevelopmentViteLogger } 
 afterEach(() => {
   resetSsrDevelopmentConsole('/app')
   resetSsrDevelopmentConsole('/project')
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
+})
+
+beforeEach(() => {
+  vi.stubEnv('NO_COLOR', '1')
 })
 
 const viteLogger = () => ({
