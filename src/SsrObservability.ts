@@ -40,6 +40,26 @@ const reportObservabilityFailure = (
   }
 }
 
+const developmentLoggers = new WeakSet<SsrLogger>()
+
+/**
+ * Development-only logger facade. Custom sinks still receive structured events,
+ * but the generic fallback console is not used for those events.
+ */
+export const bindSsrDevelopmentLogger = (logger?: SsrLogger): SsrLogger => {
+  if (logger && developmentLoggers.has(logger)) return logger
+  const bound: SsrLogger = {
+    debug: logger?.debug ? (event, details) => logger.debug!(event, details) : undefined,
+    info: logger?.info ? (event, details) => logger.info!(event, details) : undefined,
+    warn: logger?.warn ? (event, details) => logger.warn!(event, details) : undefined,
+    error: (event, details) => {
+      logger?.error?.(event, details)
+    },
+  }
+  developmentLoggers.add(bound)
+  return bound
+}
+
 /** Invoke a user logger without allowing observability to affect availability. */
 export const safeSsrLog = (
   logger: SsrLogger | undefined,
