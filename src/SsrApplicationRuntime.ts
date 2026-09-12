@@ -1,14 +1,40 @@
 import { toRaw } from 'vue'
 import { createMemoryHistory, createWebHistory } from 'vue-router'
-import { createSsrApplicationCore, type SsrApplicationHost, type SsrCreateApplicationOptions } from './SsrApplicationCore'
+import {
+  createSsrApplicationCore,
+  type SsrApplicationExtensions,
+  type SsrApplicationHost,
+  type SsrCreateApplicationOptions,
+} from './SsrApplicationCore'
 import { createSsrResolutionController } from './SsrServerResolution'
 import { fingerprintSsrReconciliationState } from './SsrReconciliationFingerprint'
 import { installSsrRequestContextObservation, unwrapSsrRequestObservation } from './SsrRequestObservation'
+import { createExtensionRuntime } from './core/extensions/ExtensionRuntime'
+import { resolveBuiltInExtensions } from './extensions/resolveBuiltInExtensions'
+import { updateSsrSeoRoute } from './extensions/seo/SsrSeoLifecycle'
+import { createSsrMiddlewareExecutionController } from './middleware/SsrMiddlewareRuntime'
+import { createSsrNavigationRuntime } from './navigation/SsrNavigationRuntime'
+import { SsrFetchRuntime } from './data/fetch/runtime/SsrFetchRuntime'
 import type { SsrResolvedApplicationDefinition } from './SsrRuntimeTypes'
 
 export type { SsrCreateApplicationOptions } from './SsrApplicationCore'
 
+const capabilities: Pick<SsrApplicationHost, 'createFetchRuntime' | 'createExtensions' | 'createMiddleware' | 'createNavigation'> = {
+  createFetchRuntime: (owner) => new SsrFetchRuntime(owner.server, owner.context, owner.hydration, owner.hydrating),
+  createMiddleware: createSsrMiddlewareExecutionController,
+  createNavigation: createSsrNavigationRuntime,
+  createExtensions: (definition, defaults, options) => {
+    const runtime = createExtensionRuntime(
+      resolveBuiltInExtensions(definition, defaults), definition.extensions ?? [], options
+    )
+    const routeChanged: SsrApplicationExtensions['routeChanged'] = (response, route) =>
+      updateSsrSeoRoute(runtime, response, route)
+    return { runtime, routeChanged }
+  },
+}
+
 const serverHost: SsrApplicationHost = {
+  ...capabilities,
   createHistory: createMemoryHistory,
   createResolution: () => createSsrResolutionController(true),
   observe: ({ context, hydration, managedHead, resolution }) => {
@@ -24,6 +50,7 @@ const serverHost: SsrApplicationHost = {
 
 // Retain the internal universal entry for existing tests and server integrations.
 const universalBrowserHost: SsrApplicationHost = {
+  ...capabilities,
   createHistory: createWebHistory,
   createResolution: () => createSsrResolutionController(false),
 }
