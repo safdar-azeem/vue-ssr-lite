@@ -321,6 +321,13 @@ SSR  docs.domain.com    docs
 
 Hybrid routing stays on one domain in one application. Multiple applications are separate apps. Each can have its own routes, render mode, SEO, and host. They still run in one Node process on one port.
 
+Each browser document initializes or mounts one vue-ssr-lite application. A
+second application in the same document is rejected before its plugins or
+initializer run; after the current application is unmounted or a failed startup
+is cleaned up, another application may take ownership. Multi-application host
+routing remains concurrent on the server because each request resolves one
+application and produces its own document.
+
 Register each application in `server.ts`. They are not discovered automatically.
 
 ```ts
