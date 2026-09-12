@@ -11,11 +11,30 @@ import {
   type SsrManagedServer,
 } from '../server/SsrServerRuntime'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
+import { ssrBundleAudit, type inspectSsrBundle } from './SsrBundleAudit'
+import { assertCompleteCriticalPayload, assertReviewedClientModules, productionClientDefines, sourceClientAliases } from './SsrPerformanceContracts'
 
 const fixtureRoot = join(
   dirname(fileURLToPath(import.meta.url)),
   '../../fixtures/request-assets-multi-app'
 )
+const frameworkRoot = join(fixtureRoot, '../..')
+
+const criticalHtmlAssets = (html: string, base: string) => {
+  const scripts: string[] = []
+  const styles: string[] = []
+  for (const [tag] of html.matchAll(/<(?:script|link)\b[^>]*>/g)) {
+    const attributes = Object.fromEntries([...tag.matchAll(/([\w-]+)=["']([^"']*)["']/g)]
+      .map(([, key, value]) => [key, value]))
+    if (attributes.type === 'module' && attributes.src) scripts.push(attributes.src)
+    if (attributes.rel === 'modulepreload' && attributes.href) scripts.push(attributes.href)
+    if (attributes.rel === 'stylesheet' && attributes.href) styles.push(attributes.href)
+  }
+  expect(new Set(scripts).size).toBe(scripts.length)
+  expect(new Set(styles).size).toBe(styles.length)
+  for (const asset of [...scripts, ...styles]) expect(asset.startsWith(base), asset).toBe(true)
+  return { scripts: scripts.map((file) => file.slice(base.length)), styles: styles.map((file) => file.slice(base.length)) }
+}
 
 let devServer: ViteDevServer | undefined
 let managedServer: SsrManagedServer | undefined
@@ -97,10 +116,15 @@ describe('request-aware multi-application assets', () => {
   it('isolates lazy route CSS and chunks through the shared production manifest', async () => {
     productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-multi-'))
     const base = '/products/'
+    const audits: ReturnType<typeof inspectSsrBundle>[] = []
     await build({
       root: fixtureRoot,
       configFile: join(fixtureRoot, 'vite.config.ts'),
       base,
+      mode: 'production',
+      define: productionClientDefines,
+      resolve: { alias: sourceClientAliases(frameworkRoot) },
+      plugins: [ssrBundleAudit(frameworkRoot, (audit) => audits.push(audit))],
       build: { outDir: productionOutDir, emptyOutDir: true },
     })
     const manifest = JSON.parse(
@@ -120,6 +144,39 @@ describe('request-aware multi-application assets', () => {
     expect(websiteJs).toBeTruthy()
     expect(adminCss).toBeTruthy()
     expect(adminJs).toBeTruthy()
+    expect(audits.length).toBeGreaterThan(0)
+    for (const audit of audits) {
+      assertReviewedClientModules(audit, frameworkRoot)
+      const websiteFile = websiteJs!.slice(base.length)
+      const adminFile = adminJs!.slice(base.length)
+      for (const entry of audit.entries) {
+        assertCompleteCriticalPayload(entry)
+        expect(entry.files).not.toContain(websiteFile)
+        expect(entry.files).not.toContain(adminFile)
+        const modules = audit.chunks.filter((chunk) => entry.files.includes(chunk.file))
+          .flatMap((chunk) => chunk.modules).filter((module) => module.renderedLength > 0)
+        const websiteOwned = modules.some((module) => module.id.replaceAll('\\', '/').includes('/src/website/'))
+        const adminOwned = modules.some((module) => module.id.replaceAll('\\', '/').includes('/src/admin/'))
+        expect(websiteOwned && adminOwned).toBe(false)
+        expect(websiteOwned || adminOwned).toBe(true)
+        const ownAssets = websiteOwned ? websiteAssets : adminAssets
+        const otherAssets = websiteOwned ? adminAssets : websiteAssets
+        const page = audit.critical(
+          [entry.file, ...ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length))],
+          ownAssets.filter((file) => file.endsWith('.css')).map((file) => file.slice(base.length))
+        )
+        assertCompleteCriticalPayload(page)
+        // These fixtures each add exactly one lazy SFC and its stylesheet.
+        // Shared imports can be split freely; unrelated routes cannot join them.
+        expect(page.files.filter((file) => !entry.files.includes(file))).toHaveLength(1)
+        expect(page.css.filter((file) => !entry.css.includes(file))).toHaveLength(1)
+        for (const asset of otherAssets.filter((file) => /\.(?:js|css)$/.test(file))) {
+          expect([...page.files, ...page.css]).not.toContain(asset.slice(base.length))
+        }
+      }
+      expect(audit.critical([websiteFile]).files).not.toContain(adminFile)
+      expect(audit.critical([adminFile]).files).not.toContain(websiteFile)
+    }
 
     devServer = await createFixtureViteServer()
     const runtime = await importSsrViteModule<{
@@ -159,5 +216,27 @@ describe('request-aware multi-application assets', () => {
     expect(admin).toContain(`href="${adminJs}"`)
     expect(admin).not.toContain(websiteCss!)
     expect(admin).not.toContain(websiteJs!)
+    for (const audit of audits) {
+      for (const [html, ownAssets] of [[website, websiteAssets], [admin, adminAssets]] as const) {
+        const actual = criticalHtmlAssets(html, base)
+        const entry = audit.entries.find((candidate) => actual.scripts.includes(candidate.file))
+        expect(entry).toBeDefined()
+        const expected = audit.critical(
+          [entry!.file, ...ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length))],
+          ownAssets.filter((file) => file.endsWith('.css')).map((file) => file.slice(base.length))
+        )
+        const delivered = audit.critical(actual.scripts, actual.styles)
+        assertCompleteCriticalPayload(delivered)
+        expect([...delivered.files].sort()).toEqual([...expected.files].sort())
+        expect([...delivered.css].sort()).toEqual([...expected.css].sort())
+        expect(delivered.total).toEqual(expected.total)
+        expect(delivered.resourceCount).toBe(expected.resourceCount)
+        console.info('[vue-ssr-lite] request-specific critical JS/CSS:', JSON.stringify({
+          entry: entry!.file, files: delivered.files, css: delivered.css,
+          js: delivered.js, cssSizes: delivered.cssSizes, total: delivered.total,
+          resourceCount: delivered.resourceCount,
+        }))
+      }
+    }
   }, 30_000)
 })
