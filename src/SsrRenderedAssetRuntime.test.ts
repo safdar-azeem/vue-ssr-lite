@@ -7,6 +7,25 @@ import {
 } from './SsrRenderedAssetRuntime'
 
 describe('request-aware SSR assets', () => {
+  it('prepares shared asset values once and returns fresh request-owned results', () => {
+    const manifest = {
+      'src/Page.vue': ['assets/page.js', 'assets/page.css', 'assets/page.js'],
+      'src/Page.vue?vue&type=script&lang.ts': ['assets/page.js'],
+      'src/Page.vue?vue&type=style&index=0&lang.css': ['assets/page.css'],
+      'src/Other.vue': ['assets/other.js'],
+    }
+    const resolve = createSsrRenderedAssetResolver(manifest, '/base/')
+    const first = resolve('one', ['src/Page.vue'])
+    expect(first.map((asset) => asset.href)).toEqual(['/base/assets/page.js', '/base/assets/page.css'])
+    first[0].href = '/changed.js'
+    manifest['src/Page.vue'].push('assets/later.js')
+    expect(resolve('two', ['src/Page.vue'])).toEqual([
+      { applicationId: 'two', href: '/base/assets/page.js', rel: 'modulepreload' },
+      { applicationId: 'two', href: '/base/assets/page.css', rel: 'stylesheet' },
+    ])
+    expect(() => resolve('two', ['src/Unknown.vue'])).toThrow()
+  })
+
   it('maps only rendered modules and deduplicates shared CSS and chunks', () => {
     const manifest = {
       'src/Home.vue': ['/base/assets/home.js', '/base/assets/shared.css'],
