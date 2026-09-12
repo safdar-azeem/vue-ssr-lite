@@ -1,4 +1,4 @@
-import { nextTick, type InjectionKey } from 'vue'
+import { nextTick } from 'vue'
 import {
   START_LOCATION,
   type RouteLocationMatched,
@@ -15,8 +15,7 @@ import type {
 
 type NavigationOutcome = 'success' | 'cancelled' | 'error' | 'dispose'
 
-export const SSR_NAVIGATION_RUNTIME: InjectionKey<SsrNavigationRuntime> =
-  Symbol('vue-ssr-lite navigation runtime')
+export { SSR_NAVIGATION_RUNTIME } from './SsrNavigationContext'
 
 const canonicalRecord = (record: RouteLocationMatched | undefined) =>
   record?.aliasOf ?? record
