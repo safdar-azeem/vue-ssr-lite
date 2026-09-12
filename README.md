@@ -1221,8 +1221,8 @@ The default development terminal does not print the full stack or duplicate stru
 
 Production (`vue-ssr-lite start`, generic Node, and Vercel) keeps two channels separate:
 
-- **Public page:** visitors see a generic “Application unavailable” document and a short `errorId` such as `vssl_8f3c2a7e1b0d4c56`. The page never includes the exception message, stack, filesystem paths, headers, cookies, request bodies, environment values, or config.
-- **Private server logs:** operators receive the actual `error.name`, `error.message`, and `error.stack` when available, plus the same `errorId`, `requestId`, pathname, and any framework classification (`reason`, `package`, `export`, artifact `code`). Search logs by the error ID from the browser page.
+- **Public page:** browser navigations receive a generic, status-aware document with the HTTP status, a safe heading and description, and a short `errorId` such as `vssl_8f3c2a7e1b0d4c56` when an internal diagnostic exists. Controlled outcomes such as an invalid or unmatched host do not invent an Error ID. The page never includes the exception message, stack, internal classifier, package or export names, filesystem paths, headers, cookies, request bodies, environment values, or config.
+- **Private server logs:** operators receive the actual `error.name`, `error.message`, and `error.stack` when available, plus the same `errorId`, `requestId`, pathname, and any framework classification (`reason`, `package`, `export`, artifact `code`). Internal classifiers remain operator-only. Search logs by the error ID from the browser page.
 
 There is no query-string or header switch that exposes production stacks to a public requester.
 
