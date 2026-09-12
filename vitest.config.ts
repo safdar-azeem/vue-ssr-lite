@@ -1,6 +1,11 @@
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
+const typescriptResolve = fileURLToPath(
+  new URL('./scripts/SsrRegisterTypeScriptResolve.mjs', import.meta.url)
+)
+const execArgv = ['--import', typescriptResolve]
+
 const sharedResolve = {
   // Repository examples exercise the current public helpers before a package build.
   alias: [{ find: /^vue-ssr-lite$/, replacement: fileURLToPath(new URL('./src/index.ts', import.meta.url)) }],
@@ -12,11 +17,13 @@ const sharedResolve = {
 export default defineConfig({
   resolve: sharedResolve,
   test: {
+    execArgv,
     projects: [
       {
         resolve: sharedResolve,
         test: {
           name: 'admin-spa',
+          execArgv,
           include: ['src/fixtures/SsrArchitectureAdminSpa.test.ts'],
           environment: './SsrTestJsdomEnvironment.ts',
           environmentOptions: {
@@ -28,6 +35,7 @@ export default defineConfig({
         resolve: sharedResolve,
         test: {
           name: 'unit',
+          execArgv,
           include: ['src/**/*.test.ts'],
           exclude: ['src/fixtures/SsrArchitectureAdminSpa.test.ts'],
         },
