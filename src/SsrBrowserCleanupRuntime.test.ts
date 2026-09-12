@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, type App } from 'vue'
 import { hydrateSsrApplication, mountSpaApplication } from './SsrBrowserRuntime'
 import { usePublicConfig } from './SsrPublicConfig'
 import { getSsrStateElementId } from './SsrSerialization'
@@ -55,14 +55,17 @@ describe('browser hydration cleanup', () => {
     })
     document.body.append(state)
     const Root = defineComponent({ setup: () => () => 'ready' })
+    let mounted!: App
 
     await hydrateSsrApplication({
       id: 'async',
       root: Root,
       routes: [{ path: '/', component: Root }],
+      install: ({ app }) => { mounted = app },
     })
 
     expect(document.querySelector('link[data-vue-ssr-lite-rendered-style="async"]')).not.toBeNull()
+    mounted.unmount()
   })
 
   it('disposes registered plugin state when mounting fails', async () => {
