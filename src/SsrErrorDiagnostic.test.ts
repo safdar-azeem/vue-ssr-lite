@@ -90,6 +90,12 @@ describe('SsrErrorDiagnostic', () => {
       name: 'CustomError',
       message: 'from object',
     })
+    const syntax = new SyntaxError('Single file component can contain only one <template> element')
+    const carried = carrySsrFailure(syntax, observeSsrFailure(syntax).occurrence)
+    expect(describeSsrThrownValue(carried)).toMatchObject({
+      name: 'SyntaxError',
+      message: 'Single file component can contain only one <template> element',
+    })
   })
 
   it('does not crash or walk cause when Error getters are hostile', () => {
