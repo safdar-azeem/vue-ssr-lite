@@ -165,6 +165,10 @@ export interface SsrRequestHandlerRuntime {
   readonly loadDefinition: () => Promise<SsrCompiledConfig>
   readonly fallbackDefinition: () => SsrCompiledConfig | undefined
   readonly fallbackLogger?: () => SsrLogger | undefined
+  /** Authoritative project root used only for development source presentation. */
+  readonly root?: string
+  /** Development console presentation for one active human-visible failure. */
+  readonly reportDevelopmentFailure?: (error: unknown) => void
   readonly shuttingDown: () => boolean
   readonly assertReady: (definition: SsrCompiledConfig) => Promise<void>
   /** Shared per-managed-server capacity for actual Vue SSR work. */
@@ -805,6 +809,7 @@ export const handleSsrRequest = async (
       error,
       errorId: diagnostic.errorId,
     })
+    if (!runtime.production) runtime.reportDevelopmentFailure?.(error)
     let timeout =
       error instanceof SsrRequestTimeoutError ||
       signal.reason instanceof SsrRequestTimeoutError
@@ -876,12 +881,15 @@ export const handleSsrRequest = async (
               : thrown.message,
             {
               errorId: diagnostic.errorId,
+              viteBase: runtime.production ? undefined : runtime.viteBase,
               development: runtime.production ? undefined : {
                 name: thrown.name,
                 message: thrown.message,
                 stack: thrown.stack,
                 requestPathname: pathname,
-                ...readSsrDevelopmentErrorDetails(error),
+                ...readSsrDevelopmentErrorDetails(error, {
+                  root: definition?.server.root ?? runtime.root,
+                }),
               },
             }
           ),
