@@ -5,6 +5,7 @@ import { dispatchServerRoute, matchServerRoute, SsrServerRouteBadRequest } from 
 import type { SsrCompiledConfig } from '../SsrRuntimeConfigCompile'
 import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../SsrDomainRuntime'
+import { readSsrDevelopmentErrorDetails } from '../SsrDevelopmentErrorDiagnostic'
 import { createSsrErrorDiagnostic, describeSsrThrownValue } from '../SsrErrorDiagnostic'
 import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../SsrObservability'
 import { prepareSsrCompiledMetadata } from './SsrCompiledMetadata'
@@ -15,6 +16,7 @@ import type {
   SsrEndpointTools,
   SsrHttpRequest,
   SsrHttpResponse,
+  SsrLogger,
   SsrPublicConfigRequest,
 } from '../SsrRuntimeTypes'
 import { serializeSsrState } from '../SsrSerialization'
@@ -161,7 +163,8 @@ export interface SsrRequestHandlerRuntime {
   /** Owns the request deadline and transport-triggered cancellation. */
   readonly scope: SsrRequestScope
   readonly loadDefinition: () => Promise<SsrCompiledConfig>
-  readonly fallbackDefinition: () => SsrCompiledConfig
+  readonly fallbackDefinition: () => SsrCompiledConfig | undefined
+  readonly fallbackLogger?: () => SsrLogger | undefined
   readonly shuttingDown: () => boolean
   readonly assertReady: (definition: SsrCompiledConfig) => Promise<void>
   /** Shared per-managed-server capacity for actual Vue SSR work. */
@@ -296,7 +299,7 @@ export const handleSsrRequest = async (
   let selectedEntryId = 'unknown'
   let activeRenderRequest: SsrHttpRequest<any> | undefined
   let activeDefinition = runtime.fallbackDefinition()
-  const timings = !runtime.production && activeDefinition.server.diagnostics && hasSsrTimingSink(activeDefinition.server.logger)
+  const timings = !runtime.production && activeDefinition?.server.diagnostics && hasSsrTimingSink(activeDefinition.server.logger)
     ? createSsrPhaseTimings()
     : undefined
   let timingDetails: Record<string, unknown> | undefined
@@ -795,7 +798,7 @@ export const handleSsrRequest = async (
       entryId: selectedEntryId,
       pathname,
     })
-    safeSsrLog(definition.server.logger, 'error', 'ssr.request.failed', {
+    safeSsrLog(definition?.server.logger ?? runtime.fallbackLogger?.(), 'error', 'ssr.request.failed', {
       requestId: request.requestId,
       entryId: selectedEntryId,
       pathname,
@@ -814,7 +817,7 @@ export const handleSsrRequest = async (
       )
     )
     let statusCode = timeout ? 504 : seoProviderFailure ? 503 : 500
-    if (definition.server.renderError) {
+    if (definition && definition.server.renderError) {
       try {
         const renderedError = await runBoundedErrorRenderer(
           () =>
@@ -877,7 +880,8 @@ export const handleSsrRequest = async (
                 name: thrown.name,
                 message: thrown.message,
                 stack: thrown.stack,
-                pathname,
+                requestPathname: pathname,
+                ...readSsrDevelopmentErrorDetails(error),
               },
             }
           ),
@@ -890,10 +894,12 @@ export const handleSsrRequest = async (
     }
     return jsonResponse(statusCode, {
       status: 'error',
-      service: definition.name,
+      service: definition?.name ?? 'app',
       errorId: diagnostic.errorId,
     })
   } finally {
-    if (applicationRequest) timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
+    if (applicationRequest && activeDefinition) {
+      timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
+    }
   }
 }
