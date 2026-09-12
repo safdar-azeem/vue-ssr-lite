@@ -98,7 +98,7 @@ describe('multi-domain architecture fixture', () => {
     }
     expect(code).not.toContain('var HomePage_default')
     expect(code).not.toContain('HomePage.vue')
-    expect(code).toContain('WEBSITE_SERVER_ONLY_PROVIDER')
+    expect(code).toContain('WEBSITE_STATIC_SEO_DEFAULT')
   })
 
   it('discovers explicit applications from evaluated modules, including aliased defineApplication', async () => {
@@ -154,11 +154,13 @@ describe('multi-domain architecture fixture', () => {
     expect(websiteClient).not.toContain('modules/admin/')
     expect(websiteClient).not.toContain('modules/docs/')
     expect(websiteClient).not.toContain('modules/website/app.ts')
-    expect(websiteClient).not.toContain('WEBSITE_SERVER_ONLY_PROVIDER')
+    expect(websiteClient).toContain('WEBSITE_STATIC_SEO_DEFAULT')
     expect(adminClient).toContain('mountSpaApplication')
     expect(adminClient).toContain('modules/admin/routes.ts')
     expect(adminClient).not.toContain('modules/website/routes.ts')
     expect(adminClient).not.toContain('modules/admin/app.ts')
+    expect(adminClient).toContain('ADMIN_STATIC_SEO_DEFAULT')
+    expect(adminClient).not.toContain('WEBSITE_STATIC_SEO_DEFAULT')
     expect(docsClient).toContain('modules/docs/routes.ts')
     expect(docsClient).toContain('modules/docs/App.vue')
     expect(docsClient).toContain('modules/docs/main.ts')
@@ -179,10 +181,10 @@ describe('multi-domain architecture fixture', () => {
     expect(runtime).toContain('/src/modules/docs/main.ts')
     expect(runtime.match(/import __ssrRoot\d+_website from/g)?.length ?? 0).toBe(1)
     expect(runtime).not.toContain('modules/admin/pages')
-    expect(runtime).not.toContain('ADMIN_SERVER_ONLY_PROVIDER')
+    expect(runtime).not.toContain('ADMIN_STATIC_SEO_DEFAULT')
   })
 
-  it('does not eagerly put unrelated application pages or server-only providers in browser chunks', async () => {
+  it('keeps application pages and static client SEO defaults in their owning browser chunks', async () => {
     productionOutDir = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-multi-arch-'))
     await build({
       root: multiRoot,
@@ -196,8 +198,8 @@ describe('multi-domain architecture fixture', () => {
       chunks[file] = await readFile(join(productionOutDir, file), 'utf8')
     }
     const allJs = Object.values(chunks).join('\n')
-    expect(allJs).not.toContain('WEBSITE_SERVER_ONLY_PROVIDER')
-    expect(allJs).not.toContain('ADMIN_SERVER_ONLY_PROVIDER')
+    expect(allJs).toContain('WEBSITE_STATIC_SEO_DEFAULT')
+    expect(allJs).toContain('ADMIN_STATIC_SEO_DEFAULT')
     const websiteChunk = Object.values(chunks).find((code) =>
       code.includes('WEBSITE_HOME_SFC')
     )
@@ -212,9 +214,15 @@ describe('multi-domain architecture fixture', () => {
     expect(docsChunk).toBeTruthy()
     expect(websiteChunk).not.toContain('ADMIN_DASHBOARD_SFC')
     expect(websiteChunk).not.toContain('DOCS_GUIDE_SFC')
+    expect(websiteChunk).toContain('WEBSITE_STATIC_SEO_DEFAULT')
+    expect(websiteChunk).not.toContain('ADMIN_STATIC_SEO_DEFAULT')
     expect(adminChunk).not.toContain('WEBSITE_HOME_SFC')
     expect(adminChunk).not.toContain('DOCS_GUIDE_SFC')
+    expect(adminChunk).toContain('ADMIN_STATIC_SEO_DEFAULT')
+    expect(adminChunk).not.toContain('WEBSITE_STATIC_SEO_DEFAULT')
     expect(docsChunk).not.toContain('WEBSITE_HOME_SFC')
     expect(docsChunk).not.toContain('ADMIN_DASHBOARD_SFC')
+    expect(docsChunk).not.toContain('WEBSITE_STATIC_SEO_DEFAULT')
+    expect(docsChunk).not.toContain('ADMIN_STATIC_SEO_DEFAULT')
   }, 30_000)
 })
