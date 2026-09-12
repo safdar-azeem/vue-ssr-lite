@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import {
-  createSsrResolutionController,
-  fingerprintSsrReactivityValues,
-} from './SsrRequestResolution'
+import { createSsrResolutionController } from './SsrServerResolution'
+import { fingerprintSsrReactivityValues } from './SsrServerReactivity'
 import { fingerprintSsrReconciliationState } from './SsrReconciliationFingerprint'
 
 const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0))
