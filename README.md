@@ -1213,7 +1213,7 @@ On **Vercel**, deploy as a normal Vite project with the existing build command. 
 
 ## Diagnostics
 
-Development (`vue-ssr-lite dev`) shows a detailed error page and prints the same exception name, message, and stack in the terminal. This is local developer tooling.
+Development (`vue-ssr-lite dev`) shows a detailed error page and prints the same exception name, message, and stack in the terminal. This is local developer tooling. If the application graph is already invalid when the process starts, the HTTP server still listens, the same development error page is served, and Vite retries automatically after the source is fixed. Production (`vue-ssr-lite start`) remains fail-fast.
 
 Production (`vue-ssr-lite start`, generic Node, and Vercel) keeps two channels separate:
 
