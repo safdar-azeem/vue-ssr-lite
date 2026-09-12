@@ -14,7 +14,7 @@ export default defineApplication({
     site: {
       title: 'Website',
       siteName: 'Website',
-      description: 'WEBSITE_SERVER_ONLY_PROVIDER',
+      description: 'WEBSITE_STATIC_SEO_DEFAULT',
     },
   },
 })
