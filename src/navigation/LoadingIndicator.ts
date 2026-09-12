@@ -1,5 +1,5 @@
 import { Fragment, defineComponent, h, inject, onBeforeUnmount, ref, type PropType } from 'vue'
-import { SSR_NAVIGATION_RUNTIME } from './SsrNavigationRuntime'
+import { SSR_NAVIGATION_RUNTIME } from './SsrNavigationContext'
 import type { SsrNavigationTransaction } from './SsrNavigationTypes'
 
 const ROOT_STYLE = {
