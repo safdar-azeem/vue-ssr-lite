@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { describeSsrFailure, safeSsrLog, safeSsrMetrics } from './SsrObservability'
+import { bindSsrDevelopmentLogger, describeSsrFailure, safeSsrLog, safeSsrMetrics } from './SsrObservability'
 import { carrySsrFailure, observeSsrFailure } from './SsrErrorDiagnostic'
 import { PRODUCTION_HTTP_ORIGIN_ERROR } from './SsrCanonicalOrigin'
 import {
@@ -328,5 +328,35 @@ describe('safe operator diagnostics', () => {
     warnings.mockImplementation(() => { throw new Error('console failed') })
     sink.mockImplementation(() => { throw new Error('console failed') })
     expect(() => safeSsrLog(undefined, 'error', 'failure')).not.toThrow()
+  })
+
+  it('keeps production fallback console output and forwards development custom loggers without dumping', () => {
+    const fallback = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    safeSsrLog(undefined, 'error', 'ssr.request.failed', {
+      requestId: 'production-1',
+      error: new TypeError('Cannot read properties of undefined (reading \'items\')'),
+    })
+    expect(fallback).toHaveBeenCalledWith(
+      '[vue-ssr-lite] ssr.request.failed',
+      expect.objectContaining({
+        errorType: 'TypeError',
+        message: "Cannot read properties of undefined (reading 'items')",
+      })
+    )
+    fallback.mockClear()
+    const logger = { error: vi.fn() }
+    safeSsrLog(bindSsrDevelopmentLogger(logger), 'error', 'ssr.runtime.unavailable', {
+      error: new SyntaxError('Single file component can contain only one <template> element'),
+    })
+    expect(logger.error).toHaveBeenCalledWith('ssr.runtime.unavailable', expect.objectContaining({
+      errorType: 'SyntaxError',
+      message: 'Single file component can contain only one <template> element',
+    }))
+    expect(fallback).not.toHaveBeenCalled()
+    fallback.mockClear()
+    safeSsrLog(bindSsrDevelopmentLogger(), 'error', 'ssr.request.failed', {
+      error: new Error('already presented in the development console'),
+    })
+    expect(fallback).not.toHaveBeenCalled()
   })
 })
