@@ -122,8 +122,8 @@ const definition = (options: {
   }), { a: { root: Shell }, b: { root: Shell } })
 }
 
-const FIXTURE_PACKAGE = 'fixture-runtime-package'
-const FIXTURE_EXPORT = 'missingExport'
+const FIXTURE_PACKAGE = 'clickout-lite'
+const FIXTURE_EXPORT = 'onClickOutside'
 
 const lastOperatorDiagnostic = () => {
   const call = vi.mocked(console.error).mock.calls.at(-1)
@@ -153,7 +153,9 @@ describe('shared production executor', () => {
 
     expect(response.status).toBe(500)
     const html = await response.text()
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
+    expect(html).toContain('The request could not be completed.')
     expect(html).not.toMatch(/private (?:load|compile)|runtime\.js|server\.ts/)
     const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({ phase: expectedPhase, errorType: 'SyntaxError' })
@@ -171,7 +173,7 @@ describe('shared production executor', () => {
         throw Object.assign(
           new SyntaxError(`The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'`),
           {
-            stack: `SyntaxError: The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job.js:123:9)`,
+            stack: `SyntaxError: The requested module '${FIXTURE_PACKAGE}' does not provide an export named '${FIXTURE_EXPORT}'\n    at ModuleJob._instantiate (/var/task/SsrRuntime.js:123:9)`,
           }
         )
       },
@@ -235,10 +237,12 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/'), new AbortController().signal)
     const html = await response.text()
     expect(response.status).toBe(500)
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
+    expect(html).toContain('The request could not be completed.')
     expect(html).not.toContain(FIXTURE_PACKAGE)
     expect(html).not.toContain(FIXTURE_EXPORT)
-    expect(html).not.toMatch(/SsrRuntime|private\/build|invalid-runtime-export/)
+    expect(html).not.toMatch(/SyntaxError|missing-named-export|SsrRuntime|private\/build|\/var\/task|invalid-runtime-export/)
     const diagnostic = lastOperatorDiagnostic()
     expect(String(vi.mocked(console.error).mock.calls.at(-1)![0])).toBe('[vue-ssr-lite] ssr.runtime.failed')
     expect(diagnostic).toMatchObject({
@@ -252,6 +256,9 @@ describe('shared production executor', () => {
     if (reason === 'missing-named-export' || reason === 'missing-runtime-dependency') {
       expect(String(diagnostic.message)).toMatch(/does not provide an export named|Cannot find package/)
     }
+    if (reason === 'missing-named-export') {
+      expect(String(diagnostic.stack)).toContain('/var/task/SsrRuntime.js')
+    }
   })
 
   it('classifies production template preparation failures without exposing template details', async () => {
@@ -264,7 +271,8 @@ describe('shared production executor', () => {
 
     expect(response.status).toBe(500)
     const html = await response.text()
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
     expect(html).not.toMatch(/private-template-content|dist\/client|index\.html/)
     const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({ phase: 'template-preflight', errorType: 'Error' })
@@ -287,7 +295,8 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/'), new AbortController().signal)
     expect(response.status).toBe(500)
     const html = await response.text()
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
     expect(html).not.toMatch(/manifest|secret|invalid-json|invalid-schema|SsrProductionArtifactError/)
     const diagnostic = lastOperatorDiagnostic()
     expect(diagnostic).toMatchObject({
@@ -315,7 +324,9 @@ describe('shared production executor', () => {
     expect(await legacy.text()).toBe('legacy')
     const missing = await get('/unknown')
     expect(missing.status).toBe(404)
-    await missing.text()
+    const missingHtml = await missing.text()
+    expect(missingHtml).not.toContain('Something went wrong')
+    expect(missingHtml).not.toContain('404 ·')
     for (const [path, status] of [['/redirect', 302], ['/middleware-redirect', 307]] as const) {
       const response = await get(path)
       expect(response.status).toBe(status)
@@ -332,7 +343,8 @@ describe('shared production executor', () => {
       const response = await get(path)
       expect(response.status).toBe(500)
       const html = await response.text()
-      expect(html).toContain('Application unavailable')
+      expect(html).toContain('500 · Internal Server Error')
+      expect(html).toContain('Something went wrong')
       expect(html).not.toContain('private-token')
       expect(html).not.toContain('source.ts')
       expect(html).not.toContain('/private/source.ts')
@@ -341,7 +353,11 @@ describe('shared production executor', () => {
     }
     const unknownHost = await get('/', 'unknown.test')
     expect(unknownHost.status).toBe(421)
-    await unknownHost.text()
+    const unknownHostHtml = await unknownHost.text()
+    expect(unknownHostHtml).toContain('421 · Misdirected Request')
+    expect(unknownHostHtml).toContain('Host not available')
+    expect(unknownHostHtml).not.toContain('No application serves this host.')
+    expect(unknownHostHtml).not.toContain('Error ID:')
     for (const path of ['/.vite/manifest.json', '/.%76ite/manifest.json', '/.vue-ssr-lite/a.html']) {
       const response = await get(path)
       expect(response.status).toBe(404)
@@ -421,7 +437,14 @@ describe('shared production executor', () => {
     await vi.advanceTimersByTimeAsync(20)
     const response = await pending
     expect(response.status).toBe(504)
-    expect(await response.text()).toContain('Request timed out')
+    const html = await response.text()
+    const diagnostic = lastOperatorDiagnostic()
+    expect(html).toContain('504 · Gateway Timeout')
+    expect(html).toContain('Request timed out')
+    expect(html).toContain('The server took too long to respond. Please try again.')
+    expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
+    expect(html).not.toContain('requestTimeoutMs')
+    expect(html).not.toContain('SsrRequestTimeoutError')
     release(new Response('late response'))
     const warm = await execute(normalized('/dashboard'), new AbortController().signal)
     expect(warm.status).toBe(200)
@@ -506,7 +529,9 @@ describe('shared production executor', () => {
     const html = await response.text()
     const diagnostic = lastOperatorDiagnostic()
     expect(response.status).toBe(500)
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
+    expect(html).toContain('The request could not be completed.')
     expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
     expect(html).not.toContain('Cannot read properties')
     expect(html).not.toContain('TypeError')
@@ -523,7 +548,8 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/string-error'), new AbortController().signal)
     const html = await response.text()
     const diagnostic = lastOperatorDiagnostic()
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
     expect(html).not.toContain('plain string failure')
     expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
     expect(String(diagnostic.message)).toMatch(/plain string failure|Non-Error value was thrown/)
@@ -694,7 +720,8 @@ describe('shared production executor', () => {
     const response = await execute(normalized('/undefined-error'), new AbortController().signal)
     const html = await response.text()
     const diagnostic = lastOperatorDiagnostic()
-    expect(html).toContain('Application unavailable')
+    expect(html).toContain('500 · Internal Server Error')
+    expect(html).toContain('Something went wrong')
     expect(html).toContain(`Error ID: ${diagnostic.errorId}`)
     expect(html).not.toContain('undefined')
     expect(diagnostic).toMatchObject({
