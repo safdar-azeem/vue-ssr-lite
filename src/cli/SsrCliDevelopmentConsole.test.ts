@@ -120,9 +120,10 @@ describe('SsrCliDevelopmentConsole', () => {
 })
 
 describe('SsrCliDevelopmentConsole color', () => {
-  const coloredLabel = '\u001b[1;31mERROR:\u001b[0m'
+  const colorizeErrorLine = (message: string) =>
+    `\u001b[1;31mERROR: ${message}\u001b[0m`
 
-  it('styles only the ERROR label when color output is appropriate', () => {
+  it('styles the complete ERROR line when color output is appropriate', () => {
     vi.stubEnv('FORCE_COLOR', '1')
     vi.stubEnv('NO_COLOR', '')
     const formatted = formatSsrDevelopmentConsoleFailure(
@@ -130,15 +131,15 @@ describe('SsrCliDevelopmentConsole color', () => {
       ROOT
     )
     expect(formatted).toBe([
-      `${coloredLabel} Single file component can contain only one <template> element`,
+      colorizeErrorLine('Single file component can contain only one <template> element'),
       'Plugin: vite:vue',
       'File: src/HomeHero.vue:84:1',
     ].join('\n'))
-    expect(formatted).not.toContain(`${coloredLabel}Plugin:`)
-    expect(formatted).not.toContain('\u001b[1;31mSingle file component')
+    expect(formatted).not.toContain('\u001b[1;31mPlugin:')
+    expect(formatted).not.toContain('\u001b[1;31mFile:')
   })
 
-  it('keeps a plain ERROR label when NO_COLOR is set', () => {
+  it('keeps a plain ERROR line when NO_COLOR is set', () => {
     vi.stubEnv('FORCE_COLOR', '1')
     vi.stubEnv('NO_COLOR', '1')
     const formatted = formatSsrDevelopmentConsoleFailure(
@@ -153,7 +154,7 @@ describe('SsrCliDevelopmentConsole color', () => {
     expect(formatted).not.toContain('\u001b')
   })
 
-  it('keeps a plain ERROR label in CI and when stdout is not a TTY', () => {
+  it('keeps a plain ERROR line in CI and when stdout is not a TTY', () => {
     vi.stubEnv('NO_COLOR', '')
     vi.stubEnv('FORCE_COLOR', '')
     vi.stubEnv('CI', 'true')
