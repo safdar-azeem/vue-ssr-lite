@@ -792,12 +792,16 @@ describe('transport-independent SSR request handler', () => {
       )
       expect(response?.statusCode).toBe(500)
       const html = String(response?.body)
+      expect(html).toContain('background:#090b0e')
       expect(html).toContain('Application error')
-      expect(html).toContain('TypeError')
+      expect(html).toContain('<p class="pill">TypeError</p>')
       expect(html).toContain('Cannot read properties of undefined (reading &quot;x&quot;)')
       expect(html).toContain('Request: /boom')
       expect(html).not.toContain('Path: /boom')
+      expect(html).not.toContain('class="source"')
       expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+      expect(html).toContain('<details>')
+      expect(html).not.toContain('<details open')
       expect(html).toContain('TypeError: Cannot read properties of undefined')
     } finally {
       scope.dispose()
@@ -823,20 +827,29 @@ describe('transport-independent SSR request handler', () => {
         )
       },
     })
+    definition.server.root = '/project'
     const scope = createSsrRequestScope(0)
     try {
       const response = await handleSsrRequest(
         normalizedHtmlRequest('/'),
-        handlerRuntime(scope, definition)
+        { ...handlerRuntime(scope, definition), root: '/project' }
       )
       const html = String(response?.body)
       expect(html).toContain('Application error')
-      expect(html).toContain('[plugin:vite:vue]')
+      expect(html).toContain('vite:vue · SyntaxError')
+      expect(html).not.toContain('[plugin:vite:vue]')
       expect(html).toContain('Single file component can contain only one &lt;template&gt; element')
-      expect(html).toContain('Source: /project/src/modules/Public/components/HomeHero.vue')
-      expect(html).toContain('Location: HomeHero.vue:10:1')
+      expect(html).toContain('src/modules/Public/components/HomeHero.vue:10:1')
+      expect(html).toContain('href="/__open-in-editor?file=src%2Fmodules%2FPublic%2Fcomponents%2FHomeHero.vue%3A10%3A1"')
+      expect(html).toContain('data-ssr-open-source')
+      expect(html).not.toContain('vscode:')
+      expect(html).not.toContain('Source:')
+      expect(html).not.toContain('Location:')
+      expect(html).not.toContain('Open in VS Code')
       expect(html).toContain('Request: /')
       expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+      expect(html).toContain('<details>')
+      expect(html).not.toContain('<details open')
       expect(html).toContain('  8 | &lt;template&gt;')
       expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
       expect(html).toContain('at compile')
@@ -876,9 +889,14 @@ describe('transport-independent SSR request handler', () => {
       expect(html).toContain('Application unavailable')
       expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
       expect(html).not.toContain('vite:vue')
+      expect(html).not.toContain('SyntaxError')
       expect(html).not.toContain('HomeHero.vue')
+      expect(html).not.toContain('vscode:')
+      expect(html).not.toContain('__open-in-editor')
+      expect(html).not.toContain('data-ssr-open-source')
       expect(html).not.toContain('<template>')
       expect(html).not.toContain('plugin')
+      expect(html).not.toContain('Show details')
       expect(html).not.toContain('Source:')
       expect(html).not.toContain('Location:')
       expect(html).not.toContain('Request:')
@@ -1034,13 +1052,23 @@ describe('transport-independent SSR request handler', () => {
     })
     const scope = createSsrRequestScope(0)
     try {
-      const response = await handleSsrRequest(
+      const production = await handleSsrRequest(
         Object.freeze({ ...normalizedHtmlRequest('/boom'), method: 'HEAD' }),
         { ...handlerRuntime(scope, definition), production: true }
       )
-      expect(response?.statusCode).toBe(500)
-      expect(response?.body).toBeUndefined()
-      expect(response?.headers).toMatchObject({ 'cache-control': 'no-store' })
+      expect(production?.statusCode).toBe(500)
+      expect(production?.body).toBeUndefined()
+      expect(production?.headers).toMatchObject({ 'cache-control': 'no-store' })
+      const development = await handleSsrRequest(
+        Object.freeze({ ...normalizedHtmlRequest('/boom'), method: 'HEAD' }),
+        handlerRuntime(scope, definition)
+      )
+      expect(development?.statusCode).toBe(500)
+      expect(development?.body).toBeUndefined()
+      expect(development?.headers).toMatchObject({
+        'cache-control': 'no-store',
+        'content-type': 'text/html; charset=utf-8',
+      })
     } finally {
       scope.dispose()
     }
