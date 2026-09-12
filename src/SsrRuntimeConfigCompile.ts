@@ -172,6 +172,7 @@ export interface SsrViteApplicationEntry {
   mountSelector: string
   applicationFile?: string
   universalProjection?: SsrUniversalRuntimeProjection
+  clientSeo?: SeoApplicationConfig
 }
 
 export interface SsrViteEntries {
