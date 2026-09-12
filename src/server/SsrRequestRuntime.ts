@@ -8,7 +8,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { existsSync } from 'node:fs'
 import { open, readFile, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { resolveSsrDevelopmentControlPlaneFromRoot } from '../SsrConfigCompileRuntime'
 import {
   compileSsrConfig,
   type SsrCompiledConfig,
@@ -70,9 +69,9 @@ import {
 export interface SsrRequestRuntimeOptions {
   production: boolean
   root: string
-  /** Same selected server-config identity used by the Vite/runtime graph. */
-  config?: string
   loadRuntime: () => Promise<unknown>
+  /** Development-only config compiler boundary used after a failed initial runtime load. */
+  loadDevelopmentControlPlane?: () => Promise<SsrResolvedServerOptions>
   development?: SsrRequestDevelopmentRuntime
   startupTimings?: SsrPhaseTimings
 }
@@ -305,17 +304,6 @@ export const createSsrRequestRuntime = async (
     | { status: 'ready'; definition: SsrCompiledConfig }
     | { status: 'failed'; error: unknown }
 
-  // Prefer the path vueSsrLite already selected for the Vite runtime graph.
-  // That selection includes an explicit `--config` because the CLI injects it
-  // before Vite resolves the plugin. Fall back to the managed/CLI path only
-  // when Vite has not published one. Never rediscover from root alone when
-  // either identity is present.
-  const loadDevelopmentControlPlane = () =>
-    resolveSsrDevelopmentControlPlaneFromRoot(
-      options.root,
-      options.development?.resolvedConfigPath?.() ?? options.config
-    )
-
   const initialRevision = await loadRuntimeRevision()
   let lastDefinition: SsrCompiledConfig | undefined
   let isCurrentRevision = initialRevision.isCurrent
@@ -339,7 +327,8 @@ export const createSsrRequestRuntime = async (
       throw initialRevision.error
     }
     try {
-      controlPlane = adoptServerOptions(await loadDevelopmentControlPlane())
+      if (!options.loadDevelopmentControlPlane) throw initialRevision.error
+      controlPlane = adoptServerOptions(await options.loadDevelopmentControlPlane())
     } catch (error) {
       detachTemplateWatcher()
       throw error
