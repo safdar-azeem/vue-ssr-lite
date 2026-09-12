@@ -628,6 +628,13 @@ describe('defineServer application architecture', () => {
     expect(ssrClient).toContain('hydrateSsrApplication')
     expect(ssrClient).toContain('id: "storefront"')
     expect(ssrClient).not.toContain('src/modules/storefront/app.ts')
+    const productionClient = generateSsrClientModule('/app', entries.applications[1], { development: false })
+    expect(productionClient).not.toContain('data-vue-ssr-lite-rendered-style')
+    expect(productionClient).not.toContain('__vueSsrLiteRenderedStyles')
+    expect(productionClient).toContain('__vueSsrLiteDevelopment: false')
+    const developmentClient = generateSsrClientModule('/app', entries.applications[1], { development: true })
+    expect(developmentClient).toContain('data-vue-ssr-lite-rendered-style')
+    expect(developmentClient).toContain('await Promise.all(__vueSsrLiteRenderedStyles.map')
   })
 
   it('resolves development listen options without binding application shells', async () => {
