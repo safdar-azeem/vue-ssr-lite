@@ -1,3 +1,4 @@
+import { auditPackedCapabilities } from './SsrCapabilityAudit.mjs'
 import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer as createHttpServer } from 'node:http'
@@ -109,6 +110,12 @@ const criticalClientPayload = (report, seeds, cssSeeds = []) => {
     chunk.imports.forEach(visit)
   }
   seeds.forEach(visit)
+  // This real smoke fixture has a router and default SEO. Awaited bootstrap
+  // imports are initial resources even when HTML does not preload them.
+  const activation = new Set(['navigation/SsrNavigationRuntime.ts', 'core/extensions/ExtensionRuntime.ts', 'extensions/seo/SsrSeoLifecycle.ts'])
+  for (const chunk of report.chunks) {
+    if (chunk.modules.some(module => module.renderedLength > 0 && module.sources?.some(source => activation.has(source)))) visit(chunk.file)
+  }
   const selectedCss = [...styles].map(file => {
     assert(css.has(file), `unaccounted critical stylesheet: ${file}.`)
     return css.get(file)
@@ -379,26 +386,21 @@ const writeFixture = async (consumerRoot) => {
     `import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
-import { writeFileSync } from 'node:fs'
-import { gzipSync, brotliCompressSync } from 'node:zlib'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { inspectSsrBundle } from './capability-audit-helper.mjs'
+import { fileURLToPath } from 'node:url'
 
+const packageRoot = fileURLToPath(new URL('./node_modules/vue-ssr-lite/', import.meta.url))
+const provenance = JSON.parse(readFileSync(new URL('./node_modules/vue-ssr-lite/dist/module-attribution.json', import.meta.url), 'utf8')).modules
 let serverBuild = false
 const auditClient = {
   name: 'packed-client-audit',
   configResolved(config) { serverBuild = Boolean(config.build.ssr) },
   generateBundle(_options, bundle) {
     if (serverBuild) return
-    const chunks = Object.values(bundle).filter(item => item.type === 'chunk').map(item => ({
-      file: item.fileName, entry: item.isEntry, imports: item.imports, dynamicImports: item.dynamicImports,
-      css: [...(item.viteMetadata?.importedCss || [])],
-      bytes: Buffer.byteLength(item.code), gzip: gzipSync(item.code).byteLength,
-      brotli: brotliCompressSync(item.code).byteLength,
-      modules: Object.entries(item.modules).map(([id, module]) => ({ id, renderedLength: module.renderedLength, renderedExports: module.renderedExports })),
-    }))
-    const stylesheets = Object.values(bundle).filter(item => item.type === 'asset' && item.fileName.endsWith('.css')).map(item => ({
-      file: item.fileName, bytes: Buffer.byteLength(item.source),
-      gzip: gzipSync(item.source).byteLength, brotli: brotliCompressSync(item.source).byteLength,
-    }))
+    const report = inspectSsrBundle(bundle, packageRoot, { moduleSources: provenance, moduleInfo: id => this.getModuleInfo(id) })
+    const chunks = report.chunks.map(chunk => ({ ...chunk, ...chunk.sizes }))
+    const stylesheets = report.stylesheets.map(asset => ({ ...asset, ...asset.sizes }))
     writeFileSync(new URL('./packed-client-audit.json', import.meta.url), JSON.stringify({ chunks, stylesheets }))
   },
 }
@@ -982,6 +984,7 @@ const main = async () => {
       repositoryRoot,
       assert,
     })
+    await auditPackedCapabilities({ repositoryRoot, consumerRoot, packedFiles, assert })
     const [
       installedRootTypes,
       installedClientTypes,
@@ -1195,7 +1198,7 @@ const main = async () => {
       const initial = criticalClientPayload(clientReport, [entry.file])
       console.log('[vue-ssr-lite] packaged client static graph:', JSON.stringify({
         entry: entry.file, ...initial,
-        note: 'Static closure only; rendered lazy-route chunks must be counted separately.',
+        note: 'Includes awaited router/SEO bootstrap imports; rendered lazy-route chunks must be counted separately.',
       }))
     }
     assert(
