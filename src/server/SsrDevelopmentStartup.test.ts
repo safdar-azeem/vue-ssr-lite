@@ -33,7 +33,17 @@ const deferred = <T = void>() => {
 
 const ROOT = '/virtual-runtime.ts'
 const HOME_HERO = '/src/modules/Public/components/HomeHero.vue'
+const HERO_SOURCE = 'src/modules/Public/components/HomeHero.vue'
 const dependencies = ['/src/App.vue', '/src/main.ts', HOME_HERO]
+
+const terminalText = (spy: { mock: { calls: unknown[][] } }) =>
+  spy.mock.calls.map((args) => args.map(String).join(' ')).join('\n')
+
+const developmentErrors = (spy: { mock: { calls: unknown[][] } }) =>
+  spy.mock.calls
+    .map((args) => String(args[0] ?? ''))
+    .filter((text) => text.trimStart().startsWith('ERROR:') || text.includes('✓ Application recovered'))
+    .map((text) => text.trimStart().startsWith('ERROR:') ? text.trimStart() : text)
 let root = ''
 let managed: SsrManagedServer | undefined
 const releases: (() => void)[] = []
@@ -47,7 +57,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-const viteStyleError = (file = HOME_HERO) =>
+const viteStyleError = (file = HERO_SOURCE) =>
   Object.assign(new SyntaxError('Single file component can contain only one <template> element'), {
     plugin: 'vite:vue',
     id: file,
@@ -299,39 +309,48 @@ const createHarness = async (options: {
 describe('development startup with a broken application runtime', () => {
   it('keeps the listener alive and serves the development error page', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const harness = await createHarness({ initialError: viteStyleError() })
     expect(managed!.address().host).toBe('127.0.0.1')
     const first = await harness.get('/')
     const second = await harness.get('/')
+    await harness.get('/')
     expect(first.status).toBe(500)
     expect(second.status).toBe(500)
     expect(first.headers['content-type']).toMatch(/text\/html/)
     expect(first.headers['cache-control']).toBe('no-store')
+    expect(first.body).toContain('background:#090b0e')
     expect(first.body).toContain('Application error')
-    expect(first.body).toContain('[plugin:vite:vue]')
-    expect(first.body).toContain('SyntaxError')
+    expect(first.body).toContain('vite:vue · SyntaxError')
+    expect(first.body).not.toContain('[plugin:vite:vue]')
     expect(first.body).toContain('Single file component can contain only one <template> element')
-    expect(first.body).toContain(`Source: ${HOME_HERO}`)
+    expect(first.body).toContain(`${HERO_SOURCE}:10:1`)
+    expect(first.body).toContain('__open-in-editor?file=')
+    expect(first.body).toContain('data-ssr-open-source')
+    expect(first.body).not.toContain('vscode:')
     expect(first.body).toContain('Request: /')
     expect(first.body).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
+    expect(first.body).toContain('<details>')
+    expect(first.body).not.toContain('<details open')
+    expect(first.body).not.toContain('Open in VS Code')
     expect(harness.factory).toHaveBeenCalledTimes(1)
     expect(harness.loadRuntime).toHaveBeenCalledTimes(1)
-    expect(consoleError).toHaveBeenCalledWith(
-      '[vue-ssr-lite] ssr.runtime.unavailable',
-      expect.objectContaining({
-        errorType: 'SyntaxError',
-        message: expect.stringContaining('only one <template>'),
-      })
-    )
-    expect(consoleError.mock.calls.filter(([event]) =>
-      String(event).includes('ssr.request.failed')
-    )).toHaveLength(0)
-    expect(consoleError.mock.calls.filter(([event]) =>
-      String(event).includes('ssr.runtime.unavailable')
-    )).toHaveLength(1)
+    expect(developmentErrors(consoleLog)).toEqual([
+      [
+        'ERROR: Single file component can contain only one <template> element',
+        'Plugin: vite:vue',
+        `File: ${HERO_SOURCE}:10:1`,
+      ].join('\n'),
+    ])
+    expect(consoleLog.mock.calls.some(([text]) => String(text).startsWith('\nERROR:'))).toBe(true)
+    expect(terminalText(consoleError)).not.toContain('[vue-ssr-lite]')
+    expect(terminalText(consoleLog)).not.toContain('ssr.runtime.unavailable')
+    expect(terminalText(consoleLog)).not.toContain('Application runtime unavailable')
+    expect(terminalText(consoleLog)).not.toContain('ssr.request.failed')
   })
 
   it('recovers on the next Vite revision without restarting the listener', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const harness = await createHarness({ initialError: viteStyleError() })
     const port = managed!.address().port
     expect((await harness.get('/')).status).toBe(500)
@@ -344,9 +363,67 @@ describe('development startup with a broken application runtime', () => {
     expect(recovered.body).toContain('app:recovered')
     expect(recovered.body).not.toContain('Application error')
     expect(harness.factory).toHaveBeenCalledTimes(2)
+    expect(developmentErrors(consoleLog).filter((text) => text === '✓ Application recovered')).toEqual([
+      '✓ Application recovered',
+    ])
+  })
+
+  it('does not reprint the same compiler failure across HMR reloads or later requests', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const error = viteStyleError()
+    const harness = await createHarness({ initialError: error })
+    await harness.get('/')
+    harness.state.error = error
+    harness.invalidate(HOME_HERO)
+    await harness.get('/')
+    await harness.get('/')
+    expect(developmentErrors(consoleLog)).toEqual([
+      [
+        'ERROR: Single file component can contain only one <template> element',
+        'Plugin: vite:vue',
+        `File: ${HERO_SOURCE}:10:1`,
+      ].join('\n'),
+    ])
+  })
+
+  it('does not print recovery for a successful ready-to-ready HMR update', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const harness = await createHarness()
+    expect((await harness.get('/')).status).toBe(200)
+    harness.state.revision = 'warm'
+    harness.invalidate()
+    expect((await harness.get('/')).body).toContain('app:warm')
+    expect(developmentErrors(consoleLog)).toEqual([])
+  })
+
+  it('still delivers structured events to a custom development logger', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const harness = await createHarness()
+    expect((await harness.get('/')).status).toBe(200)
+    const next = viteStyleError()
+    harness.state.error = next
+    harness.invalidate()
+    expect((await harness.get('/')).status).toBe(200)
+    expect(harness.logger.error).toHaveBeenCalledWith(
+      'ssr.runtime.reload.failed',
+      expect.objectContaining({
+        errorType: 'SyntaxError',
+        message: expect.stringContaining('only one <template>'),
+      })
+    )
+    expect(developmentErrors(consoleLog)).toEqual([
+      [
+        'ERROR: Single file component can contain only one <template> element',
+        'Plugin: vite:vue',
+        `File: ${HERO_SOURCE}:10:1`,
+      ].join('\n'),
+    ])
+    expect(terminalText(consoleError)).not.toContain('[vue-ssr-lite]')
   })
 
   it('keeps serving the latest failure until a later revision succeeds', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const harness = await createHarness({ initialError: viteStyleError() })
     expect((await harness.get('/')).status).toBe(500)
     harness.state.error = new Error('revision B still invalid')
@@ -355,6 +432,14 @@ describe('development startup with a broken application runtime', () => {
     expect(second.status).toBe(500)
     expect(second.body).toContain('revision B still invalid')
     expect(harness.factory).toHaveBeenCalledTimes(2)
+    expect(developmentErrors(consoleLog)).toEqual([
+      [
+        'ERROR: Single file component can contain only one <template> element',
+        'Plugin: vite:vue',
+        `File: ${HERO_SOURCE}:10:1`,
+      ].join('\n'),
+      'ERROR: revision B still invalid',
+    ])
     harness.state.error = undefined
     harness.state.revision = 'C'
     harness.invalidate()
@@ -362,6 +447,11 @@ describe('development startup with a broken application runtime', () => {
     expect(recovered.status).toBe(200)
     expect(recovered.body).toContain('app:C')
     expect(harness.factory).toHaveBeenCalledTimes(3)
+    expect(developmentErrors(consoleLog).filter((text) => text === '✓ Application recovered')).toEqual([
+      '✓ Application recovered',
+    ])
+    await harness.get('/')
+    expect(developmentErrors(consoleLog).filter((text) => text === '✓ Application recovered')).toHaveLength(1)
   })
 
   it('does not let a late failed revision overwrite a newer recovered runtime', async () => {
@@ -417,8 +507,8 @@ describe('development startup with a broken application runtime', () => {
     const failed = await harness.get('/')
     expect(failed.status).toBe(500)
     expect(failed.body).toContain('Application error')
-    expect(failed.body).toContain('[plugin:vite:vue]')
-    expect(failed.body).toContain(`Source: ${HOME_HERO}`)
+    expect(failed.body).toContain('vite:vue · SyntaxError')
+    expect(failed.body).toContain(`${HERO_SOURCE}:10:1`)
     harness.state.error = undefined
     harness.state.revision = 'recovered'
     harness.invalidate(HOME_HERO)
@@ -444,8 +534,8 @@ describe('development startup with a broken application runtime', () => {
     const failed = await harness.get('/')
     expect(failed.status).toBe(500)
     expect(failed.body).toContain('Application error')
-    expect(failed.body).toContain('[plugin:vite:vue]')
-    expect(failed.body).toContain(`Source: ${HOME_HERO}`)
+    expect(failed.body).toContain('vite:vue · SyntaxError')
+    expect(failed.body).toContain(`${HERO_SOURCE}:10:1`)
     harness.state.error = undefined
     harness.state.revision = 'recovered'
     harness.invalidate(HOME_HERO)
