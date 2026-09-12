@@ -291,6 +291,11 @@ describe('consumer client bundle boundaries', () => {
   it('budgets actual compressed framework bootstrap with Vue peers externalized', async () => {
     const { audit, entry } = await buildReactivityProbe('bootstrap-budget')
     assertReviewedClientModules(audit, frameworkRoot)
+    // This export-only probe must stay free of rendered application code;
+    // externalizing peers alone does not establish framework-only attribution.
+    expect(audit.chunks.filter((chunk) => entry.files.includes(chunk.file))
+      .flatMap((chunk) => chunk.modules)
+      .filter((module) => module.renderedLength > 0 && module.owner === 'application')).toEqual([])
     expect(entry.external.sort()).toEqual(['vue', 'vue-router'])
     expect(entry.css).toEqual([])
     expect(entry.js.gzip).toBeLessThanOrEqual(PERFORMANCE_BUDGETS.frameworkBootstrapGzip)
