@@ -694,7 +694,11 @@ const applicationRoutesBindingLine = (exported?: string): string => {
   return 'const routes = applicationRoutes.default ?? applicationRoutes.routes'
 }
 
-export const generateSsrClientModule = (root: string, entry: SsrViteApplicationEntry): string => {
+export const generateSsrClientModule = (
+  root: string,
+  entry: SsrViteApplicationEntry,
+  environment: { development?: boolean } = {}
+): string => {
   const rootPath = absoluteImportPath(root, entry.root)
   const mainPath = absoluteImportPath(root, entry.main)
   const routesPath = entry.routesModule
@@ -719,6 +723,12 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
   lines.push(
     `import { ${hydrate ? 'hydrateSsrApplication, mountSpaApplication' : 'mountSpaApplication'} } from 'vue-ssr-lite/client'`
   )
+  lines.push(
+    'try {',
+    '  const observer = globalThis[Symbol.for("vue-ssr-lite:browser-timing")]',
+    `  if (typeof observer === "function") observer({ applicationId: ${JSON.stringify(entry.id)}, phase: "client-entry-evaluated", time: performance.now() })`,
+    '} catch {}',
+  )
   const projectedFields = projection
     ? Object.entries(projection.fields).map(([key, value]) => `  ${key}: ${value},`)
     : []
@@ -737,7 +747,7 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
     '}',
     'export const definition = {',
     `  id: ${JSON.stringify(entry.id)},`,
-    '  __vueSsrLiteDevelopment: import.meta.env.DEV,',
+    `  __vueSsrLiteDevelopment: ${environment.development ?? 'import.meta.env.DEV'},`,
     '  root: App,',
     '  routes,',
     `  defaultRender: ${JSON.stringify(entry.kind)},`,
@@ -751,8 +761,12 @@ export const generateSsrClientModule = (root: string, entry: SsrViteApplicationE
       'export const ready = (async () => {',
       '  const __ssrStateElement = document.getElementById(__ssrStateId)',
       '  if (__ssrStateElement?.textContent) {',
-      ...generateSsrDevelopmentStylesheetHandoff(entry.id).map((line) => `    ${line}`),
-      ...generateSsrDevelopmentRenderedStylesheetHandoff(entry.id).map((line) => `    ${line}`),
+      ...(environment.development === false ? [] : [
+        `    if (${environment.development ?? 'import.meta.env.DEV'}) {`,
+        ...generateSsrDevelopmentStylesheetHandoff(entry.id).map((line) => `      ${line}`),
+        ...generateSsrDevelopmentRenderedStylesheetHandoff(entry.id).map((line) => `      ${line}`),
+        '    }',
+      ]),
       `    await hydrateSsrApplication(definition, { mountSelector: ${mountSelector} })`,
       '    return',
       '  }',
