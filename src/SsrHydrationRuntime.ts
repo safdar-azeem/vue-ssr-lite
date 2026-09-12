@@ -83,8 +83,8 @@ export const createSsrHydrationController = (
   server: boolean = typeof window === 'undefined',
   restoredReconciliation?: Record<string, unknown> | null
 ): SsrHydrationController => {
-  const contributors = new Map<string, () => unknown>()
-  const reconciliationContributors = new Map<string, () => unknown>()
+  const contributors = server ? new Map<string, () => unknown>() : null
+  const reconciliationContributors = server ? new Map<string, () => unknown>() : null
   const disposers: Array<() => void> = []
   const validators: Array<() => void> = []
   const hydrationCompletions: Array<() => void> = []
@@ -101,15 +101,15 @@ export const createSsrHydrationController = (
     read: <T = unknown>(key: string): T | undefined =>
       restoredState ? (restoredState[key] as T | undefined) : undefined,
     contribute: (key, dehydrate) => {
-      if (server && !disposed) contributors.set(key, dehydrate)
+      if (!disposed) contributors?.set(key, dehydrate)
     },
     readReconciliation: <T = unknown>(key: string): T | undefined =>
       reconciliationState ? (reconciliationState[key] as T | undefined) : undefined,
     contributeReconciliation: (key, snapshot) => {
-      if (server && !disposed) reconciliationContributors.set(key, snapshot)
+      if (!disposed) reconciliationContributors?.set(key, snapshot)
     },
     collectReconciliation: () => {
-      if (disposed || !server || reconciliationContributors.size === 0) return undefined
+      if (disposed || !reconciliationContributors?.size) return undefined
       const state: Record<string, unknown> = {}
       for (const [key, snapshot] of reconciliationContributors) state[key] = snapshot()
       return state
@@ -143,7 +143,7 @@ export const createSsrHydrationController = (
       }
     },
     collect: (validate = true) => {
-      if (disposed || contributors.size === 0) return undefined
+      if (disposed || !contributors?.size) return undefined
       if (validate) for (const check of validators) check()
       const state: Record<string, unknown> = {}
       for (const [key, dehydrate] of contributors) {
@@ -154,8 +154,8 @@ export const createSsrHydrationController = (
     dispose: () => {
       if (disposed) return
       disposed = true
-      contributors.clear()
-      reconciliationContributors.clear()
+      contributors?.clear()
+      reconciliationContributors?.clear()
       if (reconciliationState) {
         for (const key of Object.keys(reconciliationState)) delete reconciliationState[key]
       }
