@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ViteDevServer } from 'vite'
+import { resolveSsrDevelopmentControlPlaneFromRoot } from '../SsrConfigCompileRuntime'
 import { readSsrPhaseTimings } from '../SsrDiagnosticsRuntime'
 import {
   resolveApplicationStyleDependencies,
@@ -130,12 +131,24 @@ const createDevelopmentRuntime = (vite: ViteDevServer): SsrRequestDevelopmentRun
 export const createSsrManagedServer = async (
   options: SsrManagedServerOptions
 ): Promise<SsrManagedServer> => {
+  const development = options.vite ? createDevelopmentRuntime(options.vite) : undefined
+  // Prefer the path vueSsrLite already selected for the Vite runtime graph.
+  // That selection includes an explicit `--config` because the CLI injects it
+  // before Vite resolves the plugin. Fall back to the managed/CLI path only
+  // when Vite has not published one. Never rediscover from root alone when
+  // either identity is present.
+  const loadDevelopmentControlPlane = options.production
+    ? undefined
+    : () => resolveSsrDevelopmentControlPlaneFromRoot(
+        options.root,
+        development?.resolvedConfigPath?.() ?? options.config
+      )
   const runtime = await createSsrRequestRuntime({
     production: options.production,
     root: options.root,
-    config: options.config,
     loadRuntime: options.loadRuntime,
-    development: options.vite ? createDevelopmentRuntime(options.vite) : undefined,
+    loadDevelopmentControlPlane,
+    development,
     startupTimings: !options.production ? readSsrPhaseTimings(options) : undefined,
   })
   return runtime.createManagedServer()
