@@ -35,6 +35,7 @@ let fixtureRoot = ''
 let linkedPackageRoot = ''
 let clientOutDir = ''
 let restoreBrowserGlobals: (() => void) | undefined
+let unmountHydratedApplication: (() => void) | undefined
 let releaseMiddlewareGates: (() => void) | undefined
 let dom: JSDOM | undefined
 
@@ -623,6 +624,8 @@ const installBrowserGlobals = (window: JSDOM['window']) => {
 afterEach(async () => {
   releaseMiddlewareGates?.()
   releaseMiddlewareGates = undefined
+  unmountHydratedApplication?.()
+  unmountHydratedApplication = undefined
   restoreBrowserGlobals?.()
   restoreBrowserGlobals = undefined
   dom?.window.close()
@@ -882,13 +885,27 @@ describe('linked-package real SFC navigation loading consumer', () => {
     )?.[1]
     if (!entryUrl) throw new Error('Built consumer client entry is missing.')
     const entryPath = join(clientOutDir, entryUrl.replace(/^\//, ''))
-    await import(`${pathToFileURL(entryPath).href}?test=${Date.now()}`)
+    await import(
+      `${pathToFileURL(entryPath).href}?test=${Date.now()}`
+    )
 
+    // Rollup treats this as an HTML entry and does not retain its source module
+    // exports. State removal is the framework-owned hydration completion signal.
     await waitFor(
       () =>
         !dom!.window.document.getElementById(getSsrStateElementId('app')),
       'The real SFC application did not finish hydration.'
     )
+
+    const hydratedApplication = (
+      dom.window.document as typeof dom.window.document & {
+        __VSSL_NAVIGATION_FIXTURE_APP__?: { unmount(): void }
+      }
+    ).__VSSL_NAVIGATION_FIXTURE_APP__
+    if (!hydratedApplication) {
+      throw new Error('The linked-package client did not mount its Vue application.')
+    }
+    unmountHydratedApplication = () => hydratedApplication.unmount()
     expect(dom.window.document.querySelector('.page-skeleton')).toBeNull()
     expect(
       dom.window.document.querySelector('.vssl-loading-indicator')
@@ -1320,6 +1337,8 @@ describe('linked-package real SFC navigation loading consumer', () => {
     expect(documentRequests).toEqual(['/', '/products'])
     // Undici's Node WebSocket requires Node's Event constructor. The JSDOM
     // navigation phase is complete, so restore host globals before CDP.
+    unmountHydratedApplication()
+    unmountHydratedApplication = undefined
     restoreBrowserGlobals?.()
     restoreBrowserGlobals = undefined
     const requestOffset = documentRequests.length
