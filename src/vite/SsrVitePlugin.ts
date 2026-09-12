@@ -231,6 +231,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let clientOutDir = DEFAULT_CLIENT_OUT_DIR
   let resolveClientModule: ResolveFn | undefined
   let developmentServer: ViteDevServer | undefined
+  let developmentClient = false
   const virtualClients = new Map<string, SsrViteApplicationEntry>()
   const publicClients = new Map<string, SsrViteApplicationEntry>()
   const revisionedAssetIdentitiesByNamingCallback = new WeakMap<
@@ -432,6 +433,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     configResolved(config) {
       root = config.root
+      // Builds have no Vite CSS/HMR ownership runtime, even if a programmatic
+      // caller (for example Vitest) retains NODE_ENV=test and thus env.DEV=true.
+      developmentClient = config.command === 'serve'
       // Vite resolves full URL bases to their effective pathname for dev
       // routing. Keep this distinct from the configured production build base.
       resolvedBase = config.base
@@ -565,7 +569,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         ({ id: candidate }) => candidate === applicationId
       )
       if (!entry) return
-      return generateSsrClientModule(root, entry)
+      return generateSsrClientModule(root, entry, { development: developmentClient })
     },
     generateBundle(outputOptions, bundle) {
       if (this.environment.config.consumer !== 'client') return
