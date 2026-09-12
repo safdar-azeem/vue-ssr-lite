@@ -3,6 +3,10 @@ import {
   serializeManagedHead,
   type ManagedHeadSnapshot,
 } from '../SsrManagedHead'
+import {
+  formatSsrDevelopmentSourceLabel,
+  sourceBaseName,
+} from '../SsrDevelopmentErrorDiagnostic'
 import { isSsrErrorId } from '../SsrErrorDiagnostic'
 import {
   escapeSsrHtml,
@@ -454,24 +458,105 @@ export type SsrErrorDocumentDevelopmentDetails = {
   requestPathname?: string
   pathname?: string
   source?: string
+  displaySource?: string
   plugin?: string
   location?: string
+  line?: number
+  column?: number
   frame?: string
 }
 
 export type SsrErrorDocumentOptions = {
   language?: string
   errorId?: string
+  /** Vite `base` used only to build the development open-in-editor href. */
+  viteBase?: string
   development?: SsrErrorDocumentDevelopmentDetails
 }
 
-const ssrErrorDocument = (
-  language: string,
-  title: string,
-  inner: string,
-  align: 'center' | 'left'
-): string =>
-  `<!doctype html><html lang="${escapeSsrHtml(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeSsrHtml(title)}</title></head><body><main id="main-content" style="min-height:70vh;display:grid;place-items:center;padding:2rem;text-align:${align};font-family:system-ui,sans-serif" tabindex="-1">${inner}</main></body></html>`
+const SSR_ERROR_DOCUMENT_STYLES = [
+  ':root{color-scheme:dark}',
+  '*{box-sizing:border-box}',
+  'html,body{margin:0;background:#090b0e;color:#f5f7fa}',
+  'body{min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;line-height:1.5}',
+  'main{max-width:44rem;margin:0 auto;padding:3.5rem 1.5rem 4rem}',
+  '.eyebrow{margin:0 0 1rem;font-size:.8125rem;font-weight:500;letter-spacing:.01em;color:#8b939e}',
+  'h1{margin:0 0 1.25rem;font-size:clamp(1.35rem,3.4vw,1.85rem);font-weight:650;line-height:1.3;color:#f5f7fa;overflow-wrap:anywhere}',
+  '.stack{display:flex;flex-direction:column;align-items:flex-start;gap:.75rem;margin:0 0 1.5rem}',
+  '.source{display:block;margin:0;font-size:.9375rem;color:#3b82f6;text-decoration:none;overflow-wrap:anywhere}',
+  '.source:hover,.source:focus-visible{text-decoration:underline}',
+  '.source:focus-visible,summary:focus-visible{outline:2px solid #4098ff;outline-offset:3px}',
+  '.pill{display:inline-block;margin:0;padding:.2rem .55rem;border-radius:999px;background:#1a1f27;color:#c4cad3;font-size:.75rem}',
+  'details{margin:0 0 2rem}',
+  'summary{cursor:pointer;color:#8b939e;font-size:.875rem;width:fit-content}',
+  'summary:hover{color:#f5f7fa}',
+  'pre{margin:.85rem 0 0;padding:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;line-height:1.45;color:#c4cad3}',
+  '.meta{margin:2rem 0 0;padding-top:1.25rem;border-top:1px solid #1c2128;font-size:.8125rem;color:#8b939e}',
+  '.meta p{margin:.25rem 0}',
+  '@media (max-width:640px){main{padding:2rem 1.15rem 3rem}h1{font-size:1.35rem}}',
+].join('')
+
+const ssrErrorDocument = (language: string, title: string, inner: string): string =>
+  `<!doctype html><html lang="${escapeSsrHtml(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeSsrHtml(title)}</title><style>${SSR_ERROR_DOCUMENT_STYLES}</style></head><body><main id="main-content" tabindex="-1">${inner}</main></body></html>`
+
+const SSR_OPEN_IN_EDITOR_SEGMENT = '__open-in-editor'
+const SSR_OPEN_IN_EDITOR_SCRIPT =
+  '<script>document.addEventListener("click",function(event){var link=event.target&&event.target.closest?event.target.closest("a[data-ssr-open-source]"):null;if(!link)return;event.preventDefault();fetch(link.href,{credentials:"same-origin"}).catch(function(){})});</script>'
+
+const normalizeDevelopmentViteBase = (base?: string): string => {
+  if (!base || base === '/' || base.includes('..')) return '/'
+  if (base.startsWith('//') || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(base)) return '/'
+  return base.endsWith('/') ? base : `${base}/`
+}
+
+const isSafeOpenInEditorFile = (value: string): boolean => {
+  if (!value || value.includes('\0') || value.includes('..')) return false
+  if (value.startsWith('/') || value.startsWith('\\')) return false
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return false
+  return true
+}
+
+export const createSsrDevelopmentOpenInEditorHref = (
+  details: Pick<SsrErrorDocumentDevelopmentDetails, 'displaySource' | 'line' | 'column'>,
+  viteBase?: string
+): string | undefined => {
+  const file = details.displaySource
+  if (!file || !isSafeOpenInEditorFile(file)) return undefined
+  const located = formatSsrDevelopmentSourceLabel(file, details.line, details.column)
+  if (!located) return undefined
+  return `${normalizeDevelopmentViteBase(viteBase)}${SSR_OPEN_IN_EDITOR_SEGMENT}?file=${encodeURIComponent(located)}`
+}
+
+const developmentSourceLabel = (details: SsrErrorDocumentDevelopmentDetails): string => {
+  const source = details.displaySource || (details.source ? sourceBaseName(details.source) : '')
+  return source
+    ? formatSsrDevelopmentSourceLabel(source, details.line, details.column)
+    : details.location ?? ''
+}
+
+const developmentSourceHtml = (
+  details: SsrErrorDocumentDevelopmentDetails,
+  viteBase?: string
+): string => {
+  const label = developmentSourceLabel(details)
+  if (!label) return ''
+  const href = createSsrDevelopmentOpenInEditorHref(details, viteBase)
+  return href
+    ? `<a class="source" data-ssr-open-source href="${escapeSsrHtml(href)}">${escapeSsrHtml(label)}</a>`
+    : `<span class="source">${escapeSsrHtml(label)}</span>`
+}
+
+const developmentPill = (plugin?: string, name?: string): string => {
+  const label = plugin && name ? `${plugin} · ${name}` : plugin || name || ''
+  return label ? `<p class="pill">${escapeSsrHtml(label)}</p>` : ''
+}
+
+const developmentDetails = (frame?: string, stack?: string): string => {
+  if (!frame && !stack) return ''
+  const pre = (value?: string) =>
+    value ? `<pre>${escapeSsrHtml(value)}</pre>` : ''
+  return `<details><summary>Show details</summary>${pre(frame)}${pre(stack)}</details>`
+}
 
 export const renderSsrErrorDocument = (
   title: string,
@@ -488,33 +573,34 @@ export const renderSsrErrorDocument = (
     const name = options.development.name
     const detail = options.development.message ?? message
     const plugin = options.development.plugin
-    const source = options.development.source
-    const location = options.development.location
     const requestPathname = options.development.requestPathname ?? options.development.pathname
-    const frame = options.development.frame
-    const stack = options.development.stack
-    const pre = (value?: string) =>
-      value
-        ? `<pre style="overflow:auto;white-space:pre-wrap;text-align:left">${escapeSsrHtml(value)}</pre>`
-        : ''
-    const labeled = (label: string, value?: string) =>
-      value ? `<p>${escapeSsrHtml(label)}: ${escapeSsrHtml(value)}</p>` : ''
-    return ssrErrorDocument(language, title, `<div style="max-width:56rem;width:100%"><h1>${escapeSsrHtml(title)}</h1>${
-      plugin ? `<p>[plugin:${escapeSsrHtml(plugin)}]</p>` : ''
+    const sourceHtml = developmentSourceHtml(options.development, options.viteBase)
+    const pillHtml = developmentPill(plugin, name)
+    const stackHtml = sourceHtml || pillHtml
+      ? `<div class="stack">${sourceHtml}${pillHtml}</div>`
+      : ''
+    const openScript = sourceHtml.includes('data-ssr-open-source')
+      ? SSR_OPEN_IN_EDITOR_SCRIPT
+      : ''
+    const meta = [
+      requestPathname ? `<p>Request: ${escapeSsrHtml(requestPathname)}</p>` : '',
+      errorIdHtml,
+    ].join('')
+    return ssrErrorDocument(language, title, `${
+      `<p class="eyebrow">${escapeSsrHtml(title)}</p>`
+    }<h1>${escapeSsrHtml(detail)}</h1>${
+      stackHtml
     }${
-      name ? `<p><strong>${escapeSsrHtml(name)}</strong></p>` : ''
-    }<p>${escapeSsrHtml(detail)}</p>${
-      labeled('Source', source)
+      developmentDetails(options.development.frame, options.development.stack)
     }${
-      labeled('Location', location)
-    }${
-      labeled('Request', requestPathname)
-    }${errorIdHtml}${pre(frame)}${pre(stack)}</div>`, 'left')
+      meta ? `<div class="meta">${meta}</div>` : ''
+    }${openScript}`)
   }
   return ssrErrorDocument(
     language,
     title,
-    `<div><h1>${escapeSsrHtml(title)}</h1><p>${escapeSsrHtml(message)}</p>${errorIdHtml}<p><a href="/">Return home</a></p></div>`,
-    'center'
+    `<h1>${escapeSsrHtml(title)}</h1><p>${escapeSsrHtml(message)}</p>${
+      errorIdHtml ? `<div class="meta">${errorIdHtml}</div>` : ''
+    }`
   )
 }
