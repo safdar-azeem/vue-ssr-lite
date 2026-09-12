@@ -17,6 +17,7 @@ Small, fast, and simple.
 - Request-aware route CSS and module preloads
 - Canonical URLs, Open Graph, Twitter Cards, and JSON-LD
 - First-party SSR-aware `useFetch()` with optional await, hydration, reactive state, and request-safe caching
+- Zero-config Vercel deployment with automatic SSR runtime generation
 
 # Installation
 
@@ -1235,18 +1236,18 @@ When no `server.logger` is configured, production and other operator consoles st
 
 A custom `SsrLogger` keeps receiving structured details on the existing `(event, details)` methods. Error details include:
 
-| Field | Meaning |
-| --- | --- |
-| `errorId` | Correlation id shared with the public page |
-| `requestId` | Request id |
-| `applicationId` / `entryId` | Selected application |
-| `pathname` | Sanitized path |
-| `phase` / `reason` / `code` / `artifact` | Framework classification when applicable |
-| `package` / `module` / `export` | Allowlisted runtime-load identifiers |
-| `errorType` | Error name |
-| `error` | Safe public summary |
-| `message` | Exception message (operator-confidential) |
-| `stack` | Exception stack when present (operator-confidential) |
+| Field                                    | Meaning                                              |
+| ---------------------------------------- | ---------------------------------------------------- |
+| `errorId`                                | Correlation id shared with the public page           |
+| `requestId`                              | Request id                                           |
+| `applicationId` / `entryId`              | Selected application                                 |
+| `pathname`                               | Sanitized path                                       |
+| `phase` / `reason` / `code` / `artifact` | Framework classification when applicable             |
+| `package` / `module` / `export`          | Allowlisted runtime-load identifiers                 |
+| `errorType`                              | Error name                                           |
+| `error`                                  | Safe public summary                                  |
+| `message`                                | Exception message (operator-confidential)            |
+| `stack`                                  | Exception stack when present (operator-confidential) |
 
 Private logs are operator-confidential. The framework does not recursively parse `Error.message` for secrets, and it never automatically logs headers, cookies, bodies, config, `process.env`, or `Error.cause`.
 
