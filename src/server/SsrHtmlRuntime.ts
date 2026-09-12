@@ -474,12 +474,59 @@ export type SsrErrorDocumentOptions = {
   development?: SsrErrorDocumentDevelopmentDetails
 }
 
+export type SsrPublicErrorStatusCode = 400 | 421 | 500 | 503 | 504
+
+export interface SsrPublicErrorPresentation {
+  readonly statusCode: SsrPublicErrorStatusCode
+  readonly statusText: string
+  readonly heading: string
+  readonly description: string
+}
+
+const SSR_PUBLIC_ERROR_PRESENTATIONS = {
+  400: {
+    statusCode: 400,
+    statusText: 'Bad Request',
+    heading: 'Invalid request',
+    description: 'The request could not be processed.',
+  },
+  421: {
+    statusCode: 421,
+    statusText: 'Misdirected Request',
+    heading: 'Host not available',
+    description: 'This host is not available.',
+  },
+  500: {
+    statusCode: 500,
+    statusText: 'Internal Server Error',
+    heading: 'Something went wrong',
+    description: 'The request could not be completed.',
+  },
+  503: {
+    statusCode: 503,
+    statusText: 'Service Unavailable',
+    heading: 'Service unavailable',
+    description: 'The service is temporarily unavailable. Please try again later.',
+  },
+  504: {
+    statusCode: 504,
+    statusText: 'Gateway Timeout',
+    heading: 'Request timed out',
+    description: 'The server took too long to respond. Please try again.',
+  },
+} as const satisfies Record<SsrPublicErrorStatusCode, SsrPublicErrorPresentation>
+
+export const resolveSsrPublicErrorPresentation = (
+  statusCode: SsrPublicErrorStatusCode
+): SsrPublicErrorPresentation => SSR_PUBLIC_ERROR_PRESENTATIONS[statusCode]
+
 const SSR_ERROR_DOCUMENT_STYLES = [
   ':root{color-scheme:dark}',
   '*{box-sizing:border-box}',
   'html,body{margin:0;background:#000;color:#f5f7fa}',
   'body{min-height:100vh;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;line-height:1.5}',
-  'main{max-width:60rem;margin:0 auto;padding:3.5rem 1.5rem 4rem;width:max-content}',
+  'main{max-width:min(100%,60rem);margin:0 auto;padding:3.5rem 1.5rem 4rem;width:max-content}',
+  '.status{margin:0 0 .6rem;font-size:.8125rem;font-weight:500;letter-spacing:.01em;color:#c4cad3}',
   '.eyebrow{margin:0 0 0.6rem;font-size:.8125rem;font-weight:500;letter-spacing:.01em;color:#ff0000}',
   'h1{margin:0 0 1rem;font-size:clamp(1.35rem,3.4vw,1.85rem);font-weight:650;line-height:1.3;color:#f5f7fa;overflow-wrap:anywhere}',
   '.stack{display:flex;flex-direction:column;align-items:flex-start;gap:1rem;margin:0 0 1.5rem}',
@@ -606,5 +653,22 @@ export const renderSsrErrorDocument = (
     `<h1>${escapeSsrHtml(title)}</h1><p>${escapeSsrHtml(message)}</p>${
       errorIdHtml ? `<div class="meta">${errorIdHtml}</div>` : ''
     }`
+  )
+}
+
+export const renderSsrPublicErrorDocument = (
+  statusCode: SsrPublicErrorStatusCode,
+  options: Pick<SsrErrorDocumentOptions, 'language' | 'errorId'> = {}
+): string => {
+  const presentation = resolveSsrPublicErrorPresentation(statusCode)
+  const language = options.language ?? 'en'
+  const errorId = isSsrErrorId(options.errorId) ? options.errorId : undefined
+  const metaHtml = `<div class="meta">${
+    errorId ? `<p>Error ID: ${escapeSsrHtml(errorId)}</p>` : ''
+  }</div>`
+  return ssrErrorDocument(
+    language,
+    `${presentation.statusCode} ${presentation.statusText}`,
+    `<p class="status">${presentation.statusCode} · ${escapeSsrHtml(presentation.statusText)}</p><h1>${escapeSsrHtml(presentation.heading)}</h1><p>${escapeSsrHtml(presentation.description)}</p>${metaHtml}`
   )
 }
