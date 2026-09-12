@@ -1,4 +1,4 @@
-import { shallowRef, type InjectionKey, type ShallowRef } from 'vue'
+import { shallowRef, type ShallowRef } from 'vue'
 import type { SsrHydrationController } from '../../../SsrHydrationRuntime'
 import type { SsrRequestContext } from '../../../SsrRuntimeTypes'
 import type {
@@ -26,9 +26,7 @@ import {
 } from './SsrFetchHydration'
 import { resolveFetchIdentity, type FetchIdentity } from './SsrFetchIdentity'
 
-export const SSR_FETCH_RUNTIME = Symbol.for(
-  'vue-ssr:fetch-runtime'
-) as InjectionKey<SsrFetchRuntime>
+export { SSR_FETCH_RUNTIME } from './SsrFetchRuntimeScope'
 
 interface LogicalExecution extends FetchExecutionObserver {
   cancel(): void
