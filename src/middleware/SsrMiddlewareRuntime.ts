@@ -1,7 +1,9 @@
 import type { App } from 'vue'
 import {
   START_LOCATION,
+  stringifyQuery,
   type RouteLocationNormalized,
+  type RouteLocationRaw,
   type Router,
 } from 'vue-router'
 import type { SsrRequestContext, SsrRenderRequest } from '../SsrRuntimeTypes'
@@ -31,6 +33,10 @@ export interface SsrMiddlewareExecutionController {
     router: Router
     context: SsrRequestContext<any, any>
     middleware?: readonly Middleware<any>[]
+    /** @internal Preserve guard order when activating browser execution. */
+    registerBeforeEach?: Router['beforeEach']
+    registerAfterEach?: Router['afterEach']
+    registerOnError?: Router['onError']
   }): SsrMiddlewareInstallation
   navigationOutcome(target?: string): SsrMiddlewareNavigationOutcome
   /** @internal Ends eligibility for framework-owned initial navigation replay. */
@@ -89,6 +95,60 @@ const validateBrowserDocumentRedirect = (location: string, origin: string): stri
 const abortReason = (): DOMException =>
   new DOMException('The middleware navigation was superseded.', 'AbortError')
 
+const sameRouteValues = (
+  left: Record<string, unknown>,
+  right: Record<string, unknown>
+): boolean => {
+  const keys = Object.keys(left)
+  if (keys.length !== Object.keys(right).length) return false
+  return keys.every((key) => {
+    const a = left[key]
+    const b = right[key]
+    return Array.isArray(a) && Array.isArray(b)
+      ? a.length === b.length && a.every((value, index) => value === b[index])
+      : a === b
+  })
+}
+
+/**
+ * Vue Router considers an alias URL of the active record a duplicate. A guard's
+ * returned `force` flag is overwritten by the original navigation, so perform
+ * that one forced navigation while the rejected navigation is still suspended.
+ * Exact-current and ordinary redirects retain native router behavior.
+ */
+const applyBrowserMiddlewareRedirect = (
+  router: Router,
+  location: RouteLocationRaw,
+  forcedTargets: Set<string>
+): RouteLocationRaw | true | Promise<false> => {
+  const current = router.currentRoute.value
+  const target = router.resolve(location)
+  const serializeQuery = router.options.stringifyQuery ?? stringifyQuery
+  const sameRecords = target.matched.length > 0 &&
+    target.matched.length === current.matched.length &&
+    target.matched.every((record, index) =>
+      (record.aliasOf ?? record) ===
+      (current.matched[index]?.aliasOf ?? current.matched[index])
+    )
+  const duplicatedExceptForAliasPath = sameRecords &&
+    target.fullPath !== current.fullPath &&
+    sameRouteValues(target.params, current.params) &&
+    serializeQuery(target.query) === serializeQuery(current.query) &&
+    target.hash === current.hash
+  if (!duplicatedExceptForAliasPath) return location
+  // Application middleware is evaluated for the forced navigation too. If it
+  // returns the destination already being forced, let that navigation finish
+  // instead of recursively starting the same redirect.
+  if (forcedTargets.has(target.fullPath)) return true
+  const forced: RouteLocationRaw = typeof location === 'string'
+    ? { path: location, force: true }
+    : { ...location, force: true }
+  forcedTargets.add(target.fullPath)
+  return router.push(forced)
+    .then(() => false as const)
+    .finally(() => { forcedTargets.delete(target.fullPath) })
+}
+
 export const createSsrMiddlewareExecutionController = (options: {
   server: boolean
   request: SsrRenderRequest<any>
@@ -107,6 +167,7 @@ export const createSsrMiddlewareExecutionController = (options: {
     string,
     Exclude<SsrMiddlewareNavigationOutcome, null>
   >()
+  const forcedBrowserRedirects = new Set<string>()
   const installations = new Set<SsrMiddlewareInstallation>()
   let nextInstallationId = 1
   let navigationSequence = 0
@@ -249,7 +310,12 @@ export const createSsrMiddlewareExecutionController = (options: {
   }
 
   return {
-    install({ app, router, context, middleware = [] }) {
+    install({
+      app, router, context, middleware = [],
+      registerBeforeEach = router.beforeEach.bind(router),
+      registerAfterEach = router.afterEach.bind(router),
+      registerOnError = router.onError.bind(router),
+    }) {
       if (disposed) {
         throw new Error('[vue-ssr-lite] Cannot install a disposed middleware controller.')
       }
@@ -287,7 +353,7 @@ export const createSsrMiddlewareExecutionController = (options: {
           : undefined
       }
 
-      const removeBefore = router.beforeEach(async (to, from) => {
+      const removeBefore = registerBeforeEach(async (to, from) => {
         for (const pendingTarget of [...transactions.keys()]) {
           rollback(pendingTarget)
         }
@@ -349,7 +415,13 @@ export const createSsrMiddlewareExecutionController = (options: {
           return false
         }
         if (plan.kind === 'redirect') {
-          if (!options.server) return plan.location
+          if (!options.server) {
+            return applyBrowserMiddlewareRedirect(
+              router,
+              plan.location,
+              forcedBrowserRedirects
+            )
+          }
           context.response.redirect = {
             location: router.resolve(plan.location).fullPath,
             statusCode: 302,
@@ -359,7 +431,13 @@ export const createSsrMiddlewareExecutionController = (options: {
           return false
         }
         if (!options.server) {
-          if (!plan.redirect.external) return plan.redirect.location
+          if (!plan.redirect.external) {
+            return applyBrowserMiddlewareRedirect(
+              router,
+              plan.redirect.location,
+              forcedBrowserRedirects
+            )
+          }
           const target = validateBrowserDocumentRedirect(
             resolveSpecialLocation(router, plan.redirect),
             context.siteOrigin
@@ -376,7 +454,7 @@ export const createSsrMiddlewareExecutionController = (options: {
         publishOutcome('redirect')
         return false
       })
-      const removeAfter = router.afterEach((to, _from, failure) => {
+      const removeAfter = registerAfterEach((to, _from, failure) => {
         const terminal = resolveTerminalTarget(to)
         if (!terminal) return
         if (failure || terminal.redirected) rollback(terminal.target)
@@ -393,7 +471,7 @@ export const createSsrMiddlewareExecutionController = (options: {
           stagedCache.delete(terminal.target)
         }
       })
-      const removeError = router.onError((_error, to) => {
+      const removeError = registerOnError((_error, to) => {
         const terminal = resolveTerminalTarget(to)
         if (terminal) rollback(terminal.target)
       })
@@ -433,6 +511,7 @@ export const createSsrMiddlewareExecutionController = (options: {
       browserInitialReplay.clear()
       browserInitialTargets.clear()
       browserInitialOutcomes.clear()
+      forcedBrowserRedirects.clear()
       outcome = null
       outcomeTarget = undefined
     },
@@ -448,6 +527,7 @@ export const createSsrMiddlewareExecutionController = (options: {
       browserInitialReplay.clear()
       browserInitialTargets.clear()
       browserInitialOutcomes.clear()
+      forcedBrowserRedirects.clear()
       outcome = null
       outcomeTarget = undefined
     },
