@@ -42,6 +42,24 @@ const writeDevelopmentConsole = (text: string): void => {
   console.log(text)
 }
 
+const SSR_DEVELOPMENT_ERROR_LABEL = 'ERROR:'
+const ANSI_BOLD_RED = '\u001b[1;31m'
+const ANSI_RESET = '\u001b[0m'
+
+const shouldColorSsrDevelopmentConsole = (): boolean => {
+  if (process.env.NO_COLOR) return false
+  const force = process.env.FORCE_COLOR
+  if (force === '0') return false
+  if (force) return true
+  if (process.env.CI) return false
+  return process.stdout.isTTY === true
+}
+
+const formatSsrDevelopmentErrorLabel = (): string =>
+  shouldColorSsrDevelopmentConsole()
+    ? `${ANSI_BOLD_RED}${SSR_DEVELOPMENT_ERROR_LABEL}${ANSI_RESET}`
+    : SSR_DEVELOPMENT_ERROR_LABEL
+
 const visibleSource = (details: SsrDevelopmentErrorDetails): string =>
   details.displaySource || (details.source ? sourceBaseName(details.source) : '')
 
@@ -58,7 +76,7 @@ export const formatSsrDevelopmentConsoleFailure = (
 ): string => {
   const thrown = describeSsrThrownValue(error)
   const details = readSsrDevelopmentErrorDetails(error, { root })
-  const lines = [`ERROR: ${thrown.message}`]
+  const lines = [`${formatSsrDevelopmentErrorLabel()} ${thrown.message}`]
   if (details.plugin) lines.push(`Plugin: ${details.plugin}`)
   const file = formatSsrDevelopmentSourceLabel(
     visibleSource(details),
