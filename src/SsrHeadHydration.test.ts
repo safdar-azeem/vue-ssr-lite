@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, type App } from 'vue'
 import { RouterView } from 'vue-router'
 import { useSeo } from './extensions/seo/useSeo'
 import { hydrateSsrApplication } from './SsrBrowserRuntime'
@@ -31,6 +31,7 @@ describe('client head hydration', () => {
     })
     document.body.append(state)
     window.history.replaceState({}, '', '/')
+    let mounted!: App
 
     await hydrateSsrApplication({
       id: 'hydrate-head',
@@ -51,6 +52,7 @@ describe('client head hydration', () => {
         },
       ],
       seo: { siteUrl: 'https://ex.test' },
+      install: ({ app }) => { mounted = app },
     })
 
     expect(document.querySelectorAll('title')).toHaveLength(1)
@@ -65,5 +67,6 @@ describe('client head hydration', () => {
     document.documentElement.removeAttribute('lang')
     document.documentElement.removeAttribute('dir')
     document.documentElement.removeAttribute('data-theme')
+    mounted.unmount()
   })
 })
