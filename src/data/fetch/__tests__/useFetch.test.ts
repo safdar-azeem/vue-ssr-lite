@@ -13,7 +13,8 @@ import { createTestDomain, createTestRenderRequest } from '../../../SsrTestFixtu
 import { getSsrStateElementId } from '../../../SsrSerialization'
 import { RouterView } from '../../../navigation/RouterView'
 import { SSR_NAVIGATION_RUNTIME } from '../../../navigation/SsrNavigationRuntime'
-import { SSR_FETCH_RUNTIME, type SsrFetchRuntime } from '../runtime/SsrFetchRuntime'
+import type { SsrFetchRuntime } from '../runtime/SsrFetchRuntime'
+import { resolveSsrFetchRuntime } from '../runtime/resolveSsrFetchRuntime'
 import { FETCH_HYDRATION_KEY, type HydratedFetchRecord } from '../runtime/SsrFetchHydration'
 import { setContext } from '../context/setContext'
 import { useFetch } from '../composables/useFetch'
@@ -199,7 +200,7 @@ describe('optional await in SSR and the browser', () => {
     vi.stubGlobal('fetch', fetcher)
     const callback = vi.fn()
     const root = defineComponent({ setup() {
-      const runtime = inject(SSR_FETCH_RUNTIME)!
+      const runtime = resolveSsrFetchRuntime()!
       const result = useFetch<string>('/api/items', {
         headers: { authorization: 'Bearer RECONCILIATION_SECRET' },
         onDone: callback,
@@ -222,7 +223,7 @@ describe('optional await in SSR and the browser', () => {
     const fetcher = vi.fn(async () => jsonResponse({ name: 'User A' }))
     vi.stubGlobal('fetch', fetcher)
     const root = defineComponent({ setup() {
-      const runtime = inject(SSR_FETCH_RUNTIME)!
+      const runtime = resolveSsrFetchRuntime()!
       const authorization = runtime.context.resolution.pass === 0
         ? 'Bearer USER_A_SECRET'
         : 'Bearer USER_B_SECRET'
@@ -256,7 +257,7 @@ describe('optional await in SSR and the browser', () => {
     vi.stubGlobal('fetch', fetcher)
     let privateKey = ''
     const root = defineComponent({ setup() {
-      const runtime = inject(SSR_FETCH_RUNTIME)!
+      const runtime = resolveSsrFetchRuntime()!
       const pass = runtime.context.resolution.pass
       const result = pass === 0
         ? useFetch<string>('/api/private', {
@@ -292,7 +293,7 @@ describe('optional await in SSR and the browser', () => {
     const fetcher = vi.fn(async () => jsonResponse('restored-private-data'))
     vi.stubGlobal('fetch', fetcher)
     const root = defineComponent({ setup() {
-      const runtime = inject(SSR_FETCH_RUNTIME)!
+      const runtime = resolveSsrFetchRuntime()!
       const pass = runtime.context.resolution.pass
       const result = pass === 1
         ? undefined
@@ -319,7 +320,7 @@ describe('optional await in SSR and the browser', () => {
     const fetcher = vi.fn(async () => jsonResponse('User A private data'))
     vi.stubGlobal('fetch', fetcher)
     const root = defineComponent({ setup() {
-      const runtime = inject(SSR_FETCH_RUNTIME)!
+      const runtime = resolveSsrFetchRuntime()!
       const pass = runtime.context.resolution.pass
       const result = pass === 1
         ? undefined
@@ -376,7 +377,7 @@ describe('initial application hydration and navigation', () => {
 
     await hydrateSsrApplication({ ...definition, install({ app: installed }) {
       app = installed
-      runtime = app.runWithContext(() => inject(SSR_FETCH_RUNTIME)!)
+      runtime = app.runWithContext(() => resolveSsrFetchRuntime()!)
     } })
     disposers.push(() => app.unmount())
     expect(document.querySelector('main')?.textContent).toBe('nested-products')
@@ -417,7 +418,7 @@ describe('initial application hydration and navigation', () => {
     browser = true
     await hydrateSsrApplication({ ...definition, install({ app: installed }) {
       app = installed
-      runtime = app.runWithContext(() => inject(SSR_FETCH_RUNTIME)!)
+      runtime = app.runWithContext(() => resolveSsrFetchRuntime()!)
     } })
     disposers.push(() => app.unmount())
     expect(document.querySelector('main')?.textContent).toBe('User A')
@@ -465,7 +466,7 @@ describe('initial application hydration and navigation', () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     await hydrateSsrApplication({ ...definition, install({ app: installed }) {
       app = installed
-      runtime = app.runWithContext(() => inject(SSR_FETCH_RUNTIME)!)
+      runtime = app.runWithContext(() => resolveSsrFetchRuntime()!)
     } })
     disposers.push(() => app.unmount())
     expect(document.querySelector('main')?.textContent).toBe('SSR-products')
@@ -536,7 +537,7 @@ describe('initial application hydration and navigation', () => {
     document.getElementById(stateId)!.textContent = JSON.stringify(rendered.hydrationState)
     let runtime!: SsrFetchRuntime
     await expect(hydrateSsrApplication({ id: 'failed-hydration', root, install({ app }) {
-      runtime = app.runWithContext(() => inject(SSR_FETCH_RUNTIME)!)
+      runtime = app.runWithContext(() => resolveSsrFetchRuntime()!)
       throw new Error('installation failed')
     } })).rejects.toThrow('installation failed')
     expect(runtime.cache.entries.size).toBe(0)
@@ -549,7 +550,7 @@ describe('initial application hydration and navigation', () => {
     let result!: UseFetchResult<string>
     let runtime!: SsrFetchRuntime
     const created = await mount(defineComponent({ setup() {
-      runtime = inject(SSR_FETCH_RUNTIME)!
+      runtime = resolveSsrFetchRuntime()!
       result = useFetch<string>('/api/items', { server: false })
       // A sync watcher that refreshes during teardown must not resurrect work.
       watch(result.pending, (pending) => { if (!pending) void result.refresh() }, { flush: 'sync' })
@@ -587,7 +588,7 @@ describe('initial application hydration and navigation', () => {
     const hydration = hydrateSsrApplication({ id: 'async-failure', root, install({ app: installed }) {
       app = installed
       app.config.errorHandler = () => undefined
-      runtime = app.runWithContext(() => inject(SSR_FETCH_RUNTIME)!)
+      runtime = app.runWithContext(() => resolveSsrFetchRuntime()!)
     } })
     // Attach the rejection assertion before releasing the failing setup gate.
     const failed = expect(hydration).rejects.toThrow('async setup failed')
