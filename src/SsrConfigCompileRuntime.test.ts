@@ -9,6 +9,10 @@ import {
   extractSsrViteEntries,
   generateSsrClientModule,
   generateSsrRuntimeModule,
+  resolveSsrDevelopmentControlPlane,
+  resolveSsrDevelopmentControlPlaneFromRoot,
+  resolveSsrSelectedConfigPath,
+  SSR_CONFLICTING_CONFIG_IDENTITY,
   loadSsrConfigFile,
   normalizeRobotsConfig,
   normalizeSsrConfig,
@@ -626,6 +630,18 @@ describe('defineServer application architecture', () => {
     expect(ssrClient).not.toContain('src/modules/storefront/app.ts')
   })
 
+  it('resolves development listen options without binding application shells', async () => {
+    const logger = { error: () => undefined }
+    const options = await resolveSsrDevelopmentControlPlane(
+      { default: () => ({ server: { port: 0, host: '127.0.0.1', logger } }) },
+      { root: '/app' }
+    )
+    expect(options.port).toBe(0)
+    expect(options.host).toBe('127.0.0.1')
+    expect(options.logger).toBe(logger)
+    expect(options).not.toHaveProperty('applications')
+  })
+
   it('projects universal runtime fields into the generated client', () => {
     const client = generateSsrClientModule('/app', {
       id: 'app',
@@ -997,5 +1013,149 @@ describe('defineServer({ routes }) config loading', () => {
     expect(message).toBe(DEFINE_SERVER_ROUTES_ERROR)
     expect(message).not.toMatch(/ERR_MODULE_NOT_FOUND/)
     expect(message).not.toMatch(/Cannot find package '@\/constants'/)
+  })
+})
+
+describe('development control-plane isolation', () => {
+  let root = ''
+
+  afterEach(async () => {
+    if (root) await rm(root, { recursive: true, force: true })
+    root = ''
+  })
+
+  it('keeps configured listen options when server.ts reaches a broken Vue route module', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-control-plane-graph-'))
+    await mkdir(join(root, 'node_modules/vue-ssr-lite'), { recursive: true })
+    await mkdir(join(root, 'src/modules/website'), { recursive: true })
+    await writeFile(
+      join(root, 'node_modules/vue-ssr-lite/package.json'),
+      '{"name":"vue-ssr-lite","type":"module","exports":"./index.js"}\n'
+    )
+    await writeFile(
+      join(root, 'node_modules/vue-ssr-lite/index.js'),
+      'export const defineApplication = (config) => config\n'
+    )
+    await writeFile(join(root, 'src/main.ts'), 'export default () => {}\n')
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'src/modules/website/Home.vue'),
+      '<template><div>home</div></template>\n<template><div>duplicate</div></template>\n'
+    )
+    await writeFile(
+      join(root, 'src/modules/website/routes.ts'),
+      `import Home from './Home.vue'\nexport default [{ path: '/', component: Home }]\n`
+    )
+    await writeFile(
+      join(root, 'src/modules/website/app.ts'),
+      "import { defineApplication } from 'vue-ssr-lite'\nimport routes from './routes'\nexport default defineApplication({ name: 'website', routes })\n"
+    )
+    await writeFile(
+      join(root, 'server.ts'),
+      `import website from './src/modules/website/app'\nexport default {\n  server: { host: '127.0.0.1', port: 4211 },\n  applications: [website],\n}\n`
+    )
+    const plane = await resolveSsrDevelopmentControlPlaneFromRoot(root)
+    expect(plane.host).toBe('127.0.0.1')
+    expect(plane.port).toBe(4211)
+  })
+
+  it('does not replace an invalid control-plane config with default listen options', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-control-plane-invalid-'))
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src/main.ts'), 'export default () => {}\n')
+    await writeFile(join(root, 'src/App.vue'), '<template><div /></template>\n')
+    await writeFile(
+      join(root, 'server.ts'),
+      'export default { server: { host: "127.0.0.1", port: 4211, maxConcurrentSsrRequests: 0 } }\n'
+    )
+    await expect(resolveSsrDevelopmentControlPlaneFromRoot(root)).rejects.toThrow(
+      'server.maxConcurrentSsrRequests must be a finite positive integer.'
+    )
+  })
+
+  it('rejects an unsupported server.ts routes projection instead of using default listen options', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-control-plane-routes-'))
+    await writeFile(
+      join(root, 'server.ts'),
+      "export default { server: { host: '127.0.0.1', port: 4211 }, routes: [{ path: '/' }] }\n"
+    )
+    await expect(resolveSsrDevelopmentControlPlaneFromRoot(root)).rejects.toThrow(
+      DEFINE_SERVER_ROUTES_ERROR
+    )
+  })
+
+  it('rejects an invalid server.ts export instead of using default listen options', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-control-plane-export-'))
+    await writeFile(join(root, 'server.ts'), "export default 'not-a-config'\n")
+    await expect(resolveSsrDevelopmentControlPlaneFromRoot(root)).rejects.toThrow(
+      'The server.ts module must export an object.'
+    )
+  })
+})
+
+describe('resolveSsrSelectedConfigPath', () => {
+  let root = ''
+
+  afterEach(async () => {
+    if (root) await rm(root, { recursive: true, force: true })
+    root = ''
+  })
+
+  const writeConfigs = async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-selected-config-'))
+    await mkdir(join(root, 'config'), { recursive: true })
+    await writeFile(join(root, 'server.ts'), 'export default { server: { port: 4173 } }\n')
+    await writeFile(
+      join(root, 'config/platform.ts'),
+      'export default { server: { port: 4211 } }\n'
+    )
+    return {
+      server: join(root, 'server.ts'),
+      platform: join(root, 'config/platform.ts'),
+    }
+  }
+
+  it('uses an explicit CLI path instead of discovering server.ts', async () => {
+    const { platform } = await writeConfigs()
+    await expect(resolveSsrSelectedConfigPath(root, { cli: platform })).resolves.toBe(platform)
+    await expect(
+      resolveSsrSelectedConfigPath(root, { cli: 'config/platform.ts' })
+    ).resolves.toBe(platform)
+  })
+
+  it('uses an explicit plugin path when the CLI did not select one', async () => {
+    const { platform } = await writeConfigs()
+    await expect(
+      resolveSsrSelectedConfigPath(root, { plugin: './config/platform.ts' })
+    ).resolves.toBe(platform)
+  })
+
+  it('discovers server.ts when neither identity is explicit', async () => {
+    const { server } = await writeConfigs()
+    await expect(resolveSsrSelectedConfigPath(root)).resolves.toBe(server)
+  })
+
+  it('accepts matching CLI and plugin paths', async () => {
+    const { platform } = await writeConfigs()
+    await expect(
+      resolveSsrSelectedConfigPath(root, {
+        cli: platform,
+        plugin: './config/platform.ts',
+      })
+    ).resolves.toBe(platform)
+  })
+
+  it('rejects conflicting explicit CLI and plugin paths', async () => {
+    const { server, platform } = await writeConfigs()
+    await expect(
+      resolveSsrSelectedConfigPath(root, { cli: platform, plugin: server })
+    ).rejects.toThrow(SSR_CONFLICTING_CONFIG_IDENTITY)
+  })
+
+  it('does not fall through to server.ts when an explicit CLI path is missing', async () => {
+    await writeConfigs()
+    await expect(
+      resolveSsrSelectedConfigPath(root, { cli: 'config/missing.ts' })
+    ).rejects.toThrow('vue-ssr-lite could not find the configured server file')
   })
 })
