@@ -330,6 +330,7 @@ import website from './src/modules/website/app'
 import app from './src/modules/app/app'
 import admin from './src/modules/admin/app'
 import docs from './src/modules/docs/app'
+
 export default defineServer({
   server: { port: 4211 },
   applications: [website, app, admin, docs],
