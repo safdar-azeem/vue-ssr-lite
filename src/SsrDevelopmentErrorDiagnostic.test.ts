@@ -104,7 +104,6 @@ describe('SsrDevelopmentErrorDiagnostic', () => {
       loc: { file: '/private/secret.vue', line: 3, column: 1 },
     }), { root: '/project' })
     expect(details.displaySource).toBeUndefined()
-    expect(details.displaySource).not.toMatch(/\.\./)
     expect(details.source).toBe('/private/secret.vue')
     expectFileIdentity(details)
   })
