@@ -49,6 +49,7 @@ const invokeGeneratedVercelFirstRequest = async generatedFunction => {
 }
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -63,6 +64,7 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { gzipSync } from 'node:zlib'
 import {
   assertInstalledArtifactHygiene,
   assertPackedArtifact,
@@ -90,6 +92,83 @@ const assert = (condition, message) => {
 }
 
 const readJson = async (path) => JSON.parse(await readFile(path, 'utf8'))
+
+// These are fixture contracts, not application configuration. Sum independently
+// compressed resources, as the browser transfers each file separately.
+const criticalClientPayload = (report, seeds, cssSeeds = []) => {
+  const chunks = new Map(report.chunks.map(chunk => [chunk.file, chunk]))
+  const css = new Map(report.stylesheets.map(asset => [asset.file, asset]))
+  const files = new Set()
+  const styles = new Set(cssSeeds)
+  const visit = file => {
+    if (files.has(file)) return
+    const chunk = chunks.get(file)
+    assert(chunk, `unaccounted critical client chunk: ${file}.`)
+    files.add(file)
+    chunk.css.forEach(file => styles.add(file))
+    chunk.imports.forEach(visit)
+  }
+  seeds.forEach(visit)
+  const selectedCss = [...styles].map(file => {
+    assert(css.has(file), `unaccounted critical stylesheet: ${file}.`)
+    return css.get(file)
+  })
+  const sum = resources => Object.fromEntries(['bytes', 'gzip', 'brotli'].map(key =>
+    [key, resources.reduce((total, resource) => total + resource[key], 0)]))
+  const js = sum([...files].map(file => chunks.get(file)))
+  const cssSizes = sum(selectedCss)
+  const total = sum([js, cssSizes])
+  assert(total.gzip <= 72 * 1024, `critical fixture JS + CSS exceeds 72 KiB gzip: ${total.gzip}.`)
+  assert(cssSizes.gzip <= 2 * 1024, `critical fixture CSS exceeds 2 KiB gzip: ${cssSizes.gzip}.`)
+  return { files: [...files], css: [...styles], js, cssSizes, total, resourceCount: files.size + styles.size }
+}
+
+const htmlClientSeeds = html => {
+  const scripts = []
+  const css = []
+  for (const [tag] of html.matchAll(/<(?:script|link)\b[^>]*>/g)) {
+    const attributes = Object.fromEntries([...tag.matchAll(/([\w-]+)=["']([^"']*)["']/g)]
+      .map(([, key, value]) => [key, value]))
+    if (attributes.type === 'module' && attributes.src) scripts.push(attributes.src)
+    if (attributes.rel === 'modulepreload' && attributes.href) scripts.push(attributes.href)
+    if (attributes.rel === 'stylesheet' && attributes.href) css.push(attributes.href)
+  }
+  assert(new Set(scripts).size === scripts.length, 'duplicate critical JS declarations.')
+  assert(new Set(css).size === css.length, 'duplicate critical stylesheet declarations.')
+  for (const file of [...scripts, ...css]) assert(file.startsWith('/assets/'), `unexpected fixture resource: ${file}.`)
+  return { scripts: scripts.map(file => file.slice(1)), css: css.map(file => file.slice(1)) }
+}
+
+// The clean application has no runtime packages beyond its Vue peers. Follow
+// their declared dependencies, never the framework's build-tool dependencies.
+const runtimePeerPackages = async consumerRoot => {
+  const names = new Set(['vue-ssr-lite'])
+  const visited = new Set()
+  const visit = async (name, from) => {
+    const require = createRequire(from)
+    let manifestPath
+    try { manifestPath = require.resolve(`${name}/package.json`) } catch {
+      let directory = dirname(require.resolve(name))
+      while (directory !== dirname(directory)) {
+        const candidate = join(directory, 'package.json')
+        if (await pathExists(candidate) && (await readJson(candidate)).name === name) {
+          manifestPath = candidate
+          break
+        }
+        directory = dirname(directory)
+      }
+    }
+    assert(manifestPath, `cannot inspect runtime peer package ${name}.`)
+    const canonical = await realpath(manifestPath)
+    if (visited.has(canonical)) return
+    visited.add(canonical)
+    const manifest = await readJson(canonical)
+    names.add(manifest.name)
+    for (const dependency of Object.keys(manifest.dependencies || {})) await visit(dependency, canonical)
+  }
+  for (const name of ['vue', 'vue-router']) await visit(name, join(consumerRoot, 'package.json'))
+  return names
+}
 
 const pathExists = async (path) => {
   try {
@@ -139,7 +218,7 @@ const readMjsTree = async (directory) => {
   for (const entry of entries) {
     const path = join(directory, entry.name)
     if (entry.isDirectory()) contents.push(await readMjsTree(path))
-    else if (entry.name.endsWith('.mjs')) contents.push(await readFile(path, 'utf8'))
+    else if (/\.(?:mjs|js)$/.test(entry.name)) contents.push(await readFile(path, 'utf8'))
   }
   return contents.join('\n')
 }
@@ -178,7 +257,7 @@ const readRelativeModuleGraph = async (entry) => {
 }
 
 const BUILD_ONLY_RUNTIME_IMPORT =
-  /\b(?:from\s*|import\s*\(\s*|import\s*)['"](?:vite|rollup|esbuild|@vercel\/nft|@rollup\/[^/'"]+|@esbuild\/[^/'"]+)(?:\/[^'"]*)?['"]/i
+  /\b(?:from\s*|import\s*\(\s*|import\s*)['"](?:vite|rollup|esbuild|es-module-lexer|@vercel\/nft|@vitejs\/[^/'"]+|@rollup\/[^/'"]+|@esbuild\/[^/'"]+)(?:\/[^'"]*)?['"]/i
 
 const assertDependencyOwnership = (manifest, options = {}) => {
   const dependencies = manifest.dependencies || {}
@@ -300,9 +379,32 @@ const writeFixture = async (consumerRoot) => {
     `import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
+import { writeFileSync } from 'node:fs'
+import { gzipSync, brotliCompressSync } from 'node:zlib'
+
+let serverBuild = false
+const auditClient = {
+  name: 'packed-client-audit',
+  configResolved(config) { serverBuild = Boolean(config.build.ssr) },
+  generateBundle(_options, bundle) {
+    if (serverBuild) return
+    const chunks = Object.values(bundle).filter(item => item.type === 'chunk').map(item => ({
+      file: item.fileName, entry: item.isEntry, imports: item.imports, dynamicImports: item.dynamicImports,
+      css: [...(item.viteMetadata?.importedCss || [])],
+      bytes: Buffer.byteLength(item.code), gzip: gzipSync(item.code).byteLength,
+      brotli: brotliCompressSync(item.code).byteLength,
+      modules: Object.entries(item.modules).map(([id, module]) => ({ id, renderedLength: module.renderedLength, renderedExports: module.renderedExports })),
+    }))
+    const stylesheets = Object.values(bundle).filter(item => item.type === 'asset' && item.fileName.endsWith('.css')).map(item => ({
+      file: item.fileName, bytes: Buffer.byteLength(item.source),
+      gzip: gzipSync(item.source).byteLength, brotli: brotliCompressSync(item.source).byteLength,
+    }))
+    writeFileSync(new URL('./packed-client-audit.json', import.meta.url), JSON.stringify({ chunks, stylesheets }))
+  },
+}
 
 export default defineConfig({
-  plugins: [vue(), vueSsrLite()],
+  plugins: [vue(), vueSsrLite(), auditClient],
   build: { assetsInlineLimit: 0 },
 })
 `,
@@ -312,11 +414,17 @@ export default defineConfig({
   await writeFile(
     join(sourceRoot, 'Home.vue'),
     `<script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useSeo } from 'vue-ssr-lite'
+import { ssrWatch, ssrWatchEffect } from 'vue-ssr-lite/client'
 useSeo(computed(() => ({ description: 'Packed reactive home' })))
+const count = ref(1)
+const doubled = ref(0)
+const label = ref('')
+ssrWatch(count, value => { doubled.value = value * 2 }, { immediate: true })
+ssrWatchEffect(() => { label.value = 'packed-watch:' + count.value })
 </script>
-<template><section id="home-page">packed-home</section></template>
+<template><section id="home-page">packed-home<button id="watcher-probe" @click="count++">{{ label }} / {{ doubled }}</button></section></template>
 `,
     'utf8'
   )
@@ -691,6 +799,10 @@ const assertProductionHydration = async (consumerRoot, html, origin) => {
       dom.window.document.querySelector('#routed-app')?.getAttribute('data-route') === '/',
       'hydration did not retain the initial route.'
     )
+    const watcherButton = dom.window.document.querySelector('#watcher-probe')
+    assert(watcherButton?.textContent === 'packed-watch:1 / 2', 'public watchers did not retain SSR state through hydration.')
+    watcherButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    await waitFor(() => watcherButton.textContent === 'packed-watch:2 / 4', 'public watchers did not update after hydration.')
     const clickRouterLink = (selector) => {
       const navigationClick = new dom.window.MouseEvent('click', {
         bubbles: true,
@@ -1065,6 +1177,27 @@ const main = async () => {
       env: { ...process.env, PUBLIC_URL: 'https://packed-smoke.test' },
     })
     const builtClient = await readMjsTree(join(consumerRoot, 'dist', 'client'))
+    const clientReport = await readJson(join(consumerRoot, 'packed-client-audit.json'))
+    const clientAudit = clientReport.chunks
+    assert(clientAudit.some(chunk => chunk.entry), 'packaged client audit is missing its entry graph.')
+    assert(builtClient.includes('packed-watch:'), 'the packed client must actually exercise both public watcher primitives.')
+    assert(!builtClient.includes('no-callback-consequence'), 'server reconciliation bookkeeping leaked into the packed client.')
+    assert(!builtClient.includes('data-vue-ssr-lite-rendered-style'), 'development CSS handoff leaked into the packed client.')
+    for (const chunk of clientAudit) {
+      for (const module of chunk.modules.filter(module => module.renderedLength > 0)) {
+        assert(
+          !/(?:SsrApplicationRuntime|SsrServerResolution|SsrServerReactivity|SsrRequestObservation|SsrReconciliationFingerprint|SsrRuntimeLoadDiagnostics|SsrObservability|internal-vercel|internal-ssr-renderer)/.test(module.id),
+          `the installed client retains a server implementation: ${module.id}.`
+        )
+      }
+    }
+    for (const entry of clientAudit.filter(chunk => chunk.entry)) {
+      const initial = criticalClientPayload(clientReport, [entry.file])
+      console.log('[vue-ssr-lite] packaged client static graph:', JSON.stringify({
+        entry: entry.file, ...initial,
+        note: 'Static closure only; rendered lazy-route chunks must be counted separately.',
+      }))
+    }
     assert(
       !builtClient.includes('packed-site-seo-v1') &&
         !builtClient.includes('packed-robots-v1') &&
@@ -1101,6 +1234,19 @@ const main = async () => {
       assert(await pathExists(required), `Vercel projection is missing ${required}.`)
     }
     const payloadFiles = await walkRelativeFiles(payloadRoot)
+    // Diagnostic filesystem entries only: link metadata is not target contents.
+    // This is NOT an effective uploaded/runtime function-size measurement.
+    const diagnosticPayloadEntryBytes = (await Promise.all(payloadFiles.map(file => lstat(join(payloadRoot, file)))))
+      .reduce((sum, information) => sum + information.size, 0)
+    const staticFiles = await walkRelativeFiles(join(vercelOutput, 'static'))
+    const staticBytes = (await Promise.all(staticFiles.map(file => stat(join(vercelOutput, 'static', file)))))
+      .reduce((sum, information) => sum + information.size, 0)
+    const routing = await readJson(join(vercelOutput, 'config.json'))
+    console.log('[vue-ssr-lite] Vercel output sizes:', JSON.stringify({
+      payloadFiles: payloadFiles.length, diagnosticPayloadEntryBytes, staticFiles: staticFiles.length,
+      staticBytes, routeCount: routing.routes.length,
+      note: 'Payload entry bytes use lstat; they are not effective deployed size. Composition assertions are the regression contract.',
+    }))
     assert(
       (await walkRelativeFiles(join(vercelOutput, 'static'))).length > 0,
       'the Vercel projection did not publish the clean fixture static assets.'
@@ -1112,11 +1258,47 @@ const main = async () => {
       /(?:^|\/)node_modules\/esbuild\//,
       /(?:^|\/)node_modules\/@esbuild\//,
       /(?:^|\/)node_modules\/@vercel\/nft\//,
+      /(?:^|\/)node_modules\/es-module-lexer\//,
+      /(?:^|\/)node_modules\/@vitejs\//,
     ]) {
       assert(
         !payloadFiles.some((file) => buildOnly.test(file)),
         `the clean Vercel function payload contains build-only tooling matching ${buildOnly}.`
       )
+    }
+    const allowedPackages = await runtimePeerPackages(consumerRoot)
+    const deployedPackages = new Set()
+    for (const file of payloadFiles) {
+      const tail = file.split('node_modules/').at(-1)
+      if (tail === file) continue
+      const parts = tail.split('/')
+      const name = parts[0].startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+      assert(allowedPackages.has(name), `unexpected package in clean runtime payload: ${name} (${file}).`)
+      assert(!/\.(?:d\.(?:ts|mts|cts)|map)$/.test(file), `build/type artifact in runtime payload: ${file}.`)
+      deployedPackages.add(name)
+    }
+    // Framework code can be inlined into the generated handler/server chunks.
+    assert(deployedPackages.has('vue'), 'runtime payload lacks its host-owned Vue peer.')
+    console.log('[vue-ssr-lite] Vercel runtime packages:', JSON.stringify([...deployedPackages].sort()))
+
+    // This clean fixture has no server filesystem reads of CDN-owned files.
+    // Static output must be the exact public client projection, byte for byte,
+    // and each file must have one GET/HEAD route plus one final SSR fallback.
+    const currentClientRoot = join(consumerRoot, 'dist', 'client')
+    const publicClientFiles = (await walkRelativeFiles(currentClientRoot))
+      .filter(file => file.startsWith('assets/') || file === 'application-production1.css')
+    assert(JSON.stringify([...staticFiles].sort()) === JSON.stringify([...publicClientFiles].sort()), 'Vercel static output differs from the clean fixture public asset set.')
+    assert(routing.routes.length === staticFiles.length + 1, 'Vercel static routes are duplicated or missing.')
+    assert(routing.routes.at(-1)?.dest === '/__vue_ssr_lite', 'Vercel routing lacks its final SSR fallback.')
+    assert(new Set(routing.routes.slice(0, -1).map(route => route.dest)).size === staticFiles.length, 'duplicate Vercel static destinations.')
+    for (const file of staticFiles) {
+      const route = routing.routes.find(route => route.dest === `/${file}`)
+      assert(JSON.stringify(route?.methods) === JSON.stringify(['GET', 'HEAD']), `incorrect static ownership for ${file}.`)
+      const [original, projected] = await Promise.all([
+        readFile(join(currentClientRoot, file)), readFile(join(vercelOutput, 'static', file)),
+      ])
+      assert(original.equals(projected), `Vercel static content differs for ${file}.`)
+      assert(!payloadFiles.some(candidate => candidate.endsWith(`/dist/client/${file}`) || candidate === `dist/client/${file}`), `CDN-owned file duplicated in clean function payload: ${file}.`)
     }
     const internalVercel = join(
       consumerRoot,
@@ -1126,6 +1308,15 @@ const main = async () => {
       'internal-vercel.mjs'
     )
     const runtimeGraph = await readRelativeModuleGraph(internalVercel)
+    const installedFrameworkRoot = await realpath(join(consumerRoot, 'node_modules', 'vue-ssr-lite'))
+    const runtimeFiles = new Set([...runtimeGraph.keys()].map(file => file.slice(installedFrameworkRoot.length + 1)))
+    for (const file of payloadFiles) {
+      const marker = 'node_modules/vue-ssr-lite/'
+      const position = file.lastIndexOf(marker)
+      if (position < 0) continue
+      const relativeFile = file.slice(position + marker.length)
+      assert(relativeFile === 'package.json' || runtimeFiles.has(relativeFile), `unreachable framework artifact in Vercel payload: ${relativeFile}.`)
+    }
     for (const [file, source] of runtimeGraph) {
       assert(
         !BUILD_ONLY_RUNTIME_IMPORT.test(source),
@@ -1133,6 +1324,11 @@ const main = async () => {
       )
     }
     const generatedFunctionSource = await readFile(join(functionRoot, 'index.mjs'), 'utf8')
+    const bootstrapBytes = Buffer.byteLength(generatedFunctionSource)
+    const bootstrapGzip = gzipSync(generatedFunctionSource).byteLength
+    assert(bootstrapBytes <= 16 * 1024 && bootstrapGzip <= 4 * 1024,
+      `Vercel bootstrap exceeds its 16 KiB raw / 4 KiB gzip budget: ${bootstrapBytes} / ${bootstrapGzip}.`)
+    console.log('[vue-ssr-lite] Vercel bootstrap:', JSON.stringify({ bytes: bootstrapBytes, gzip: bootstrapGzip }))
     assert(
       !BUILD_ONLY_RUNTIME_IMPORT.test(generatedFunctionSource),
       'the generated Vercel function entry retains a build-only bare import.'
@@ -1141,6 +1337,9 @@ const main = async () => {
       /handlerPromise\s*\?\?=\s*import\((['"])([^'"]+)\1\)/
     )?.[2]
     assert(deployedEntry?.startsWith('.'), 'the Vercel bootstrap lacks a relative deployed entry.')
+    const staticBootstrapImports = [...generatedFunctionSource.matchAll(/\b(?:from\s*|import\s*)['"]([^'"]+)['"]/g)].map(match => match[1])
+    assert(JSON.stringify(staticBootstrapImports) === JSON.stringify(['node:url']), 'Vercel bootstrap eagerly loads application/runtime code.')
+    assert([...generatedFunctionSource.matchAll(/\bimport\s*\(/g)].length === 1, 'Vercel bootstrap must retain one memoized lazy handler import.')
     const deployedGraph = await readRelativeModuleGraph(
       resolve(functionRoot, deployedEntry)
     )
@@ -1179,6 +1378,30 @@ const main = async () => {
         'id="lazy-page">packed-lazy',
         'id="public-config-path">/lazy',
       ])
+      // Read the audit belonging to this Vercel build, not the earlier Node
+      // build: hashes may differ when the build environment changes.
+      const productionAudit = await readJson(join(consumerRoot, 'packed-client-audit.json'))
+      const ssrManifest = await readJson(join(consumerRoot, 'dist', 'client', '.vite', 'ssr-manifest.json'))
+      const lazyAssets = Object.entries(ssrManifest).find(([id]) => id.endsWith('src/Lazy.vue'))?.[1] || []
+      assert(lazyAssets.some(file => file.endsWith('.js')) && lazyAssets.some(file => file.endsWith('.css')), 'lazy fixture lacks authoritative JS/CSS relationships.')
+      const homeSeeds = htmlClientSeeds(homeHtml)
+      const lazySeeds = htmlClientSeeds(lazyHtml)
+      const homePayload = criticalClientPayload(productionAudit, homeSeeds.scripts, homeSeeds.css)
+      const lazyPayload = criticalClientPayload(productionAudit, lazySeeds.scripts, lazySeeds.css)
+      const homeEntry = productionAudit.chunks.find(chunk => chunk.entry && homeSeeds.scripts.includes(chunk.file))
+      assert(homeEntry, 'home HTML lacks the audited client entry.')
+      const expectedHome = criticalClientPayload(productionAudit, [homeEntry.file])
+      const expectedLazy = criticalClientPayload(productionAudit,
+        [homeEntry.file, ...lazyAssets.filter(file => file.endsWith('.js')).map(file => file.replace(/^\//, ''))],
+        lazyAssets.filter(file => file.endsWith('.css')).map(file => file.replace(/^\//, '')))
+      for (const [actual, expected] of [[homePayload, expectedHome], [lazyPayload, expectedLazy]]) {
+        assert(JSON.stringify([...actual.files].sort()) === JSON.stringify([...expected.files].sort()), 'request HTML over-fetches or omits critical JS.')
+        assert(JSON.stringify([...actual.css].sort()) === JSON.stringify([...expected.css].sort()), 'request HTML over-fetches or omits critical CSS.')
+        assert(actual.resourceCount === expected.resourceCount, 'critical resource count differs from its manifest closure.')
+      }
+      assert(lazyPayload.files.filter(file => !homePayload.files.includes(file)).length === 1, 'lazy fixture must add only its route chunk.')
+      assert(lazyPayload.css.filter(file => !homePayload.css.includes(file)).length === 1, 'lazy fixture must add only its route stylesheet.')
+      console.log('[vue-ssr-lite] packaged critical JS/CSS payloads:', JSON.stringify({ home: homePayload, lazy: lazyPayload }))
       const productionManifest = await readJson(
         join(consumerRoot, 'dist', 'client', '.vite', 'manifest.json')
       )
