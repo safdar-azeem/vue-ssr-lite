@@ -614,6 +614,20 @@ describe('defineServer application architecture', () => {
 
     const spaClient = generateSsrClientModule('/app', entries.applications[0])
     expect(spaClient).toContain('mountSpaApplication')
+    expect(spaClient).toContain('vue-ssr-lite:client-ready:erp')
+    expect(spaClient).toContain(
+      'export const ready = __ssrExistingReady ?? (__ssrOwnReady = mountSpaApplication'
+    )
+    expect(spaClient).toContain(
+      '__ssrOwnReadyRecord = { identity: __ssrReadyIdentity, ready }'
+    )
+    expect(spaClient).not.toContain('    throw error')
+    expect(spaClient).toContain(
+      '__ssrReadyRecord?.identity === __ssrReadyIdentity'
+    )
+    expect(spaClient).not.toContain('__ssrReadyRecord?.root === App')
+    expect(spaClient).not.toContain('__ssrReadyRecord.initialize === initialize')
+    expect(spaClient).toMatch(/const __ssrReadyIdentity = "[a-f0-9]{16}"/)
     expect(spaClient).toContain('id: "erp"')
     expect(spaClient).toContain('from "/app/src/App.vue"')
     expect(spaClient).toContain('from "/app/src/main.ts"')
@@ -626,6 +640,14 @@ describe('defineServer application architecture', () => {
 
     const ssrClient = generateSsrClientModule('/app', entries.applications[1])
     expect(ssrClient).toContain('hydrateSsrApplication')
+    expect(ssrClient).toContain('vue-ssr-lite:client-ready:storefront')
+    expect(ssrClient).toContain(
+      'export const ready = __ssrExistingReady ?? (__ssrOwnReady = (async () => {'
+    )
+    expect(ssrClient).toContain(
+      'if (__ssrDocument[__ssrReadyKey] === __ssrOwnReadyRecord) delete __ssrDocument[__ssrReadyKey]'
+    )
+    expect(ssrClient).not.toContain('    throw error')
     expect(ssrClient).toContain('id: "storefront"')
     expect(ssrClient).not.toContain('src/modules/storefront/app.ts')
     const productionClient = generateSsrClientModule('/app', entries.applications[1], { development: false })
@@ -635,6 +657,25 @@ describe('defineServer application architecture', () => {
     const developmentClient = generateSsrClientModule('/app', entries.applications[1], { development: true })
     expect(developmentClient).toContain('data-vue-ssr-lite-rendered-style')
     expect(developmentClient).toContain('await Promise.all(__vueSsrLiteRenderedStyles.map')
+  })
+
+  it('carries only normalized client SEO settings, including explicit disabled SEO', () => {
+    const entries = extractSsrViteEntries(defineServer({
+      seo: {
+        enabled: false, mode: 'private', siteUrl: 'https://private.test',
+        site: { resolve: async () => ({ status: 'resolved', defaults: { title: 'SERVER_ONLY_SITE' } }) },
+        robots: { resolve: async () => ({ status: 'resolved', config: { groups: [] }, revision: 'SERVER_ONLY_ROBOTS' }) },
+      },
+    }), { root: '/app' })
+    const client = generateSsrClientModule('/app', entries.applications[0]!, { development: false })
+    expect(client).toContain('"enabled":false')
+    expect(client).toContain('"mode":"private"')
+    expect(client).not.toContain('SERVER_ONLY_SITE')
+    expect(client).not.toContain('SERVER_ONLY_ROBOTS')
+    expect(client).not.toContain('resolve:')
+    expect(client).not.toContain('data-vue-ssr-lite-rendered-style')
+    expect(client).toContain('hydrateSsrApplication')
+    expect(client).toContain('mountSpaApplication')
   })
 
   it('resolves development listen options without binding application shells', async () => {
