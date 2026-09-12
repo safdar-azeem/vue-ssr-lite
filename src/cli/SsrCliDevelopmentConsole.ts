@@ -55,10 +55,12 @@ const shouldColorSsrDevelopmentConsole = (): boolean => {
   return process.stdout.isTTY === true
 }
 
-const formatSsrDevelopmentErrorLabel = (): string =>
-  shouldColorSsrDevelopmentConsole()
-    ? `${ANSI_BOLD_RED}${SSR_DEVELOPMENT_ERROR_LABEL}${ANSI_RESET}`
-    : SSR_DEVELOPMENT_ERROR_LABEL
+const formatSsrDevelopmentErrorLine = (message: string): string => {
+  const line = `${SSR_DEVELOPMENT_ERROR_LABEL} ${message}`
+  return shouldColorSsrDevelopmentConsole()
+    ? `${ANSI_BOLD_RED}${line}${ANSI_RESET}`
+    : line
+}
 
 const visibleSource = (details: SsrDevelopmentErrorDetails): string =>
   details.displaySource || (details.source ? sourceBaseName(details.source) : '')
@@ -76,7 +78,7 @@ export const formatSsrDevelopmentConsoleFailure = (
 ): string => {
   const thrown = describeSsrThrownValue(error)
   const details = readSsrDevelopmentErrorDetails(error, { root })
-  const lines = [`${formatSsrDevelopmentErrorLabel()} ${thrown.message}`]
+  const lines = [formatSsrDevelopmentErrorLine(thrown.message)]
   if (details.plugin) lines.push(`Plugin: ${details.plugin}`)
   const file = formatSsrDevelopmentSourceLabel(
     visibleSource(details),
