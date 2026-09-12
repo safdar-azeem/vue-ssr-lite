@@ -1,4 +1,4 @@
-import { resolveSsrFetchRuntime } from '../runtime/SsrFetchRuntimeScope'
+import { resolveSsrFetchRuntime } from '../runtime/resolveSsrFetchRuntime'
 import type { SetContextOptions } from '../types/SsrFetchTypes'
 
 /** Replace header defaults for future same-origin useFetch executions. */
