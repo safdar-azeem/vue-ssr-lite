@@ -130,8 +130,9 @@ describe('repository release contract', () => {
       vue: expect.any(String),
       'vue-router': expect.any(String),
     })
+    expect(manifest.scripts?.typecheck).toBe('tsc --noEmit')
     expect(manifest.scripts?.prepublishOnly).toBe(
-      'npm run build && npm test && npm run test:package'
+      'npm run typecheck && npm run build && npm test && npm run test:package'
     )
   })
 
