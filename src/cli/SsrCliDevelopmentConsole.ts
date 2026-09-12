@@ -44,10 +44,11 @@ const writeDevelopmentConsole = (text: string): void => {
 
 const SSR_DEVELOPMENT_ERROR_LABEL = 'ERROR:'
 const ANSI_BOLD_RED = '\u001b[1;31m'
+const ANSI_BLUE = '\u001b[34m'
 const ANSI_RESET = '\u001b[0m'
 
 const shouldColorSsrDevelopmentConsole = (): boolean => {
-  if (process.env.NO_COLOR) return false
+  if (process.env.NO_COLOR !== undefined) return false
   const force = process.env.FORCE_COLOR
   if (force === '0') return false
   if (force) return true
@@ -55,12 +56,14 @@ const shouldColorSsrDevelopmentConsole = (): boolean => {
   return process.stdout.isTTY === true
 }
 
-const formatSsrDevelopmentErrorLine = (message: string): string => {
-  const line = `${SSR_DEVELOPMENT_ERROR_LABEL} ${message}`
-  return shouldColorSsrDevelopmentConsole()
-    ? `${ANSI_BOLD_RED}${line}${ANSI_RESET}`
-    : line
-}
+const styleSsrDevelopmentConsole = (ansi: string, text: string): string =>
+  shouldColorSsrDevelopmentConsole() ? `${ansi}${text}${ANSI_RESET}` : text
+
+const formatSsrDevelopmentErrorLine = (message: string): string =>
+  styleSsrDevelopmentConsole(ANSI_BOLD_RED, `${SSR_DEVELOPMENT_ERROR_LABEL} ${message}`)
+
+const formatSsrDevelopmentFileLine = (file: string): string =>
+  `File: ${styleSsrDevelopmentConsole(ANSI_BLUE, file)}`
 
 const visibleSource = (details: SsrDevelopmentErrorDetails): string =>
   details.displaySource || (details.source ? sourceBaseName(details.source) : '')
@@ -85,7 +88,7 @@ export const formatSsrDevelopmentConsoleFailure = (
     details.line,
     details.column
   )
-  if (file) lines.push(`File: ${file}`)
+  if (file) lines.push(formatSsrDevelopmentFileLine(file))
   return lines.join('\n')
 }
 
