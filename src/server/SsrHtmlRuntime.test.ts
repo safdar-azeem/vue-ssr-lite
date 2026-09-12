@@ -5,6 +5,8 @@ import {
   injectSsrHtml,
   prepareSsrHtmlTemplate,
   renderSsrErrorDocument,
+  renderSsrPublicErrorDocument,
+  resolveSsrPublicErrorPresentation,
 } from './SsrHtmlRuntime'
 
 describe('SSR HTML runtime', () => {
@@ -414,16 +416,33 @@ describe('SSR HTML runtime', () => {
 describe('SSR error documents', () => {
   const errorId = 'vssl_8f3c2a7e1b0d4c56'
 
-  it('renders a dark production page with an error id and no exception details', () => {
-    const html = renderSsrErrorDocument(
-      'Application unavailable',
-      'The application could not render this page. Please try again.',
-      { errorId }
-    )
+  it.each([
+    [400, 'Bad Request', 'Invalid request', 'The request could not be processed.'],
+    [421, 'Misdirected Request', 'Host not available', 'This host is not available.'],
+    [500, 'Internal Server Error', 'Something went wrong', 'The request could not be completed.'],
+    [503, 'Service Unavailable', 'Service unavailable', 'The service is temporarily unavailable. Please try again later.'],
+    [504, 'Gateway Timeout', 'Request timed out', 'The server took too long to respond. Please try again.'],
+  ] as const)('resolves the canonical %s public presentation', (
+    statusCode,
+    statusText,
+    heading,
+    description
+  ) => {
+    expect(resolveSsrPublicErrorPresentation(statusCode)).toEqual({
+      statusCode,
+      statusText,
+      heading,
+      description,
+    })
+  })
+
+  it('renders a dark status-aware production page with an error id and no exception details', () => {
+    const html = renderSsrPublicErrorDocument(500, { errorId })
     expect(html).toContain('noindex,nofollow')
     expect(html).toContain('background:#000')
-    expect(html).toContain('Application unavailable')
-    expect(html).toContain('The application could not render this page. Please try again.')
+    expect(html).toContain('<p class="status">500 · Internal Server Error</p>')
+    expect(html).toContain('<h1>Something went wrong</h1>')
+    expect(html).toContain('The request could not be completed.')
     expect(html).toContain(`Error ID: ${errorId}`)
     expect(html).toContain('id="main-content"')
     expect(html).not.toContain('TypeError')
@@ -438,11 +457,21 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('Request:')
     expect(html).not.toContain('Return home')
     expect(html).not.toContain('<svg')
+    expect(html).not.toContain('<script')
   })
 
   it('omits the error id when it is unavailable', () => {
-    const html = renderSsrErrorDocument('Application unavailable', 'Please try again.')
+    const html = renderSsrPublicErrorDocument(503)
+    expect(html).toContain('<div class="meta"></div>')
     expect(html).not.toContain('Error ID:')
+  })
+
+  it('does not render malformed correlation metadata', () => {
+    const html = renderSsrPublicErrorDocument(500, {
+      errorId: 'vssl_<script>alert(1)</script>',
+    })
+    expect(html).not.toContain('Error ID:')
+    expect(html).not.toContain('alert(1)')
   })
 
   it('renders a dark development document with the message as the primary heading', () => {
@@ -584,13 +613,11 @@ describe('SSR error documents', () => {
     expect(html).not.toContain('vscode:')
   })
 
-  it('keeps semantic titles such as Request timed out on the dark production shell', () => {
-    const html = renderSsrErrorDocument(
-      'Request timed out',
-      'The application could not render this page. Please try again.',
-      { errorId }
-    )
+  it('renders the timeout semantics on the dark production shell', () => {
+    const html = renderSsrPublicErrorDocument(504, { errorId })
+    expect(html).toContain('<p class="status">504 · Gateway Timeout</p>')
     expect(html).toContain('<h1>Request timed out</h1>')
+    expect(html).toContain('The server took too long to respond. Please try again.')
     expect(html).toContain('background:#000')
     expect(html).not.toContain('Show details')
     expect(html).not.toContain('vscode:')
