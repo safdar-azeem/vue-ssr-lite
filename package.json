@@ -47,9 +47,10 @@
   },
   "scripts": {
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:package": "node scripts/SsrPackageSmoke.mjs",
-    "prepublishOnly": "npm run build && npm test && npm run test:package",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test && npm run test:package",
     "release:rc": "npm version prerelease --preid=rc && npm publish --tag next",
     "release:patch": "npm version patch && npm publish --tag latest",
     "release:minor": "npm version minor && npm publish --tag latest",
