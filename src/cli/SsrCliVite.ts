@@ -1,4 +1,4 @@
-import { createLogger, type InlineConfig, type Logger, type LogErrorOptions } from 'vite'
+import { createLogger, type InlineConfig, type Logger } from 'vite'
 import {
   createSsrViteCliConfigMarker,
   createSsrViteCliInlineConfig,
@@ -17,18 +17,18 @@ export const createSsrCliDevelopmentViteLogger = (
   const logged = new WeakSet<object>()
   return {
     ...base,
-    info: (msg, options) => base.info(msg, options),
-    warn: (msg, options) => base.warn(msg, options),
-    warnOnce: (msg, options) => base.warnOnce(msg, options),
-    clearScreen: (type) => base.clearScreen(type),
+    info: (...args: Parameters<Logger['info']>) => base.info(...args),
+    warn: (...args: Parameters<Logger['warn']>) => base.warn(...args),
+    warnOnce: (...args: Parameters<Logger['warnOnce']>) => base.warnOnce(...args),
+    clearScreen: (...args: Parameters<Logger['clearScreen']>) => base.clearScreen(...args),
     get hasWarned() {
       return base.hasWarned
     },
     set hasWarned(value) {
       base.hasWarned = value
     },
-    error(msg: string, options?: LogErrorOptions) {
-      const error = options?.error
+    error(...args: Parameters<Logger['error']>) {
+      const error = args[1]?.error
       if (error && typeof error === 'object') {
         logged.add(error)
         if (isSsrStructuredViteError(error)) {
@@ -37,7 +37,7 @@ export const createSsrCliDevelopmentViteLogger = (
         }
         developmentConsole.acknowledgeFailure(error)
       }
-      base.error(msg, options)
+      base.error(...args)
     },
     hasErrorLogged(error: Error) {
       return logged.has(error) || base.hasErrorLogged(error)
