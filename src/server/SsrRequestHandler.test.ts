@@ -792,7 +792,7 @@ describe('transport-independent SSR request handler', () => {
       )
       expect(response?.statusCode).toBe(500)
       const html = String(response?.body)
-      expect(html).toContain('background:#090b0e')
+      expect(html).toContain('background:#000')
       expect(html).toContain('Application error')
       expect(html).toContain('<p class="pill">TypeError</p>')
       expect(html).toContain('Cannot read properties of undefined (reading &quot;x&quot;)')
