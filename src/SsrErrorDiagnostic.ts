@@ -113,7 +113,7 @@ const createSsrFailureOccurrence = (errorId?: string): SsrFailureOccurrence => {
   return occurrence
 }
 
-const unwrapSsrFailure = (error: unknown): unknown => {
+export const unwrapSsrFailure = (error: unknown): unknown => {
   if (!isCarrierKey(error)) return error
   const carried = carriedFailures.get(error)
   return carried ? unwrapSsrFailure(carried.original) : error
@@ -209,6 +209,7 @@ export const readSsrErrorStack = (error: unknown): string => {
 /** Bounded operator view of a thrown value. Never walks cause or unknown properties. */
 export const describeSsrThrownValue = (error: unknown): SsrThrownValue => {
   try {
+    error = unwrapSsrFailure(error)
     if (typeof error === 'string') {
       return { name: 'Error', message: truncate(error, MAX_MESSAGE) || 'Unknown error.' }
     }
