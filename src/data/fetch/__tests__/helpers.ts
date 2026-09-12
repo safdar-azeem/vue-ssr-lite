@@ -1,5 +1,5 @@
 import { createSsrHydrationController } from '../../../SsrHydrationRuntime'
-import { createSsrResolutionController } from '../../../SsrRequestResolution'
+import { createSsrResolutionController } from '../../../SsrServerResolution'
 import { createTestRenderRequest } from '../../../SsrTestFixtures'
 import type { SsrRenderRequest, SsrRequestContext } from '../../../SsrRuntimeTypes'
 import { SsrFetchRuntime, type HookConsumer } from '../runtime/SsrFetchRuntime'
