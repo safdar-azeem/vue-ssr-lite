@@ -8,7 +8,9 @@ import { defineComponent, h } from 'vue'
 import { createSsrManagedServer, type SsrManagedServer } from '../server/SsrServerRuntime'
 import { build, createServer, type ViteDevServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { vueSsrLite } from './SsrVitePlugin'
+import { SSR_CONFLICTING_CONFIG_IDENTITY } from '../SsrConfigCompileRuntime'
+import { createSsrViteCliInlineConfig } from './SsrViteCliConfig'
+import { readSsrViteResolvedConfigPath, vueSsrLite } from './SsrVitePlugin'
 import { closeViteDevServer, provisionHostVuePeers, withSsrShells } from '../SsrTestFixtures'
 import { SSR_RENDERER_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 
@@ -98,6 +100,8 @@ describe('SSR Vite package identity', () => {
     expect(config.server?.allowedHosts).toContain('example.com')
     expect(config.server?.allowedHosts).toContain('.example.com')
     expect(config.server?.allowedHosts).not.toContain('*')
+    expect(config.server).not.toHaveProperty('hmr')
+    expect(JSON.stringify(config.server ?? {})).not.toContain('overlay')
     expect((await runConfig(root, 'build')).server).toBeUndefined()
   })
 
@@ -275,9 +279,83 @@ describe('SSR Vite package identity', () => {
         `${pluginRoot}/virtual:vue-ssr-lite/runtime`
       )
     ).toBe('\0virtual:vue-ssr-lite/runtime')
+    expect(plugin.resolveId?.call({} as never, 'virtual:vue-ssr-lite/bootstrap')).toBeUndefined()
     await expect(
       plugin.resolveId?.call({} as never, SSR_RENDERER_VIRTUAL_ID)
     ).resolves.toMatch(/SsrRenderRuntime\.ts$/)
+  })
+
+  it('publishes the selected config path on the Vite development server', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const custom = join(pluginRoot, 'config/platform.ts')
+    await mkdir(join(pluginRoot, 'config'), { recursive: true })
+    await writeFile(custom, await readFile(join(pluginRoot, 'server.ts'), 'utf8'))
+    const plugin = vueSsrLite({ root: pluginRoot, config: './config/platform.ts' })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    await configHook.call(
+      {} as never,
+      { root: pluginRoot },
+      { command: 'serve', mode: 'test', isSsrBuild: false, isPreview: false }
+    )
+    const vite = {
+      watcher: { add: vi.fn() },
+      middlewares: { use: vi.fn() },
+    } as unknown as ViteDevServer
+    const configure = plugin.configureServer
+    if (typeof configure !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite configureServer hook.')
+    }
+    await configure.call({} as never, vite)
+    expect(readSsrViteResolvedConfigPath(vite)).toBe(custom)
+  })
+
+  it('uses an explicit CLI --config path when vueSsrLite() has no plugin config', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const custom = join(pluginRoot, 'config/platform.ts')
+    await mkdir(join(pluginRoot, 'config'), { recursive: true })
+    await writeFile(custom, await readFile(join(pluginRoot, 'server.ts'), 'utf8'))
+    const plugin = vueSsrLite({ root: pluginRoot })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    await configHook.call(
+      {} as never,
+      { root: pluginRoot, ...createSsrViteCliInlineConfig(custom) },
+      { command: 'serve', mode: 'test', isSsrBuild: false, isPreview: false }
+    )
+    const vite = {
+      watcher: { add: vi.fn() },
+      middlewares: { use: vi.fn() },
+    } as unknown as ViteDevServer
+    const configure = plugin.configureServer
+    if (typeof configure !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite configureServer hook.')
+    }
+    await configure.call({} as never, vite)
+    expect(readSsrViteResolvedConfigPath(vite)).toBe(custom)
+  })
+
+  it('rejects conflicting explicit CLI and plugin config paths', async () => {
+    const pluginRoot = await writeMinimalConfig()
+    const custom = join(pluginRoot, 'config/platform.ts')
+    await mkdir(join(pluginRoot, 'config'), { recursive: true })
+    await writeFile(custom, await readFile(join(pluginRoot, 'server.ts'), 'utf8'))
+    const plugin = vueSsrLite({ root: pluginRoot, config: './server.ts' })
+    const configHook = plugin.config
+    if (typeof configHook !== 'function') {
+      throw new Error('vueSsrLite must expose a Vite config hook.')
+    }
+    await expect(
+      configHook.call(
+        {} as never,
+        { root: pluginRoot, ...createSsrViteCliInlineConfig(custom) },
+        { command: 'serve', mode: 'test', isSsrBuild: false, isPreview: false }
+      )
+    ).rejects.toThrow(SSR_CONFLICTING_CONFIG_IDENTITY)
   })
 
   it('deduplicates Vue and transforms vue-ssr-lite in the host SSR graph', async () => {
