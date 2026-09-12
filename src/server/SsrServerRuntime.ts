@@ -6,6 +6,7 @@ import {
   resolveRenderedStyleDependencies,
   runWithSsrViteAssetResolutionContext,
 } from '../vite/SsrViteAssetRuntime'
+import { readSsrViteResolvedConfigPath } from '../vite/SsrViteResolvedConfigPath'
 import {
   captureSsrViteRuntimeRevision,
   importSsrViteModule,
@@ -25,6 +26,12 @@ export type { SsrManagedServer }
 export interface SsrManagedServerOptions {
   production: boolean
   root: string
+  /**
+   * Selected server-config path (`vueSsrLite({ config })` or `--config`).
+   * When Vite is present, the plugin-published path is preferred so failed
+   * startup uses the same identity as the runtime graph.
+   */
+  config?: string
   loadRuntime: () => Promise<unknown>
   vite?: ViteDevServer
 }
@@ -97,6 +104,7 @@ const waitForStartedViteOptimizerWork = async (vite: ViteDevServer): Promise<voi
 
 const createDevelopmentRuntime = (vite: ViteDevServer): SsrRequestDevelopmentRuntime => ({
   importModule: (specifier) => importSsrViteModule(vite, specifier),
+  resolvedConfigPath: () => readSsrViteResolvedConfigPath(vite),
   watchTemplateStructure: (onChange) => {
     vite.watcher.on('add', onChange)
     vite.watcher.on('unlink', onChange)
@@ -125,6 +133,7 @@ export const createSsrManagedServer = async (
   const runtime = await createSsrRequestRuntime({
     production: options.production,
     root: options.root,
+    config: options.config,
     loadRuntime: options.loadRuntime,
     development: options.vite ? createDevelopmentRuntime(options.vite) : undefined,
     startupTimings: !options.production ? readSsrPhaseTimings(options) : undefined,
