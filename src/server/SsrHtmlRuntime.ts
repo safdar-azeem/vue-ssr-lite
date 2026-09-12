@@ -490,6 +490,7 @@ const SSR_ERROR_DOCUMENT_STYLES = [
   'details{margin:0 0 2rem}',
   'summary{cursor:pointer;color:#8b939e;font-size:.875rem;width:fit-content}',
   'summary:hover{color:#f5f7fa}',
+  'details p{margin:.35rem 0 0;font-size:.8125rem;color:#8b939e}',
   'pre{margin:.85rem 0 0;padding:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8125rem;line-height:1.45;color:#c4cad3}',
   '.meta{margin:2rem 0 0;padding-top:1.25rem;border-top:1px solid #1c2128;font-size:.8125rem;color:#8b939e}',
   '.meta p{margin:.25rem 0}',
@@ -551,11 +552,16 @@ const developmentPill = (plugin?: string, name?: string): string => {
   return label ? `<p class="pill">${escapeSsrHtml(label)}</p>` : ''
 }
 
-const developmentDetails = (frame?: string, stack?: string): string => {
-  if (!frame && !stack) return ''
+const developmentDetails = (
+  frame?: string,
+  stack?: string,
+  meta = ''
+): string => {
   const pre = (value?: string) =>
     value ? `<pre>${escapeSsrHtml(value)}</pre>` : ''
-  return `<details><summary>Show details</summary>${pre(frame)}${pre(stack)}</details>`
+  const body = `${meta}${pre(frame)}${pre(stack)}`
+  if (!body) return ''
+  return `<details><summary>Show details</summary>${body}</details>`
 }
 
 export const renderSsrErrorDocument = (
@@ -591,9 +597,7 @@ export const renderSsrErrorDocument = (
     }<h1>${escapeSsrHtml(detail)}</h1>${
       stackHtml
     }${
-      developmentDetails(options.development.frame, options.development.stack)
-    }${
-      meta ? `<div class="meta">${meta}</div>` : ''
+      developmentDetails(options.development.frame, options.development.stack, meta)
     }${openScript}`)
   }
   return ssrErrorDocument(
