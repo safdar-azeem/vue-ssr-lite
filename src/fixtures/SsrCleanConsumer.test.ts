@@ -451,7 +451,7 @@ describe('zero-config clean consumer fixture', () => {
       expect(html, path).toContain('/@vue-ssr-lite/client/app')
       expect(html, path).toContain('/src/style.css')
       expect(html, path).toContain('data-vue-ssr-lite-style="app"')
-      expect(html, path).not.toContain('Application unavailable')
+      expect(html, path).not.toContain('Something went wrong')
       expect(html, path).not.toContain(
         'cannot inspect eager imports for untransformed Vite module'
       )
@@ -479,7 +479,7 @@ describe('zero-config clean consumer fixture', () => {
     const subsequentHtml = await subsequent.text()
     expect(subsequent.status).toBe(200)
     expect(subsequentHtml).toContain('class="home-page"')
-    expect(subsequentHtml).not.toContain('Application unavailable')
+    expect(subsequentHtml).not.toContain('Something went wrong')
   })
 
   it('injects only the rendered lazy Vue route CSS in development', async () => {
@@ -595,7 +595,7 @@ const title = 'script-only-lazy'
       const html = await response.text()
       expect(response.status, html).toBe(200)
       expect(html).toContain(text)
-      expect(html).not.toContain('Application unavailable')
+      expect(html).not.toContain('Something went wrong')
       expect(renderedModules.get(path)).toContain('src/App.vue')
       if (path === '/') {
         expect(renderedModules.get(path)).toContain('src/HomePage.vue')
@@ -625,7 +625,9 @@ const title = 'script-only-lazy'
     const failed = await fetch(`http://127.0.0.1:${managedServer.address().port}/`, { headers: { accept: 'text/html' } })
     expect(failed.status).toBe(500)
     const failedHtml = await failed.text()
-    expect(failedHtml).toContain('Application unavailable')
+    expect(failedHtml).toContain('500 · Internal Server Error')
+    expect(failedHtml).toContain('Something went wrong')
+    expect(failedHtml).toContain('The request could not be completed.')
     expect(failedHtml).not.toMatch(/src\/App|manifest|module-not-in-manifest|SsrProductionArtifactError/)
     expect(errors).toHaveBeenCalledWith('ssr.request.failed', expect.objectContaining({
       artifact: 'rendered-assets', reason: 'module-not-in-manifest',
