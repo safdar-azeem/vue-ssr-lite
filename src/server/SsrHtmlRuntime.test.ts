@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { serializeJsonLd } from '../SsrManagedHead'
+import { createTestDomain } from '../SsrTestFixtures'
 import {
   createSsrDevelopmentOpenInEditorHref,
   injectSsrHtml,
@@ -10,6 +11,32 @@ import {
 } from './SsrHtmlRuntime'
 
 describe('SSR HTML runtime', () => {
+  it.each([
+    { existing: '/assets/page.css?v=1', rendered: '/assets/page.css?v=2', temporary: false, count: 2 },
+    { existing: '/assets/page.css?v=1', rendered: '/assets/page.css?v=1', temporary: false, count: 1 },
+    { existing: '/assets/page.css?a=1&b=2', rendered: '/assets/page.css?b=2&a=1', temporary: false, count: 2 },
+    { existing: '/src/Page.vue?vue&type=style&t=1', rendered: '/src/Page.vue?vue&type=style&direct&t=2', temporary: true, count: 1 },
+  ])('deduplicates assets using the correct query identity: $rendered', ({ existing, rendered, temporary, count }) => {
+    const template = prepareSsrHtmlTemplate(`<html><head><link rel="stylesheet" href="${existing}"></head><body><div id="app"></div></body></html>`)
+    const asset = { applicationId: 'app', rel: 'stylesheet' as const, href: rendered, temporary }
+    const html = injectSsrHtml(template, {
+      applicationId: 'app', html: '', teleports: {}, head: null,
+      state: { version: 1, applicationId: 'app', publicConfig: {}, application: {}, domain: createTestDomain('assets.test') },
+      assets: [asset, asset],
+    })
+    expect(html.match(/rel="stylesheet"/g)).toHaveLength(count)
+  })
+
+  it('does not preload a module twice when Vite already emitted its entry script', () => {
+    const template = prepareSsrHtmlTemplate('<html><head><script type="module" src="/assets/entry.js"></script></head><body><div id="app"></div></body></html>')
+    const html = injectSsrHtml(template, {
+      applicationId: 'app', html: '', teleports: {}, head: null,
+      state: { version: 1, applicationId: 'app', publicConfig: {}, application: {}, domain: createTestDomain('assets.test') },
+      assets: [{ applicationId: 'app', rel: 'modulepreload', href: '/assets/entry.js' }],
+    })
+    expect(html).not.toContain('rel="modulepreload"')
+  })
+
   it('scans long quoted attributes and raw-text elements without recognizing decoy mount elements', () => {
     const largeAttribute = 'large > quoted < text '.repeat(10_000)
     const source = `<html><head>
