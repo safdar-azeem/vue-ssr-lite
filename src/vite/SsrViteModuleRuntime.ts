@@ -8,15 +8,12 @@ const NON_RUNNABLE_SSR_ENVIRONMENT_ERROR =
   'vue-ssr-lite development SSR requires a Vite RunnableDevEnvironment for the "ssr" environment because server-side application modules must execute in the Node runtime.'
 
 /** Import a server module through the ModuleRunner owned by Vite's SSR environment. */
-export const importSsrViteModule = async <T = Record<string, unknown>>(
+const trackImportedRoot = async (
   server: ViteDevServer,
   specifier: string
-): Promise<T> => {
+): Promise<void> => {
   const environment = server.environments.ssr
-  if (!isRunnableDevEnvironment(environment)) {
-    throw new Error(NON_RUNNABLE_SSR_ENVIRONMENT_ERROR)
-  }
-  const value = await environment.runner.import<T>(specifier)
+  if (!isRunnableDevEnvironment(environment)) return
   const evaluated = environment.runner.evaluatedModules.getModuleByUrl(specifier)
   const module = evaluated
     ? environment.moduleGraph.getModuleById(evaluated.id)
@@ -26,7 +23,28 @@ export const importSsrViteModule = async <T = Record<string, unknown>>(
     if (!roots) importedRoots.set(server, roots = new Set())
     roots.add(module.id)
   }
-  return value
+}
+
+export const importSsrViteModule = async <T = Record<string, unknown>>(
+  server: ViteDevServer,
+  specifier: string
+): Promise<T> => {
+  const environment = server.environments.ssr
+  if (!isRunnableDevEnvironment(environment)) {
+    throw new Error(NON_RUNNABLE_SSR_ENVIRONMENT_ERROR)
+  }
+  try {
+    const value = await environment.runner.import<T>(specifier)
+    await trackImportedRoot(server, specifier)
+    return value
+  } catch (error) {
+    try {
+      await trackImportedRoot(server, specifier)
+    } catch {
+      // A failed import remains the authoritative error.
+    }
+    throw error
+  }
 }
 
 /** Snapshot Vite-owned invalidation and evaluation identities, never source
