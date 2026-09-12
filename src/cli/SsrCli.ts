@@ -7,6 +7,11 @@ import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
 import { parseSsrCliArguments, type SsrCliOptions } from './SsrCliOptions'
+import { createSsrCliDevelopmentViteConfig } from './SsrCliVite'
+import {
+  createSsrViteCliConfigMarker,
+  createSsrViteCliInlineConfig,
+} from '../vite/SsrViteCliConfig'
 import { createDeploymentBuild } from '../deployment/DeploymentRuntime'
 import { reportSsrCliFatal } from './SsrCliFatal'
 
@@ -18,35 +23,39 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
   const createViteServer = production
     ? undefined
     : (await import('vite')).createServer
-  const vite = production
-    ? undefined
-    : await createViteServer!({
-        root: options.root,
-        server: {
-          middlewareMode: true,
-          hmr: { port: hmrPort, clientPort: hmrPort },
-        },
-        appType: 'custom',
-      })
-  startupTimings?.mark('Vite initialization')
-  const managedOptions: SsrManagedServerOptions = {
-    production,
-    root: options.root,
-    vite,
-    loadRuntime: production
-      ? () => import(pathToFileURL(options.serverOutput).href)
-      : () => importSsrViteModule(vite!, SSR_RUNTIME_VIRTUAL_ID),
+  let vite: Awaited<ReturnType<NonNullable<typeof createViteServer>>> | undefined
+  let managed: Awaited<ReturnType<typeof createSsrManagedServer>> | undefined
+  try {
+    vite = production
+      ? undefined
+      : await createViteServer!(createSsrCliDevelopmentViteConfig(options, hmrPort))
+    startupTimings?.mark('Vite initialization')
+    const managedOptions: SsrManagedServerOptions = {
+      production,
+      root: options.root,
+      config: options.config,
+      vite,
+      loadRuntime: production
+        ? () => import(pathToFileURL(options.serverOutput).href)
+        : () => importSsrViteModule(vite!, SSR_RUNTIME_VIRTUAL_ID),
+    }
+    if (startupTimings) attachSsrPhaseTimings(managedOptions, startupTimings)
+    managed = await createSsrManagedServer(managedOptions)
+    await managed.listen()
+  } catch (error) {
+    if (managed) await managed.close().catch(() => undefined)
+    else if (vite) await vite.close().catch(() => undefined)
+    throw error
   }
-  if (startupTimings) attachSsrPhaseTimings(managedOptions, startupTimings)
-  const managed = await createSsrManagedServer(managedOptions)
-  await managed.listen()
+  if (!managed) throw new Error('SSR managed server was not created.')
+  const listening = managed
 
   let closing = false
   const close = async (signal: string) => {
     if (closing) return
     closing = true
     try {
-      await managed.close()
+      await listening.close()
       console.log(`stopped after ${signal}`)
       process.exitCode = 0
     } catch (error) {
@@ -61,8 +70,20 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
 const runBuild = async (options: SsrCliOptions) => {
   const deployment = createDeploymentBuild(options.root)
   const { build: viteBuild } = await import('vite')
-  await viteBuild({ root: options.root, plugins: deployment.plugins })
-  await viteBuild(createSsrProductionViteBuildOptions(options.root))
+  const cliInline = createSsrViteCliInlineConfig(options.cliConfig)
+  const cliMarker = options.cliConfig
+    ? [createSsrViteCliConfigMarker(options.cliConfig)]
+    : []
+  await viteBuild({
+    root: options.root,
+    plugins: [...deployment.plugins, ...cliMarker],
+    ...cliInline,
+  })
+  await viteBuild({
+    ...createSsrProductionViteBuildOptions(options.root),
+    plugins: cliMarker.length ? cliMarker : undefined,
+    ...cliInline,
+  })
   await deployment.complete(options.serverOutput)
 }
 
