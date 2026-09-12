@@ -788,6 +788,21 @@ const readBoundShells = (
   return exported?.__vueSsrLiteShells
 }
 
+/** Listen/timeout/logger options from the user config without binding application shells. */
+export const resolveSsrDevelopmentControlPlane = async (
+  loaded: unknown,
+  options: Pick<CompileSsrConfigOptions, 'root'> = {}
+): Promise<SsrResolvedServerOptions> => {
+  const moduleValue = loaded as { default?: SsrConfigExport }
+  const exported = moduleValue?.default ?? (loaded as SsrConfigExport)
+  const raw = typeof exported === 'function' ? await exported() : exported
+  const config = normalizeSsrConfig((raw || {}) as SsrConfig, {
+    root: options.root,
+    development: true,
+  })
+  return normalizeCompiledServerOptions(config, { root: options.root }, true)
+}
+
 export const compileSsrConfig = async (
   loaded: unknown,
   options: CompileSsrConfigOptions = {}
