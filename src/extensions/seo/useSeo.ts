@@ -1,9 +1,7 @@
 import { getCurrentInstance, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { isSsrProduction } from '../../SsrCanonicalOrigin'
-import {
-  SSR_EXTENSION_RUNTIME,
-  type ExtensionRuntime,
-} from '../../core/extensions/ExtensionRuntime'
+import type { ExtensionRuntime } from '../../core/extensions/ExtensionRuntime'
+import { SSR_EXTENSION_RUNTIME } from '../../core/extensions/ExtensionRuntimeKey'
 import { useSsrRequestContext } from '../../SsrRequestContext'
 import {
   recomputeSeoResponseStatus,
@@ -45,7 +43,11 @@ export const useSeo = (input: UseSeoSource): void => {
   }
 
   const runtime = context[SSR_EXTENSION_RUNTIME]
-  if (!runtime || runtime.disposed) {
+  if (!runtime) {
+    warn(SEO_DISABLED_WARNING)
+    return
+  }
+  if (runtime.disposed) {
     warn(SETUP_WARNING)
     return
   }
