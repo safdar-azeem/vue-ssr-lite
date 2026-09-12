@@ -256,22 +256,26 @@ export interface SsrHtmlInjection {
   assets?: readonly SsrRenderedApplicationAsset[]
 }
 
-const readHtmlAttribute = (source: string, target: string): string | undefined => {
-  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const match = new RegExp(
-    `(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-    'i'
-  ).exec(source)
+const ASSET_ATTRIBUTE_PATTERNS = Object.fromEntries(
+  ['type', 'src', 'rel', 'href'].map((name) => [name, new RegExp(
+    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'
+  )])
+)
+
+const readHtmlAttribute = (source: string, target: 'type' | 'src' | 'rel' | 'href'): string | undefined => {
+  const match = ASSET_ATTRIBUTE_PATTERNS[target].exec(source)
   return match?.[1] ?? match?.[2] ?? match?.[3]
 }
 
-const normalizeRenderedAssetHref = (href: string): string | undefined => {
+const normalizeRenderedAssetHref = (href: string, temporary = false): string | undefined => {
   try {
     const url = new URL(href, 'http://vue-ssr-lite.local')
-    for (const name of ['direct', 'import', 't', 'v']) {
-      url.searchParams.delete(name)
+    // Vite development CSS ownership ignores transform/cache-busting queries.
+    // Production query strings can select different resources or signatures.
+    if (temporary) {
+      for (const name of ['direct', 'import', 't', 'v']) url.searchParams.delete(name)
+      url.searchParams.sort()
     }
-    url.searchParams.sort()
     return url.origin === 'http://vue-ssr-lite.local'
       ? `${url.pathname}${url.search}`
       : url.href
@@ -286,6 +290,16 @@ const serializeSsrRenderedAssets = (
 ): string => {
   if (!assets.length) return ''
   const existing = new Set<string>()
+  const hasTemporaryAssets = assets.some((asset) => asset.temporary)
+  const developmentExisting = hasTemporaryAssets ? new Set<string>() : null
+  const remember = (rel: string, href: string) => {
+    const identity = normalizeRenderedAssetHref(href)
+    if (identity) existing.add(`${rel}:${identity}`)
+    if (hasTemporaryAssets) {
+      const developmentIdentity = normalizeRenderedAssetHref(href, true)
+      if (developmentIdentity) developmentExisting?.add(`${rel}:${developmentIdentity}`)
+    }
+  }
   for (const element of scanSsrHtmlElementStarts(source)) {
     const tagName = element.tagName.toLowerCase()
     if (tagName === 'script') {
@@ -294,10 +308,7 @@ const serializeSsrRenderedAssets = (
         '&amp;',
         '&'
       )
-      const identity = src && normalizeRenderedAssetHref(src)
-      if (identity && type === 'module') {
-        existing.add(`modulepreload:${identity}`)
-      }
+      if (src && type === 'module') remember('modulepreload', src)
       continue
     }
     if (tagName !== 'link') continue
@@ -307,20 +318,17 @@ const serializeSsrRenderedAssets = (
       '&amp;',
       '&'
     )
-    const identity = href && normalizeRenderedAssetHref(href)
     for (const supported of ['stylesheet', 'modulepreload'] as const) {
-      if (identity && rel.includes(supported)) {
-        existing.add(`${supported}:${identity}`)
-      }
+      if (href && rel.includes(supported)) remember(supported, href)
     }
   }
   const tags: string[] = []
   for (const asset of assets) {
-    const normalizedHref = normalizeRenderedAssetHref(asset.href)
+    const normalizedHref = normalizeRenderedAssetHref(asset.href, asset.temporary)
     if (!normalizedHref) continue
     const identity = `${asset.rel}:${normalizedHref}`
-    if (existing.has(identity)) continue
-    existing.add(identity)
+    if ((asset.temporary ? developmentExisting : existing)?.has(identity)) continue
+    remember(asset.rel, asset.href)
     const temporary = asset.temporary
       ? ` ${SSR_DEVELOPMENT_RENDERED_STYLESHEET_ATTRIBUTE}="${escapeSsrHtml(asset.applicationId)}"`
       : ''
