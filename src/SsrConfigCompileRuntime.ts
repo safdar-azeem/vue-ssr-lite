@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { access, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -45,6 +45,7 @@ import {
   SSR_RENDERER_VIRTUAL_ID,
   attachClientGraph,
   normalizeSsrConfig,
+  resolveApplicationSeoConfig,
   resolveSsrDevelopmentControlPlane,
   toProjectRelative,
   type NormalizeSsrConfigOptions,
@@ -591,6 +592,7 @@ export const extractSsrViteEntries = (
       mountSelector: app.mountSelector,
       applicationFile: app.shell.applicationFile,
       universalProjection: projections?.get(app.id),
+      clientSeo: resolveApplicationSeoConfig(app.seo),
     })),
   }
 }
@@ -707,6 +709,26 @@ export const generateSsrClientModule = (
   const hydrate = entry.kind !== 'spa'
   const mountSelector = JSON.stringify(entry.mountSelector)
   const projection = entry.universalProjection
+  // A linked or duplicated module graph can evaluate the same generated entry
+  // twice with different component and initializer object identities. Coordinate
+  // that entry through its complete projected input identity. A different entry
+  // that happens to use the same public id receives a different identity and
+  // still reaches the browser document ownership guard.
+  const readyIdentity = createHash('sha256')
+    .update(JSON.stringify([
+      entry.root,
+      entry.main,
+      entry.routesModule,
+      entry.routesExport,
+      entry.routesFromMain,
+      entry.kind,
+      entry.mountSelector,
+      entry.clientSeo,
+      projection,
+      environment.development,
+    ]))
+    .digest('hex')
+    .slice(0, 16)
   const lines = [
     `import App from ${JSON.stringify(rootPath)}`,
     `import * as __ssrMain from ${JSON.stringify(mainPath)}`,
@@ -749,16 +771,24 @@ export const generateSsrClientModule = (
     `  id: ${JSON.stringify(entry.id)},`,
     `  __vueSsrLiteDevelopment: ${environment.development ?? 'import.meta.env.DEV'},`,
     '  root: App,',
+    `  seo: ${JSON.stringify(entry.clientSeo ?? {})},`,
     '  routes,',
     `  defaultRender: ${JSON.stringify(entry.kind)},`,
     '  install: initialize,',
     ...projectedFields,
     '}',
+    `const __ssrReadyKey = Symbol.for(${JSON.stringify(`vue-ssr-lite:client-ready:${entry.id}`)})`,
+    'const __ssrDocument = document',
+    'const __ssrReadyRecord = __ssrDocument[__ssrReadyKey]',
+    `const __ssrReadyIdentity = ${JSON.stringify(readyIdentity)}`,
+    'const __ssrExistingReady = __ssrReadyRecord?.identity === __ssrReadyIdentity ? __ssrReadyRecord.ready : undefined',
+    'let __ssrOwnReady',
+    'let __ssrOwnReadyRecord',
   )
   if (hydrate) {
     lines.push(
       `const __ssrStateId = ${JSON.stringify(getSsrStateElementId(entry.id))}`,
-      'export const ready = (async () => {',
+      'export const ready = __ssrExistingReady ?? (__ssrOwnReady = (async () => {',
       '  const __ssrStateElement = document.getElementById(__ssrStateId)',
       '  if (__ssrStateElement?.textContent) {',
       ...(environment.development === false ? [] : [
@@ -771,20 +801,32 @@ export const generateSsrClientModule = (
       '    return',
       '  }',
       `  return mountSpaApplication(definition, { mountSelector: ${mountSelector} })`,
-      '})()',
-      'void ready.catch((error) => {',
-      "  console.error('[vue-ssr-lite] hydration failed', error)",
-      '  throw error',
-      '})',
+      '})())',
+      'if (__ssrOwnReady) {',
+      '  if (!__ssrReadyRecord) {',
+      '    __ssrOwnReadyRecord = { identity: __ssrReadyIdentity, ready }',
+      '    __ssrDocument[__ssrReadyKey] = __ssrOwnReadyRecord',
+      '  }',
+      '  void ready.catch((error) => {',
+      '    if (__ssrDocument[__ssrReadyKey] === __ssrOwnReadyRecord) delete __ssrDocument[__ssrReadyKey]',
+      "    console.error('[vue-ssr-lite] hydration failed', error)",
+      '  })',
+      '}',
       '',
     )
   } else {
     lines.push(
-      `export const ready = mountSpaApplication(definition, { mountSelector: ${mountSelector} })`,
-      'void ready.catch((error) => {',
-      "  console.error('[vue-ssr-lite] SPA mount failed', error)",
-      '  throw error',
-      '})',
+      `export const ready = __ssrExistingReady ?? (__ssrOwnReady = mountSpaApplication(definition, { mountSelector: ${mountSelector} }))`,
+      'if (__ssrOwnReady) {',
+      '  if (!__ssrReadyRecord) {',
+      '    __ssrOwnReadyRecord = { identity: __ssrReadyIdentity, ready }',
+      '    __ssrDocument[__ssrReadyKey] = __ssrOwnReadyRecord',
+      '  }',
+      '  void ready.catch((error) => {',
+      '    if (__ssrDocument[__ssrReadyKey] === __ssrOwnReadyRecord) delete __ssrDocument[__ssrReadyKey]',
+      "    console.error('[vue-ssr-lite] SPA mount failed', error)",
+      '  })',
+      '}',
       '',
     )
   }
