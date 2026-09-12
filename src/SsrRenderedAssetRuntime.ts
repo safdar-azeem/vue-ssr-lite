@@ -155,15 +155,26 @@ export const resolveRenderedApplicationAssets = (options: {
 /** Prepare immutable manifest relationships at server startup. Request-specific
  * rendered module IDs still determine the exact asset selection and order. */
 export const createSsrRenderedAssetResolver = (manifest: SsrViteManifest, base: string, root?: string) => {
-  const modules = new Map<string, SsrManifestAsset[]>()
+  const indexed = new Map<string, Map<string, SsrManifestAsset>>()
+  // Shared chunks occur in many manifest entries and Vue block aliases. Join
+  // and validate each distinct asset once, then deduplicate each module once.
+  const filesByName = new Map<string, readonly SsrManifestAsset[]>()
   for (const [id, files] of Object.entries(manifest)) {
     const identity = moduleIdentity(id, root)
-    const assets = modules.get(identity) ?? []
-    assets.push(...prepareManifestModule(files, base))
+    const assets = indexed.get(identity) ?? new Map<string, SsrManifestAsset>()
+    for (const file of files) {
+      let prepared = filesByName.get(file)
+      if (!prepared) {
+        prepared = prepareManifestModule([file], base)
+        filesByName.set(file, prepared)
+      }
+      for (const asset of prepared) assets.set(asset.identity, asset)
+    }
     // An authoritative empty entry is meaningful: eager CSS/JS already lives
     // in the HTML template. Missing entries must still fail below.
-    modules.set(identity, assets)
+    indexed.set(identity, assets)
   }
+  const modules = new Map([...indexed].map(([id, assets]) => [id, [...assets.values()]]))
   return (applicationId: string, moduleIds: readonly string[]) =>
-    collectRenderedAssets(applicationId, moduleIds, (id) => modules.get(moduleIdentity(id, root)))
+    collectRenderedAssets(applicationId, moduleIds, (id) => modules.get(id) ?? modules.get(moduleIdentity(id, root)))
 }
