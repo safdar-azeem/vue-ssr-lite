@@ -331,6 +331,110 @@ describe('transport-independent SSR request handler', () => {
     }
   })
 
+  it('renders the canonical 421 document for an unmatched HTML host and keeps HEAD bodyless', async () => {
+    const scope = createSsrRequestScope(0)
+    const request = Object.freeze({
+      ...normalizedHtmlRequest('/'),
+      headers: Object.freeze({
+        host: 'unknown.test',
+        accept: 'text/html',
+      }),
+    })
+    try {
+      const response = await handleSsrRequest(
+        request,
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(response?.statusCode).toBe(421)
+      expect(response?.headers?.['content-type']).toBe('text/html; charset=utf-8')
+      expect(String(response?.body)).toContain('421 · Misdirected Request')
+      expect(String(response?.body)).toContain('Host not available')
+      expect(String(response?.body)).toContain('This host is not available.')
+      expect(String(response?.body)).not.toContain('No application serves this host.')
+      expect(String(response?.body)).not.toContain('request-handler-test')
+      expect(String(response?.body)).not.toContain('Error ID:')
+
+      const head = await handleSsrRequest(
+        Object.freeze({ ...request, method: 'HEAD' }),
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(head?.statusCode).toBe(421)
+      expect(head?.body).toBeUndefined()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('uses the canonical 400 document only for invalid-host HTML navigation', async () => {
+    const scope = createSsrRequestScope(0)
+    const invalidHtml = Object.freeze({
+      ...normalizedHtmlRequest('/'),
+      headers: Object.freeze({ host: 'bad host', accept: 'text/html' }),
+    })
+    const invalidJson = Object.freeze({
+      ...normalizedRequest('/'),
+      headers: Object.freeze({ host: 'bad host', accept: 'application/json' }),
+    })
+    try {
+      const html = await handleSsrRequest(
+        invalidHtml,
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(html?.statusCode).toBe(400)
+      expect(html?.headers?.['content-type']).toBe('text/html; charset=utf-8')
+      expect(String(html?.body)).toContain('400 · Bad Request')
+      expect(String(html?.body)).toContain('Invalid request')
+      expect(String(html?.body)).toContain('The request could not be processed.')
+      expect(String(html?.body)).not.toContain('Host header')
+      expect(String(html?.body)).not.toContain('Error ID:')
+
+      const json = await handleSsrRequest(
+        invalidJson,
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(json?.headers?.['content-type']).toBe('application/json; charset=utf-8')
+      expect(JSON.parse(String(json?.body))).toEqual({
+        status: 'error',
+        message: 'Invalid Host header.',
+      })
+
+      const head = await handleSsrRequest(
+        Object.freeze({ ...invalidHtml, method: 'HEAD' }),
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(head?.statusCode).toBe(400)
+      expect(head?.body).toBeUndefined()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('uses the canonical 400 document for a malformed HTML request path', async () => {
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/products/%invalid'),
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(response?.statusCode).toBe(400)
+      expect(response?.headers?.['content-type']).toBe('text/html; charset=utf-8')
+      expect(String(response?.body)).toContain('400 · Bad Request')
+      expect(String(response?.body)).toContain('Invalid request')
+      expect(String(response?.body)).toContain('The request could not be processed.')
+      expect(String(response?.body)).not.toContain('Malformed percent encoding')
+      expect(String(response?.body)).not.toContain('Error ID:')
+
+      const api = await handleSsrRequest(
+        normalizedRequest('/products/%invalid'),
+        { ...handlerRuntime(scope, compiledDefinition()), production: true }
+      )
+      expect(api?.statusCode).toBe(400)
+      expect(api?.body).toBeUndefined()
+    } finally {
+      scope.dispose()
+    }
+  })
+
   it('returns a normal Core response without Node HTTP request or response objects', async () => {
     const scope = createSsrRequestScope(0)
     try {
@@ -545,7 +649,7 @@ describe('transport-independent SSR request handler', () => {
     }
   })
 
-  it('maps queue-capacity exhaustion to a small transport-independent 503', async () => {
+  it('maps queue-capacity exhaustion to canonical HTML without inventing an error id', async () => {
     const admission = createSsrAdmissionController({ maxConcurrent: 1, maxQueued: 0 })
     const held = await admission.acquire({
       signal: new AbortController().signal,
@@ -557,19 +661,35 @@ describe('transport-independent SSR request handler', () => {
     try {
       const response = await handleSsrRequest(
         normalizedHtmlRequest('/overloaded'),
-        handlerRuntime(scope, compiledDefinition(undefined, undefined, 'ssr'), admission)
+        {
+          ...handlerRuntime(scope, compiledDefinition(undefined, undefined, 'ssr'), admission),
+          production: true,
+        }
       )
 
       expect(response?.statusCode).toBe(503)
       expect(response?.headers).toMatchObject({
-        'content-type': 'application/json; charset=utf-8',
+        'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
       })
-      expect(JSON.parse(String(response?.body))).toEqual({
-        status: 'error',
-        service: 'request-handler-test',
-        message: 'Service temporarily unavailable.',
-      })
+      expect(String(response?.body)).toContain('503 · Service Unavailable')
+      expect(String(response?.body)).toContain('Service unavailable')
+      expect(String(response?.body)).toContain(
+        'The service is temporarily unavailable. Please try again later.'
+      )
+      expect(String(response?.body)).not.toContain('SSR admission capacity is exhausted')
+      expect(String(response?.body)).not.toContain('request-handler-test')
+      expect(String(response?.body)).not.toContain('Error ID:')
+
+      const head = await handleSsrRequest(
+        Object.freeze({ ...normalizedHtmlRequest('/overloaded'), method: 'HEAD' }),
+        {
+          ...handlerRuntime(scope, compiledDefinition(undefined, undefined, 'ssr'), admission),
+          production: true,
+        }
+      )
+      expect(head?.statusCode).toBe(503)
+      expect(head?.body).toBeUndefined()
     } finally {
       scope.dispose()
       held.release()
@@ -896,7 +1016,9 @@ describe('transport-independent SSR request handler', () => {
         { ...handlerRuntime(scope, definition), production: true }
       )
       const html = String(response?.body)
-      expect(html).toContain('Application unavailable')
+      expect(html).toContain('500 · Internal Server Error')
+      expect(html).toContain('Something went wrong')
+      expect(html).toContain('The request could not be completed.')
       expect(html).toMatch(/Error ID: vssl_[a-f0-9]{16}/)
       expect(html).not.toContain('vite:vue')
       expect(html).not.toContain('SyntaxError')
@@ -1011,7 +1133,9 @@ describe('transport-independent SSR request handler', () => {
         { ...handlerRuntime(scope, definition), production: true }
       )
       const html = String(response?.body)
-      expect(html).toContain('Application unavailable')
+      expect(html).toContain('500 · Internal Server Error')
+      expect(html).toContain('Something went wrong')
+      expect(html).toContain('The request could not be completed.')
       expect(html).not.toContain('Cannot read properties')
       expect(logger.error).toHaveBeenCalledWith('ssr.request.failed', expect.objectContaining({
         errorType: 'TypeError',
@@ -1019,6 +1143,70 @@ describe('transport-independent SSR request handler', () => {
         errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
       }))
       const details = logger.error.mock.calls[0]![1] as Record<string, unknown>
+      expect(html).toContain(`Error ID: ${details.errorId}`)
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('preserves the structured non-HTML production error response', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const definition = compiledDefinition({
+      id: 'api-failure',
+      match: (request) => request.pathname === '/api-failure',
+      handle: () => {
+        throw new Error('private API failure')
+      },
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedRequest('/api-failure'),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      expect(response?.statusCode).toBe(500)
+      expect(response?.headers?.['content-type']).toBe('application/json; charset=utf-8')
+      expect(JSON.parse(String(response?.body))).toEqual({
+        status: 'error',
+        service: 'request-handler-test',
+        errorId: expect.stringMatching(/^vssl_[a-f0-9]{16}$/),
+      })
+      expect(String(response?.body)).not.toContain('private API failure')
+      expect(String(response?.body)).not.toContain('<html')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('uses one generic 503 presentation for an internal SEO service failure', async () => {
+    const logger = { error: vi.fn() }
+    const definition = compiledDefinition({
+      id: 'sitemap',
+      match: (request) => request.pathname === '/sitemap.xml',
+      handle: () => {
+        throw new Error('Private sitemap provider token expired')
+      },
+    })
+    Object.assign(definition.server, { logger })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        normalizedHtmlRequest('/sitemap.xml'),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      const html = String(response?.body)
+      expect(response?.statusCode).toBe(503)
+      expect(html).toContain('503 · Service Unavailable')
+      expect(html).toContain('Service unavailable')
+      expect(html).toContain(
+        'The service is temporarily unavailable. Please try again later.'
+      )
+      expect(html).not.toContain('sitemap provider')
+      expect(html).not.toContain('token expired')
+      const details = logger.error.mock.calls.find(
+        ([event]) => event === 'ssr.request.failed'
+      )![1] as Record<string, unknown>
+      expect(details.message).toBe('Private sitemap provider token expired')
       expect(html).toContain(`Error ID: ${details.errorId}`)
     } finally {
       scope.dispose()
@@ -1085,6 +1273,30 @@ describe('transport-independent SSR request handler', () => {
       })
     } finally {
       scope.dispose()
+    }
+  })
+
+  it('keeps a production timeout HEAD response bodyless', async () => {
+    vi.useFakeTimers()
+    const definition = compiledDefinition({
+      id: 'timeout',
+      match: (request) => request.pathname === '/timeout',
+      handle: () => new Promise<SsrHttpResponse>(() => undefined),
+    })
+    const scope = createSsrRequestScope(20)
+    try {
+      const pending = handleSsrRequest(
+        Object.freeze({ ...normalizedHtmlRequest('/timeout'), method: 'HEAD' }),
+        { ...handlerRuntime(scope, definition), production: true }
+      )
+      await vi.advanceTimersByTimeAsync(20)
+      const response = await pending
+      expect(response?.statusCode).toBe(504)
+      expect(response?.headers?.['content-type']).toBe('text/html; charset=utf-8')
+      expect(response?.body).toBeUndefined()
+    } finally {
+      scope.dispose()
+      vi.useRealTimers()
     }
   })
 })
