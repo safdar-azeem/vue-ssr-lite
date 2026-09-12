@@ -14,7 +14,7 @@ export default defineApplication({
     site: {
       title: 'Admin',
       siteName: 'Admin',
-      description: 'ADMIN_SERVER_ONLY_PROVIDER',
+      description: 'ADMIN_STATIC_SEO_DEFAULT',
       index: false,
       follow: false,
     },
