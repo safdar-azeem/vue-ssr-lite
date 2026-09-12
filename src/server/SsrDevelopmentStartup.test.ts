@@ -36,12 +36,14 @@ const HOME_HERO = '/src/modules/Public/components/HomeHero.vue'
 const HERO_SOURCE = 'src/modules/Public/components/HomeHero.vue'
 const dependencies = ['/src/App.vue', '/src/main.ts', HOME_HERO]
 
+const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, '')
+
 const terminalText = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls.map((args) => args.map(String).join(' ')).join('\n')
 
 const developmentErrors = (spy: { mock: { calls: unknown[][] } }) =>
   spy.mock.calls
-    .map((args) => String(args[0] ?? ''))
+    .map((args) => stripAnsi(String(args[0] ?? '')))
     .filter((text) => text.trimStart().startsWith('ERROR:') || text.includes('✓ Application recovered'))
     .map((text) => text.trimStart().startsWith('ERROR:') ? text.trimStart() : text)
 let root = ''
@@ -319,7 +321,7 @@ describe('development startup with a broken application runtime', () => {
     expect(second.status).toBe(500)
     expect(first.headers['content-type']).toMatch(/text\/html/)
     expect(first.headers['cache-control']).toBe('no-store')
-    expect(first.body).toContain('background:#090b0e')
+    expect(first.body).toContain('background:#000')
     expect(first.body).toContain('Application error')
     expect(first.body).toContain('vite:vue · SyntaxError')
     expect(first.body).not.toContain('[plugin:vite:vue]')
@@ -342,7 +344,7 @@ describe('development startup with a broken application runtime', () => {
         `File: ${HERO_SOURCE}:10:1`,
       ].join('\n'),
     ])
-    expect(consoleLog.mock.calls.some(([text]) => String(text).startsWith('\nERROR:'))).toBe(true)
+    expect(consoleLog.mock.calls.some(([text]) => stripAnsi(String(text)).startsWith('\nERROR:'))).toBe(true)
     expect(terminalText(consoleError)).not.toContain('[vue-ssr-lite]')
     expect(terminalText(consoleLog)).not.toContain('ssr.runtime.unavailable')
     expect(terminalText(consoleLog)).not.toContain('Application runtime unavailable')
