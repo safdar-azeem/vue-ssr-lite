@@ -7,7 +7,7 @@ import type {
 } from './ExtensionContext'
 import type { ExtensionDefinition } from './ExtensionDefinition'
 
-export const SSR_EXTENSION_RUNTIME = Symbol.for('vue-ssr:extension-runtime')
+export { SSR_EXTENSION_RUNTIME } from './ExtensionRuntimeKey'
 
 export interface ExtensionRuntimeOptions {
   applicationId: string
