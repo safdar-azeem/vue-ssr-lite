@@ -51,11 +51,15 @@ const writeConsumerProject = async (pluginConfig = '') => {
   await linkPackage('@vitejs/plugin-vue')
   await writeFile(
     join(root, 'node_modules/vue-ssr-lite/package.json'),
-    '{"name":"vue-ssr-lite","type":"module","exports":"./index.js"}\n'
+    '{"name":"vue-ssr-lite","type":"module","exports":{".":"./index.js","./client":"./client.js"}}\n'
   )
   await writeFile(
     join(root, 'node_modules/vue-ssr-lite/index.js'),
     'export const defineApplication = (config) => config\n'
+  )
+  await writeFile(
+    join(root, 'node_modules/vue-ssr-lite/client.js'),
+    'export const hydrateSsrApplication = () => {}\nexport const mountSpaApplication = () => {}\n'
   )
   await writeFile(join(root, 'package.json'), '{"private":true,"type":"module"}\n')
   await writeFile(
