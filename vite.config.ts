@@ -1,4 +1,4 @@
-import { resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import dts from 'vite-plugin-dts'
@@ -13,6 +13,24 @@ export default defineConfig({
   // artifact from publishing the repository's complete internal type tree or
   // declaration maps that point back to unpublished src/ files.
   plugins: [
+    {
+      name: 'vue-ssr-lite:package-module-attribution',
+      generateBundle(_options, bundle) {
+        const modules = Object.fromEntries(Object.values(bundle)
+          .filter((item) => item.type === 'chunk')
+          .map((item) => [item.fileName, Object.keys(item.modules).map((id) => {
+            const source = relative(resolve(repositoryRoot, 'src'), id).replaceAll('\\', '/')
+            if (source.startsWith('../') || source.startsWith('/') || id.startsWith('\0')) {
+              throw new Error(`Unexpected package implementation: ${id}`)
+            }
+            return source
+          })]))
+        this.emitFile({
+          type: 'asset', fileName: 'module-attribution.json',
+          source: JSON.stringify({ version: 1, modules }, null, 2),
+        })
+      },
+    },
     dts({
       rollupTypes: true,
       // vite-plugin-dts collects ambient module augmentations globally and
@@ -42,6 +60,7 @@ export default defineConfig({
       fileName: (_format, entryName) => `${entryName}.mjs`,
     },
     rollupOptions: {
+      preserveEntrySignatures: 'strict',
       external: [
         /^node:/,
         'esbuild',
@@ -54,6 +73,11 @@ export default defineConfig({
         /^vue-router(?:\/|$)/,
       ],
       output: {
+        // Preserve implementation identities through the npm artifact. Consumers
+        // perform final tree shaking; unrelated entry roots cannot be fused into
+        // opaque shared library chunks before that pass.
+        preserveModules: true,
+        preserveModulesRoot: resolve(repositoryRoot, 'src'),
         entryFileNames: '[name].mjs',
         chunkFileNames: 'chunks/[name]-[hash].mjs',
       },
