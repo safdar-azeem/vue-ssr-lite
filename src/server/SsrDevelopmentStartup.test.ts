@@ -325,7 +325,7 @@ describe('development startup with a broken application runtime', () => {
     expect(first.body).toContain('Application error')
     expect(first.body).toContain('vite:vue · SyntaxError')
     expect(first.body).not.toContain('[plugin:vite:vue]')
-    expect(first.body).toContain('Single file component can contain only one <template> element')
+    expect(first.body).toContain('Single file component can contain only one &lt;template&gt; element')
     expect(first.body).toContain(`${HERO_SOURCE}:10:1`)
     expect(first.body).toContain('__open-in-editor?file=')
     expect(first.body).toContain('data-ssr-open-source')
