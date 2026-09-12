@@ -3,8 +3,11 @@ import {
   isNavigationFailure,
   NavigationFailureType,
   START_LOCATION,
+  createWebHistory,
 } from 'vue-router'
-import { createSsrApplication } from './SsrApplicationRuntime'
+import { createSsrApplicationCore } from './SsrApplicationCore'
+import { createSsrBrowserResolution } from './SsrBrowserResolution'
+import { markSsrBrowserIdle, markSsrBrowserPhase } from './SsrBrowserTiming'
 import { completeSsrBrowserHydration } from './SsrHydrationRuntime'
 import type { SsrDomainContext } from './SsrConfigTypes'
 import { getSsrStateElementId } from './SsrSerialization'
@@ -20,6 +23,16 @@ export type SsrClientApplicationDefinition<
   TApplicationState = Record<string, unknown>,
   TPublicConfig = unknown,
 > = SsrApplicationDefinition<TApplicationState, TPublicConfig> & { id: string }
+
+const browserHost = {
+  createHistory: createWebHistory,
+  createResolution: createSsrBrowserResolution,
+}
+
+const createSsrApplication = (
+  definition: SsrClientApplicationDefinition<any, any>,
+  options: Parameters<typeof createSsrApplicationCore>[1]
+) => createSsrApplicationCore(definition, options, browserHost)
 
 export interface SsrHydrateOptions {
   mountSelector?: string
@@ -85,6 +98,7 @@ export const hydrateSsrApplication = async (
   definition: SsrClientApplicationDefinition<any, any>,
   options: SsrHydrateOptions = {}
 ): Promise<void> => {
+  markSsrBrowserPhase(definition.id, 'hydrate-start')
   const stateElementId =
     options.stateElementId ?? getSsrStateElementId(definition.id)
   const stateElement = document.getElementById(stateElementId)
@@ -118,6 +132,7 @@ export const hydrateSsrApplication = async (
       request,
       hydrationState,
     })
+    markSsrBrowserPhase(definition.id, 'application-ready')
     if (created.router) {
       try {
         const target =
@@ -142,6 +157,7 @@ export const hydrateSsrApplication = async (
         )
         if (!middlewareOutcome && !navigationAborted) {
           await created.router.isReady()
+          markSsrBrowserPhase(definition.id, 'router-ready')
           resolveResponseStatusForRoute(
             created.context.response,
             created.router.currentRoute.value
@@ -159,10 +175,13 @@ export const hydrateSsrApplication = async (
     // The initial START_LOCATION navigation is intentionally outside browser
     // loading UI. Server markup remains visible until this hydration mount;
     // RouterView and LoadingIndicator observe subsequent navigations only.
+    markSsrBrowserPhase(definition.id, 'mount-start')
     created.app.mount(options.mountSelector ?? '#app')
     await completeSsrBrowserHydration(created.app, created.hydration)
     created.managedHead.hydrate(document.head)
     stateElement.remove()
+    markSsrBrowserPhase(definition.id, 'hydrate-complete')
+    markSsrBrowserIdle(definition.id, controller.signal, created.hydration)
   } catch (error) {
     controller.abort()
     try {
@@ -189,6 +208,7 @@ export const mountSpaApplication = async <
   >,
   options: SsrSpaMountOptions<TPublicConfig> = {}
 ): Promise<SsrMountedApplication> => {
+  markSsrBrowserPhase(definition.id, 'spa-start')
   const injected = readSpaDomainState<TPublicConfig>()
   const domain = options.domain ?? injected?.domain
   if (!domain) {
@@ -213,6 +233,7 @@ export const mountSpaApplication = async <
       spa: true,
       request,
     })
+    markSsrBrowserPhase(definition.id, 'application-ready')
     if (created.router) {
       try {
         const target =
@@ -238,6 +259,7 @@ export const mountSpaApplication = async <
         )
         if (!middlewareOutcome && !navigationAborted) {
           await created.router.isReady()
+          markSsrBrowserPhase(definition.id, 'router-ready')
           resolveResponseStatusForRoute(
             created.context.response,
             created.router.currentRoute.value
@@ -255,9 +277,12 @@ export const mountSpaApplication = async <
     const activeCreated = created
     // The static index.html shell owns initial SPA feedback. Framework loading
     // components mount only after middleware accepted the initial navigation.
+    markSsrBrowserPhase(definition.id, 'mount-start')
     app.mount(options.mountSelector ?? '#app')
     activeCreated.managedHead.hydrate(document.head)
     document.getElementById('vue-ssr-lite-domain')?.remove()
+    markSsrBrowserPhase(definition.id, 'spa-mounted')
+    markSsrBrowserIdle(definition.id, controller.signal, activeCreated.hydration)
     return {
       app,
       unmount: () => {
