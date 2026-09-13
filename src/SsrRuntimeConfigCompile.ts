@@ -53,6 +53,7 @@ import {
 import type { SsrApplicationRenderer } from './SsrRenderRuntime'
 import { prepareSsrCompiledMetadata } from './server/SsrCompiledMetadata'
 import type { SsrUniversalRuntimeProjection } from './SsrUniversalProjection'
+import type { SsrBrowserBootstrapCapability } from './SsrBrowserBootstrap'
 
 export const SSR_DEFAULT_MAIN = './src/main.ts'
 export const SSR_DEFAULT_ROOT = './src/App.vue'
@@ -173,6 +174,8 @@ export interface SsrViteApplicationEntry {
   applicationFile?: string
   universalProjection?: SsrUniversalRuntimeProjection
   clientSeo?: SeoApplicationConfig
+  /** Private facts from normalized config; never emitted into client config. */
+  initialBootstrap?: readonly SsrBrowserBootstrapCapability[]
 }
 
 export interface SsrViteEntries {
