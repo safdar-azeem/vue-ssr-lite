@@ -1,4 +1,4 @@
-import { frameworkModuleSources } from '../SsrModuleAttribution'
+import { createSsrFrameworkSourceResolver, frameworkModuleSources } from '../SsrModuleAttribution'
 import { createSsrBootstrapAssetManifest, type SsrBootstrapBuildApplication } from '../vite/SsrViteBootstrap'
 export { frameworkModuleSources } from '../SsrModuleAttribution'
 import { brotliCompressSync, gzipSync } from 'node:zlib'
@@ -27,7 +27,10 @@ export const bundleModuleOwner = (id: string, frameworkRoot: string): BundleOwne
     if (/\/navigation\/|SsrNavigation/.test(path)) return 'framework-navigation'
     return 'framework-core'
   }
-  if (/\/node_modules\/(?:@vue\/|vue\/)/.test(path)) return 'vue'
+  if (/\/node_modules\/vue\//.test(path) ||
+    /\/node_modules\/@vue\/(?:runtime-core|runtime-dom|reactivity|shared|compiler-sfc|compiler-core|compiler-dom|compiler-ssr|server-renderer)\//.test(path)) {
+    return 'vue'
+  }
   if (/\/node_modules\/vue-router\//.test(path)) return 'vue-router'
   if (path.includes('/node_modules/')) return 'third-party'
   if (path.startsWith('\0') || path.startsWith('vite/')) return 'bundler'
@@ -54,10 +57,16 @@ const sumSizes = (values: readonly ReturnType<typeof sizes>[]) => values.reduce(
 export interface BundleAuditOptions {
   /** Emitted by the library build; maps dist files to original implementation ids. */
   moduleSources?: Record<string, string[]>
+  /** Task 010 resolver for source, workspace-linked, and installed package ids. */
+  resolveSources?: (id: string) => readonly string[]
   moduleInfo?: (id: string) => { importedIds: readonly string[]; dynamicallyImportedIds: readonly string[] } | null
 }
 
 export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, options: BundleAuditOptions = {}) => {
+  const sourcesFor = (id: string) => {
+    const resolved = options.resolveSources?.(id)
+    return resolved?.length ? resolved : frameworkModuleSources(id, frameworkRoot, options)
+  }
   const chunks = Object.values(bundle).filter((item) => item.type === 'chunk').map((chunk) => ({
     file: chunk.fileName,
     entry: chunk.isEntry,
@@ -68,16 +77,16 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
     sizes: sizes(chunk.code),
     modules: Object.entries(chunk.modules).map(([id, module]) => ({
       id,
-      sources: frameworkModuleSources(id, frameworkRoot, options),
+      sources: sourcesFor(id),
       owner: bundleModuleOwner(
-        frameworkModuleSources(id, frameworkRoot, options).length === 1
-          ? `${frameworkRoot}/src/${frameworkModuleSources(id, frameworkRoot, options)[0]}` : id,
+        sourcesFor(id).length === 1
+          ? `${frameworkRoot}/src/${sourcesFor(id)[0]}` : id,
         frameworkRoot
       ),
       imports: [...(options.moduleInfo?.(id)?.importedIds ?? [])],
       dynamicImports: [...(options.moduleInfo?.(id)?.dynamicallyImportedIds ?? [])],
       dynamicImportSources: (options.moduleInfo?.(id)?.dynamicallyImportedIds ?? [])
-        .flatMap((target) => frameworkModuleSources(target, frameworkRoot, options)),
+        .flatMap((target) => [...sourcesFor(target)]),
       renderedLength: module.renderedLength,
       originalLength: module.originalLength,
       renderedExports: module.renderedExports,
@@ -169,7 +178,7 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
     stylesheets,
     bootstrapReport,
     bootstrapManifest: (applications: readonly SsrBootstrapBuildApplication[]) =>
-      createSsrBootstrapAssetManifest(bundle, applications, (id) => frameworkModuleSources(id, frameworkRoot, options)),
+      createSsrBootstrapAssetManifest(bundle, applications, sourcesFor),
     entries: chunks.filter((chunk) => chunk.entry).map((chunk) => ({ file: chunk.file, ...critical([chunk.file]) })),
     critical,
   }
@@ -182,7 +191,16 @@ export const ssrBundleAudit = (
   options: BundleAuditOptions = {}
 ): Plugin => ({
   name: 'vue-ssr-lite:test-bundle-audit',
-  generateBundle(_options, bundle) {
-    receive(inspectSsrBundle(bundle, frameworkRoot, { ...options, moduleInfo: (id) => this.getModuleInfo(id) }))
+  async generateBundle(_options, bundle) {
+    const ids = Object.values(bundle).flatMap((output) => output.type === 'chunk' ? Object.keys(output.modules) : [])
+    const discovered = options.resolveSources ?? await createSsrFrameworkSourceResolver(ids)
+    receive(inspectSsrBundle(bundle, frameworkRoot, {
+      ...options,
+      resolveSources: (id) => {
+        const resolved = discovered(id)
+        return resolved.length ? resolved : frameworkModuleSources(id, frameworkRoot, options)
+      },
+      moduleInfo: (id) => this.getModuleInfo(id),
+    }))
   },
 })
