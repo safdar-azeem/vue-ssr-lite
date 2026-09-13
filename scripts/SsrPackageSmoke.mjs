@@ -387,7 +387,7 @@ const writeFixture = async (consumerRoot) => {
 import vue from '@vitejs/plugin-vue'
 import { vueSsrLite } from 'vue-ssr-lite/vite'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { inspectSsrBundle } from './capability-audit-helper.mjs'
+import { inspectSsrBundle } from './node_modules/vue-ssr-lite/.capability-audit-helper.mjs'
 import { fileURLToPath } from 'node:url'
 
 const packageRoot = fileURLToPath(new URL('./node_modules/vue-ssr-lite/', import.meta.url))
