@@ -386,6 +386,7 @@ export type LandingRequestEvidence =
       path: string
       capabilities: ReturnType<typeof readSsrRequestBootstrap>
       renderedModules: readonly string[]
+      loadedModuleIds: readonly string[]
       htmlBytes: number
     }
   | {
@@ -393,6 +394,50 @@ export type LandingRequestEvidence =
       path: string
       error: string
     }
+
+type ViteModuleLike = {
+  id?: string | null
+  file?: string | null
+  url?: string
+  ssrModule?: unknown
+  transformResult?: unknown
+  ssrTransformResult?: unknown
+}
+
+type ViteModuleGraphLike = {
+  idToModuleMap?: Map<string, ViteModuleLike>
+  urlToModuleMap?: Map<string, ViteModuleLike>
+}
+
+type ViteRenderHost = {
+  ssrLoadModule: (id: string) => Promise<Record<string, unknown>>
+  moduleGraph?: ViteModuleGraphLike
+  environments?: Record<string, { moduleGraph?: ViteModuleGraphLike }>
+}
+
+const viteModuleWasEvaluated = (mod: ViteModuleLike) =>
+  mod.ssrModule != null || mod.transformResult != null || mod.ssrTransformResult != null
+
+/** Module ids Vite actually evaluated while serving the authoritative landing render. */
+export const collectEvaluatedViteModuleIds = (vite: ViteRenderHost) => {
+  const ids: string[] = []
+  const seen = new Set<string>()
+  const consider = (mod?: ViteModuleLike) => {
+    if (!mod || !viteModuleWasEvaluated(mod)) return
+    for (const id of [mod.id, mod.file, mod.url]) {
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+    }
+  }
+  const walk = (graph?: ViteModuleGraphLike) => {
+    graph?.idToModuleMap?.forEach(consider)
+    graph?.urlToModuleMap?.forEach(consider)
+  }
+  walk(vite.moduleGraph)
+  for (const environment of Object.values(vite.environments ?? {})) walk(environment.moduleGraph)
+  return ids
+}
 
 const hrefFile = (href: string, base: string) => {
   if (base !== '/' && href.startsWith(base)) return href.slice(base.length).replace(/^\//, '')
@@ -516,7 +561,7 @@ export const decideCompleteInitialClaim = (input: {
 }
 
 const renderLandingPath = async (
-  vite: { ssrLoadModule: (id: string) => Promise<Record<string, unknown>> },
+  vite: ViteRenderHost,
   options: {
     path: string
     applicationId: string
@@ -550,6 +595,7 @@ const renderLandingPath = async (
     path: options.path,
     capabilities: readSsrRequestBootstrap(rendered),
     renderedModules: [...rendered.renderedModules],
+    loadedModuleIds: collectEvaluatedViteModuleIds(vite),
     htmlBytes: Buffer.byteLength(rendered.html),
   }
 }
@@ -592,6 +638,24 @@ const withTimeout = async <T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
+const flattenLandingVitePlugins = async (plugins: unknown): Promise<Array<{ name?: string }>> => {
+  const items = Array.isArray(plugins) ? plugins : plugins == null ? [] : [plugins]
+  const out: Array<{ name?: string }> = []
+  for (const item of items) {
+    const resolved = await item
+    if (resolved == null || resolved === false) continue
+    if (Array.isArray(resolved)) {
+      out.push(...await flattenLandingVitePlugins(resolved))
+      continue
+    }
+    out.push(resolved as { name?: string })
+  }
+  return out
+}
+
+const isVueSsrLitePlugin = (name: string | undefined) =>
+  name === 'vue-ssr-lite' || (name?.startsWith('vue-ssr-lite:') ?? false)
+
 const createLandingSourceServer = async (options: {
   landingRoot: string
   aliases?: readonly { find: string; replacement: string }[]
@@ -600,12 +664,20 @@ const createLandingSourceServer = async (options: {
   const viteNs = await import(pathToFileURL(landingRequire.resolve('vite')).href) as typeof import('vite')
   const vue = ((await import(pathToFileURL(landingRequire.resolve('@vitejs/plugin-vue')).href)) as { default: () => unknown }).default
   const tailwindcss = ((await import(pathToFileURL(landingRequire.resolve('@tailwindcss/vite')).href)) as { default: () => unknown }).default
+  const loaded = await viteNs.loadConfigFromFile(
+    { command: 'serve', mode: 'production' },
+    join(options.landingRoot, 'vite.config.ts'),
+    options.landingRoot,
+  )
+  const consumerPlugins = await flattenLandingVitePlugins(loaded?.config.plugins)
+  const omittedPlugins = consumerPlugins.filter((plugin) => isVueSsrLitePlugin(plugin.name)).map((plugin) => plugin.name!)
+  const plugins = consumerPlugins.filter((plugin) => !isVueSsrLitePlugin(plugin.name))
   return {
     vite: await viteNs.createServer({
       configFile: false,
       root: options.landingRoot,
       mode: 'production',
-      plugins: [vue(), tailwindcss()] as never,
+      plugins: (plugins.length ? plugins : [vue(), tailwindcss()]) as never,
       resolve: {
         alias: (options.aliases ?? [])
           .filter((alias) => !alias.find.startsWith('/'))
@@ -617,8 +689,8 @@ const createLandingSourceServer = async (options: {
     }),
     loader: {
       kind: 'vue-tailwind-observed-aliases' as const,
-      omittedPlugins: ['vue-ssr-lite'],
-      reason: 'This server only transforms landing source for ssrLoadModule. It does not rebuild the production client graph. Installed vue-ssr-lite is omitted because its Vite serve plugin stalled createServer in this audit.',
+      omittedPlugins: omittedPlugins.length ? omittedPlugins : ['vue-ssr-lite'],
+      reason: 'This server only transforms landing source for ssrLoadModule. It does not rebuild the production client graph. Consumer Vite plugins from landing `vite.config.ts` are kept (including application auto-imports). Installed vue-ssr-lite is omitted because its Vite serve plugin stalled createServer in this audit.',
     },
   }
 }
