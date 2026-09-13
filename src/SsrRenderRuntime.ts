@@ -1,4 +1,4 @@
-import { attachSsrRequestBootstrap, type SsrBrowserBootstrapCapability } from './SsrBrowserBootstrap'
+import { attachSsrRequestBootstrap, requestBootstrapCapabilities } from './SsrBrowserBootstrap'
 import { renderToString } from 'vue/server-renderer'
 import {
   createSsrApplication,
@@ -369,9 +369,6 @@ export const renderSsrApplication = async <
       finishSerialization?.()
       const totalAt = now()
 
-      const bootstrap: SsrBrowserBootstrapCapability[] = []
-      if (active.router) bootstrap.push('navigation')
-      if (navigationNeedsMiddleware) bootstrap.push('middleware')
       return attachSsrRequestBootstrap({
         html,
         teleports,
@@ -392,7 +389,7 @@ export const renderSsrApplication = async <
           stateBytes,
           renderPasses: passes,
         },
-      }, bootstrap)
+      }, requestBootstrapCapabilities(Boolean(active.router), navigationNeedsMiddleware))
     })
   } finally {
     await disposeCurrent()
