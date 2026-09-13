@@ -1,3 +1,4 @@
+import { requiresSsrMiddlewareRuntime } from './SsrMiddlewarePresence'
 import type { NavigationGuard, Router } from 'vue-router'
 import type { SsrMiddlewareExecutionController, SsrMiddlewareInstallation } from './SsrMiddlewareRuntime'
 import type { SsrRenderRequest } from '../SsrRuntimeTypes'
@@ -60,8 +61,7 @@ export const createSsrBrowserMiddleware = (options: {
         if (!guard) {
           // Presence is conservative: getters, explicit undefined and invalid
           // declarations reach the executor without evaluating user getters twice.
-          const required = applicationMiddleware.length > 0 ||
-            to.matched.some((record) => 'middleware' in record.meta)
+          const required = requiresSsrMiddlewareRuntime(applicationMiddleware, to)
           if (!required) return true
           await activate()
         }
