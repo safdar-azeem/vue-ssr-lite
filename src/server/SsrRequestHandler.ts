@@ -23,6 +23,7 @@ import { serializeSsrState } from '../SsrSerialization'
 import type { SsrRenderedApplicationAsset } from '../SsrApplicationAssetRuntime'
 import type { SsrViteManifest } from '../SsrRenderedAssetRuntime'
 import { resolveRenderedApplicationAssets } from '../SsrRenderedAssetRuntime'
+import { readSsrRequestBootstrap, type SsrBrowserBootstrapCapability } from '../SsrBrowserBootstrap'
 import { attachSsrTrustedLocalOrigin } from '../SsrRequestOrigin'
 import {
   resolveSsrForwardedHost,
@@ -30,6 +31,7 @@ import {
 } from './SsrHostRuntime'
 import {
   injectSsrHtml,
+  injectSsrRenderedAssets,
   renderSsrErrorDocument,
   renderSsrPublicErrorDocument,
   type SsrPublicErrorStatusCode,
@@ -184,6 +186,10 @@ export interface SsrRequestHandlerRuntime {
   readonly resolveProductionAssets?: (
     applicationId: string,
     modules: readonly string[]
+  ) => readonly SsrRenderedApplicationAsset[]
+  readonly resolveBootstrapAssets?: (
+    applicationId: string,
+    capabilities?: readonly SsrBrowserBootstrapCapability[]
   ) => readonly SsrRenderedApplicationAsset[]
   readonly loadTemplate: (
     definition: SsrCompiledConfig,
@@ -604,7 +610,8 @@ export const handleSsrRequest = async (
           runtime.loadTemplate(definition, entry, request.url || '/', signal, timings)
         )
         timings?.mark('template')
-        const body = injectSpaDomainState(template, entry.id, domain, publicConfig)
+        const assets = runtime.production ? runtime.resolveBootstrapAssets?.(entry.id) ?? [] : []
+        const body = injectSpaDomainState(injectSsrRenderedAssets(template, assets), entry.id, domain, publicConfig)
         timings?.mark('serialization / HTML injection')
         return {
           statusCode: 200,
@@ -727,7 +734,10 @@ export const handleSsrRequest = async (
         teleports: rendered.teleports,
         head: rendered.head,
         state: rendered.hydrationState,
-        assets: renderedAssets,
+        assets: [
+          ...renderedAssets,
+          ...(runtime.production ? runtime.resolveBootstrapAssets?.(application.id, readSsrRequestBootstrap(rendered)) ?? [] : []),
+        ],
       }
       if (timings) attachSsrPhaseTimings(injection, timings)
       const document = injectSsrHtml(template, injection)
