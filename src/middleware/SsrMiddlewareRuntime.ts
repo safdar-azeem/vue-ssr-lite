@@ -1,4 +1,5 @@
 import type { App } from 'vue'
+import { requiresSsrMiddlewareRuntime } from './SsrMiddlewarePresence'
 import {
   START_LOCATION,
   stringifyQuery,
@@ -152,6 +153,8 @@ const applyBrowserMiddlewareRedirect = (
 export const createSsrMiddlewareExecutionController = (options: {
   server: boolean
   request: SsrRenderRequest<any>
+  /** @internal Existing navigation reports browser execution needs to its renderer. */
+  onBootstrapRequirement?: (required: boolean) => void
 }): SsrMiddlewareExecutionController => {
   const cache = new Map<string, {
     installationId: number
@@ -354,6 +357,9 @@ export const createSsrMiddlewareExecutionController = (options: {
       }
 
       const removeBefore = registerBeforeEach(async (to, from) => {
+        if (options.server && options.onBootstrapRequirement) {
+          options.onBootstrapRequirement(requiresSsrMiddlewareRuntime(applicationMiddleware, to))
+        }
         for (const pendingTarget of [...transactions.keys()]) {
           rollback(pendingTarget)
         }
