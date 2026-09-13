@@ -160,3 +160,27 @@ describe('capability attribution contracts', () => {
       .toThrow('package-only framework retention')
   })
 })
+
+
+describe('Task 011 critical bootstrap report', () => {
+  it('partitions JS and proves static retention with exact whole-file sizes', () => {
+    const entry = chunk('entry.js', ['shared.js'], ['capability.js', 'route.js', 'later.js'])
+    entry.facadeModuleId = '/app/main.ts'
+    const shared = chunk('shared.js', ['vue'])
+    shared.modules = { '/framework/src/SsrApplicationCore.ts': { renderedLength: 10, originalLength: 12, renderedExports: ['create'], removedExports: [], code: 'create()' } }
+    const audit = inspectSsrBundle({
+      'entry.js': entry, 'shared.js': shared,
+      'capability.js': chunk('capability.js', ['shared.js']),
+      'route.js': chunk('route.js', ['shared.js']), 'later.js': chunk('later.js', ['shared.js']),
+    }, '/framework', { moduleInfo: (id) => ({ importedIds: id === '/app/main.ts' ? ['/framework/src/SsrApplicationCore.ts'] : [], dynamicallyImportedIds: [] }) })
+    const report = audit.bootstrapReport(['entry.js'], ['capability.js'], ['route.js'])
+    expect(report.entryStatic.files).toEqual(['entry.js', 'shared.js'])
+    expect(report.initialCapabilities.files).toEqual(['capability.js'])
+    expect(report.renderedRoute.files).toEqual(['route.js'])
+    expect(report.deferredOnly.files).toEqual(['later.js'])
+    expect(report.completeInitialPage.external).toEqual(['vue'])
+    expect(report.completeInitialPage.js).toEqual(audit.critical(['entry.js', 'capability.js', 'route.js']).js)
+    expect(report.staticRetention).toEqual([{ source: 'SsrApplicationCore.ts', file: 'shared.js', moduleId: '/framework/src/SsrApplicationCore.ts', renderedLength: 10,
+      path: ['/app/main.ts', '/framework/src/SsrApplicationCore.ts'], reason: 'static-import-path' }])
+  })
+})
