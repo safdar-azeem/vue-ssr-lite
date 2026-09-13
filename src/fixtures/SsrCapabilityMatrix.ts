@@ -2,6 +2,7 @@ import { builtinModules, createRequire } from 'node:module'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { build } from 'vite'
+import { SSR_BROWSER_BOOTSTRAP_SOURCES, type SsrBrowserBootstrapCapability } from '../SsrBrowserBootstrap'
 import { ssrBundleAudit, type inspectSsrBundle } from './SsrBundleAudit'
 import {
   BROWSER_ACTIVATION_SOURCES, CAPABILITY_PROFILES, type CapabilityProfile,
@@ -18,6 +19,9 @@ interface CapabilityRow {
   activationSources: string[]
   activationFiles: string[]
   routeFiles: string[]
+  criticalBootstrap: ReturnType<Audit['bootstrapReport']>
+  bootstrapManifest: ReturnType<Audit['bootstrapManifest']>
+  bootstrapCapabilitySources: Record<string, string[]>
   entryStatic: Payload
   bootstrap: Payload
   route: Payload
@@ -120,10 +124,31 @@ export const buildSsrCapabilityMatrix = async (options: CapabilityMatrixOptions)
       if (page.css.some((file) => /later/.test(file))) throw new Error(`${profile}: sibling CSS entered the initial closure`)
       if (facts.router && !routeFiles.length) throw new Error(`${profile}: lazy current route disappeared`)
       assertCapabilityPagePayload(page, externalPeers)
+      const initial = (Object.keys(SSR_BROWSER_BOOTSTRAP_SOURCES) as SsrBrowserBootstrapCapability[])
+        .filter((key) => facts[key === 'navigation' ? 'router' : key])
+      const clientModuleId = audit.chunks.find((chunk) => chunk.file === audit.entries[0]!.file)!.facadeModuleId!
+      const bootstrapManifest = audit.bootstrapManifest([{ id: 'app', clientModuleId, initial }])
+      const mapped = bootstrapManifest.applications.app!.capabilities
+      const bootstrapCapabilitySources = Object.fromEntries(Object.entries(mapped).map(([key, files]) => [key,
+        [...new Set(audit.chunks.filter((chunk) => files.includes(chunk.file)).flatMap((chunk) => chunk.modules)
+          .filter((module) => module.renderedLength > 0).flatMap((module) => module.sources))].sort(),
+      ]))
+      for (const key of initial) {
+        const implementation = SSR_BROWSER_BOOTSTRAP_SOURCES[key]
+        if (!retainedFrameworkSources(audit, entryStatic).includes(implementation) &&
+            !bootstrapCapabilitySources[key]?.includes(implementation)) {
+          throw new Error(profile + ': missing bootstrap mapping for ' + key)
+        }
+      }
+      const criticalBootstrap = audit.bootstrapReport([audit.entries[0]!.file], activationFiles, routeFiles)
+      if (JSON.stringify(criticalBootstrap.completeInitialPage.js) !== JSON.stringify(page.js)) {
+        throw new Error(profile + ': Task 011 accounting changed complete initial JS')
+      }
       rows.push({
         profile, externalPeers, mode: options.mode,
         activationSources, activationFiles, routeFiles,
         entryStatic, bootstrap, route, page,
+        criticalBootstrap, bootstrapManifest, bootstrapCapabilitySources,
         frameworkSources: retainedFrameworkSources(audit, page),
         entryFrameworkSources: retainedFrameworkSources(audit, entryStatic),
         bootstrapFrameworkSources: retainedFrameworkSources(audit, bootstrap),
@@ -165,8 +190,22 @@ export const compareSsrCapabilityMatrices = (
   for (const key of ['frameworkSources', 'entryFrameworkSources', 'bootstrapFrameworkSources'] as const) {
     assertInstalledCapabilityParity(control[key], row[key], `${row.profile}/${key}`)
   }
+  if (JSON.stringify(control.bootstrapManifest.applications.app!.initial) !== JSON.stringify(row.bootstrapManifest.applications.app!.initial)) {
+    throw new Error(row.profile + ': source/packed bootstrap application facts differ')
+  }
+  for (const capability of Object.keys(SSR_BROWSER_BOOTSTRAP_SOURCES)) {
+    const sourceMapping = control.bootstrapCapabilitySources[capability] ?? []
+    const packedMapping = row.bootstrapCapabilitySources[capability] ?? []
+    assertInstalledCapabilityParity(sourceMapping, packedMapping, row.profile + '/bootstrap/' + capability)
+    const boundaries = new Set<string>(Object.values(SSR_BROWSER_BOOTSTRAP_SOURCES))
+    if (JSON.stringify(sourceMapping.filter((source) => boundaries.has(source))) !==
+        JSON.stringify(packedMapping.filter((source) => boundaries.has(source)))) {
+      throw new Error(row.profile + ': source/packed semantic capability mapping differs for ' + capability)
+    }
+  }
   return {
     profile: row.profile, externalPeers: row.externalPeers,
+    bootstrapCapabilitySources: row.bootstrapCapabilitySources,
     source: control.page.js, installed: row.page.js,
     delta: Object.fromEntries((['bytes', 'gzip', 'brotli'] as const).map((key) => [key, row.page.js[key] - control.page.js[key]])),
   }
