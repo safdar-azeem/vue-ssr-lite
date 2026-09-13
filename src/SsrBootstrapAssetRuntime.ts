@@ -54,6 +54,18 @@ export const parseSsrBootstrapAssetManifest = (source: string): SsrBootstrapAsse
   return Object.freeze({ version: 1, policy: value.policy as SsrBootstrapPreloadPolicy, applications: Object.freeze(applications) })
 }
 
+/** Application.initial is the static set. Request keys are only the Task 011 render result. */
+export const selectSsrBootstrapCapabilityKeys = (
+  initial: readonly SsrBrowserBootstrapCapability[],
+  request: readonly SsrBrowserBootstrapCapability[] = []
+): readonly SsrBrowserBootstrapCapability[] => [...new Set([...initial, ...request])]
+
+/** Look up only the selected keys. The capability map is available outputs, not the initial set. */
+export const selectSsrBootstrapCapabilityFiles = (
+  capabilities: Partial<Record<SsrBrowserBootstrapCapability, readonly string[]>>,
+  keys: readonly SsrBrowserBootstrapCapability[]
+): readonly string[] => [...new Set(keys.flatMap((key) => capabilities[key] ?? []))]
+
 /** Validation, URL joining and application-owned links happen once at startup. */
 export const createSsrBootstrapAssetResolver = (
   manifest: SsrBootstrapAssetManifest,
@@ -78,7 +90,7 @@ export const createSsrBootstrapAssetResolver = (
     const application = applications.get(applicationId)
     if (!application) return []
     const links = new Map<string, SsrRenderedApplicationAsset>()
-    for (const key of new Set([...application.initial, ...request])) {
+    for (const key of selectSsrBootstrapCapabilityKeys(application.initial, request)) {
       for (const asset of application.capabilities.get(key) ?? []) links.set(asset.href, asset)
     }
     return [...links.values()]
