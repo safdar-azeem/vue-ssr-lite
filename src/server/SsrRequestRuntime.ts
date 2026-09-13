@@ -51,6 +51,8 @@ import {
   type SsrViteManifest,
 } from '../SsrRenderedAssetRuntime'
 import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from './SsrHtmlRuntime'
+import type { SsrBrowserBootstrapCapability } from '../SsrBrowserBootstrap'
+import { createSsrBootstrapAssetResolver, parseSsrBootstrapAssetManifest, SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
 import { createSsrProductionTemplateStore } from './SsrProductionTemplateRuntime'
 import { prepareSsrCompiledMetadata } from './SsrCompiledMetadata'
 import {
@@ -165,7 +167,7 @@ const resolveRuntime = async (
 
 const readProductionArtifact = async (
   filename: string,
-  artifact: 'client-manifest' | 'asset-cache-metadata' | 'ssr-manifest'
+  artifact: 'client-manifest' | 'asset-cache-metadata' | 'ssr-manifest' | 'bootstrap-metadata'
 ): Promise<string> => {
   try {
     return await readFile(filename, 'utf8')
@@ -373,8 +375,30 @@ export const createSsrRequestRuntime = async (
   const viteBase = hasEnabledSsrApplications
     ? assertSupportedSsrViteBase(lastDefinition!.viteBase)
     : lastDefinition?.viteBase || '/'
+  let resolveBootstrapAssets: ReturnType<typeof createSsrBootstrapAssetResolver> | undefined
   let immutableAssetPaths: ReadonlySet<string> = new Set()
   if (options.production) {
+    try {
+      const source = await readProductionArtifact(resolve(clientRoot, SSR_BROWSER_BOOTSTRAP_METADATA_PATH), 'bootstrap-metadata')
+      // Conventional main.ts routes are deliberately not executed by the build
+      // compiler. The already-bound immutable server definition knows them,
+      // including for this application's SSR-to-SPA fallback shell.
+      const boundInitial = new Map(lastDefinition!.applications.map((entry) => {
+        const initial: SsrBrowserBootstrapCapability[] = []
+        if (entry.application?.routes || entry.application?.router) {
+          initial.push('navigation')
+          if (entry.application.middleware?.length) initial.push('middleware')
+        }
+        return [entry.id, initial] as const
+      }))
+      resolveBootstrapAssets = createSsrBootstrapAssetResolver(parseSsrBootstrapAssetManifest(source), lastDefinition?.viteBase ?? viteBase, boundInitial)
+    } catch (error) {
+      // Optional optimization: old/manually assembled builds still execute their
+      // dynamic imports. Malformed metadata follows artifact privacy diagnostics.
+      if (readSsrProductionFailure(error)?.code !== 'bootstrap-metadata.missing') {
+        throw markSsrInitializationFailure(error, 'artifact-preflight')
+      }
+    }
     const clientManifestPath = resolve(clientRoot, '.vite/manifest.json')
     const assetMetadataPath = resolve(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH)
     let manifestAssets: ReadonlySet<string> = new Set()
@@ -672,6 +696,7 @@ export const createSsrRequestRuntime = async (
       readyToRequestMs: readyAt === undefined ? undefined : request.startedAt - readyAt,
     }),
     resolveProductionAssets,
+    resolveBootstrapAssets,
     loadTemplate,
     loadPreparedSsrTemplate,
     resolveDevelopmentAssets: (applicationId, modules) =>
