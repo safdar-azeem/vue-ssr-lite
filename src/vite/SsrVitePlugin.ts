@@ -32,6 +32,9 @@ import {
 } from './SsrViteAssetRuntime'
 import { readSsrViteCliConfig } from './SsrViteCliConfig'
 import { attachSsrViteResolvedConfigPath } from './SsrViteResolvedConfigPath'
+import { createSsrFrameworkSourceResolver } from '../SsrModuleAttribution'
+import { SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
+import { createSsrBootstrapAssetManifest, resolveSsrBootstrapPreloadPolicy } from './SsrViteBootstrap'
 
 export {
   attachSsrViteResolvedConfigPath,
@@ -220,6 +223,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
   let root = resolve(options.root || process.cwd())
   let resolvedBase = '/'
   let configuredBuildBase: string | undefined
+  let bootstrapExperimental: Parameters<typeof resolveSsrBootstrapPreloadPolicy>[0]['experimental']
   let cliConfig: string | undefined
   let configPath: string | undefined
   let entries: SsrViteEntries | null = null
@@ -433,6 +437,7 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     configResolved(config) {
       root = config.root
+      bootstrapExperimental = config.experimental
       // Builds have no Vite CSS/HMR ownership runtime, even if a programmatic
       // caller (for example Vitest) retains NODE_ENV=test and thus env.DEV=true.
       developmentClient = config.command === 'serve'
@@ -571,8 +576,20 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
       if (!entry) return
       return generateSsrClientModule(root, entry, { development: developmentClient })
     },
-    generateBundle(outputOptions, bundle) {
+    async generateBundle(outputOptions, bundle) {
       if (this.environment.config.consumer !== 'client') return
+      const sources = await createSsrFrameworkSourceResolver(Object.values(bundle).flatMap((output) =>
+        output.type === 'chunk' ? Object.keys(output.modules) : []
+      ))
+      const bootstrap = createSsrBootstrapAssetManifest(bundle, (entries?.applications ?? []).map((entry) => ({
+        id: entry.id,
+        clientModuleId: `${RESOLVED_CLIENT_PREFIX}${entry.id}`,
+        initial: entry.initialBootstrap ?? [],
+      })), sources, resolveSsrBootstrapPreloadPolicy({ build: this.environment.config.build, experimental: bootstrapExperimental }))
+      this.emitFile({
+        type: 'asset', fileName: SSR_BROWSER_BOOTSTRAP_METADATA_PATH,
+        source: JSON.stringify(bootstrap),
+      })
       const immutable: string[] = []
       const revisionedAssetIdentities =
         typeof outputOptions.assetFileNames === 'function'
@@ -606,7 +623,9 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         // individual filename is derived through the hashed assetFileNames
         // template. Explicit fileName assets bypass it. Require a unique
         // identity match as well, so an ambiguous same-source output stays
-        // conservatively cached. Manifest intersection during serving remains
+        // conservatively cached. Vite CSS from a shared/facade-less chunk may
+        // have no originalFileNames; the tracked naming invocation, not a
+        // facade, proves content revision. Manifest intersection during serving remains
         // the final guard against public-directory copies.
         const assetIdentity =
           output.type === 'asset'
@@ -614,7 +633,6 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
             : undefined
         if (
           output.type === 'asset' &&
-          output.originalFileNames.length &&
           assetIdentity &&
           revisionedAssetIdentities?.has(assetIdentity) &&
           outputAssetIdentityCounts.get(assetIdentity) === 1
