@@ -1,3 +1,4 @@
+import { attachSsrRequestBootstrap, type SsrBrowserBootstrapCapability } from './SsrBrowserBootstrap'
 import { renderToString } from 'vue/server-renderer'
 import {
   createSsrApplication,
@@ -117,9 +118,11 @@ export const renderSsrApplication = async <
   // One resolution controller is shared across every pass so tracked work and
   // pass requests accumulate coherently while the app is recreated per pass.
   const resolution = createSsrResolutionController(true)
+  let navigationNeedsMiddleware = false
   const middlewareController = createSsrMiddlewareExecutionController({
     server: true,
     request,
+    onBootstrapRequirement: (required) => { navigationNeedsMiddleware = required },
   })
 
   let contextReadyAt = startedAt
@@ -181,6 +184,7 @@ export const renderSsrApplication = async <
     for (let pass = 0; pass < maxPasses && !finalized; pass += 1) {
       throwIfRequestAborted(request.signal)
       passes = pass + 1
+      navigationNeedsMiddleware = false
       resolution.beginPass(pass)
       const finishCreation = timings?.start('app/router creation')
       created = await createSsrApplication(definition, {
@@ -365,7 +369,10 @@ export const renderSsrApplication = async <
       finishSerialization?.()
       const totalAt = now()
 
-      return {
+      const bootstrap: SsrBrowserBootstrapCapability[] = []
+      if (active.router) bootstrap.push('navigation')
+      if (navigationNeedsMiddleware) bootstrap.push('middleware')
+      return attachSsrRequestBootstrap({
         html,
         teleports,
         renderedModules,
@@ -385,7 +392,7 @@ export const renderSsrApplication = async <
           stateBytes,
           renderPasses: passes,
         },
-      }
+      }, bootstrap)
     })
   } finally {
     await disposeCurrent()
