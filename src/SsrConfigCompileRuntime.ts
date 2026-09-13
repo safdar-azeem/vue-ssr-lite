@@ -36,6 +36,8 @@ import {
   generateSsrDevelopmentStylesheetHandoff,
 } from './SsrApplicationAssetRuntime'
 import { getSsrStateElementId } from './SsrSerialization'
+import { isSeoEnabled } from './extensions/seo/types'
+import type { SsrBrowserBootstrapCapability } from './SsrBrowserBootstrap'
 import {
   DEFINE_SERVER_ROUTES_ERROR,
   SSR_DEFAULT_APPLICATION_ID,
@@ -593,6 +595,16 @@ export const extractSsrViteEntries = (
       applicationFile: app.shell.applicationFile,
       universalProjection: projections?.get(app.id),
       clientSeo: resolveApplicationSeoConfig(app.seo),
+      initialBootstrap: (() => {
+        const initial: SsrBrowserBootstrapCapability[] = []
+        const navigation = Boolean(app.routes || app.router || app.shell.routesModule)
+        if (navigation) initial.push('navigation')
+        if (navigation && app.middleware?.length) initial.push('middleware')
+        const seo = isSeoEnabled(resolveApplicationSeoConfig(app.seo))
+        if (seo) initial.push('seo')
+        if (seo || app.extensions?.length) initial.push('extensions')
+        return initial
+      })(),
     })),
   }
 }
