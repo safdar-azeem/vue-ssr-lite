@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createSsrBootstrapAssetResolver, parseSsrBootstrapAssetManifest } from './SsrBootstrapAssetRuntime'
+import { createSsrBootstrapAssetResolver, parseSsrBootstrapAssetManifest, selectSsrBootstrapCapabilityFiles, selectSsrBootstrapCapabilityKeys } from './SsrBootstrapAssetRuntime'
 import { injectSsrRenderedAssets } from './server/SsrHtmlRuntime'
 import { isSsrPrivateProductionAssetPath } from './server/SsrAssetRuntime'
 import { readSsrHtmlAttributes } from './SsrHtmlParsing'
@@ -12,6 +12,16 @@ const metadata = () => ({ version: 1, policy: 'enabled', applications: {
 } })
 
 describe('production bootstrap assets', () => {
+  it('selects only initial ∪ request files and does not flatten the capability map', () => {
+    const capabilities = metadata().applications.website.capabilities
+    const keys = selectSsrBootstrapCapabilityKeys(['navigation', 'seo', 'extensions'], [])
+    expect(keys).toEqual(['navigation', 'seo', 'extensions'])
+    expect(selectSsrBootstrapCapabilityFiles(capabilities, keys).sort()).toEqual(['nav.js', 'seo.js', 'shared.js'])
+    expect(selectSsrBootstrapCapabilityFiles(capabilities, keys)).not.toContain('mw.js')
+    expect(selectSsrBootstrapCapabilityFiles(capabilities, selectSsrBootstrapCapabilityKeys(['navigation', 'seo', 'extensions'], ['middleware'])).sort())
+      .toEqual(['mw.js', 'nav.js', 'seo.js', 'shared.js'])
+  })
+
   it.each(['/', '/products/', 'https://cdn.example.test/products/'])('merges only the owning request under %s', (base) => {
     const resolve = createSsrBootstrapAssetResolver(parseSsrBootstrapAssetManifest(JSON.stringify(metadata())), base)
     expect(resolve('website').map((asset) => asset.href)).not.toContain(`${base}mw.js`)
