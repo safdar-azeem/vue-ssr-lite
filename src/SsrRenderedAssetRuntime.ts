@@ -69,7 +69,7 @@ export const assertSupportedSsrViteBase = (
   return base || '/'
 }
 
-const joinAssetBase = (base: string, file: string): string => {
+export const joinSsrAssetBase = (base: string, file: string): string => {
   if (!file || (/^[a-z][\w+.-]*:/i.test(file) && !/^https?:\/\//i.test(file))) {
     throw new SsrProductionArtifactError('rendered-assets.invalid-asset')
   }
@@ -112,7 +112,7 @@ interface SsrManifestAsset {
 const prepareManifestModule = (files: readonly string[], base: string): readonly SsrManifestAsset[] => {
   const assets: SsrManifestAsset[] = []
   for (const file of files) {
-    const href = joinAssetBase(base, file)
+    const href = joinSsrAssetBase(base, file)
     const rel = STYLESHEET_ASSET_RE.test(file) ? 'stylesheet'
       : JAVASCRIPT_ASSET_RE.test(file) ? 'modulepreload' : undefined
     if (!rel) continue
