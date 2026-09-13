@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build, createServer, type ViteDevServer } from 'vite'
-import { parseSsrBootstrapAssetManifest, SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
+import { parseSsrBootstrapAssetManifest, selectSsrBootstrapCapabilityFiles, selectSsrBootstrapCapabilityKeys, SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
 import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 import {
   createSsrManagedServer,
@@ -243,8 +243,10 @@ describe('request-aware multi-application assets', () => {
         const entry = audit.entries.find((candidate) => actual.scripts.includes(candidate.file))
         expect(entry).toBeDefined()
         const application = bootstrap.applications[html === website ? 'website' : 'admin']!
-        const capabilities = [...application.initial, ...(html === website ? ['middleware' as const] : [])]
-        const initialFiles = capabilities.flatMap((key) => application.capabilities[key] ?? [])
+        const initialFiles = selectSsrBootstrapCapabilityFiles(
+          application.capabilities,
+          selectSsrBootstrapCapabilityKeys(application.initial, html === website ? ['middleware'] : []),
+        )
         const expected = audit.critical(
           [entry!.file, ...initialFiles, ...ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length))],
           ownAssets.filter((file) => file.endsWith('.css')).map((file) => file.slice(base.length))
