@@ -24,3 +24,14 @@ export const attachSsrRequestBootstrap = <T extends object>(
 
 export const readSsrRequestBootstrap = (result: object): readonly SsrBrowserBootstrapCapability[] =>
   (result as { [REQUEST_BOOTSTRAP]?: readonly SsrBrowserBootstrapCapability[] })[REQUEST_BOOTSTRAP] ?? []
+
+/** Renderer request result: navigation when a router exists, middleware only when that navigation needs it. */
+export const requestBootstrapCapabilities = (
+  hasRouter: boolean,
+  needsMiddleware: boolean
+): readonly SsrBrowserBootstrapCapability[] => {
+  const capabilities: SsrBrowserBootstrapCapability[] = []
+  if (hasRouter) capabilities.push('navigation')
+  if (needsMiddleware) capabilities.push('middleware')
+  return capabilities
+}
