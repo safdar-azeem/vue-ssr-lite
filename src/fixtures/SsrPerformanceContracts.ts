@@ -1,4 +1,5 @@
 import type { inspectSsrBundle } from './SsrBundleAudit'
+import { SSR_BROWSER_BOOTSTRAP_SOURCES } from '../SsrBrowserBootstrap'
 
 // Reviewed browser implementations, not a count of whatever happens to build.
 // A new runtime file requires an explicit boundary review before this list grows.
@@ -18,7 +19,7 @@ const CLIENT_MODULES = new Set([
   'extensions/seo/client.ts', 'extensions/seo/useSeo.ts', 'extensions/seo/robots.ts',
   // This module converts head contributions; its filename is historical.
   'extensions/seo/server.ts',
-  'middleware/SsrBrowserMiddleware.ts',
+  'middleware/SsrBrowserMiddleware.ts', 'middleware/SsrMiddlewarePresence.ts',
   'middleware/index.ts', 'middleware/defineMiddleware.ts',
   'middleware/SsrMiddlewareRuntime.ts', 'middleware/SsrMiddlewareExecution.ts',
   'middleware/SsrMiddlewareProps.ts', 'middleware/SsrMiddlewareCookies.ts',
@@ -122,10 +123,10 @@ export const assertCapabilityPagePayload = (page: CriticalPayload, externalPeers
 // Audit-only contract for the browser's four dynamic implementation boundaries.
 // A new framework dynamic edge requires an explicit accounting decision here.
 export const BROWSER_ACTIVATION_SOURCES = {
-  router: 'navigation/SsrNavigationRuntime.ts',
-  middleware: 'middleware/SsrMiddlewareRuntime.ts',
-  seo: 'extensions/seo/SsrSeoLifecycle.ts',
-  extensions: 'core/extensions/ExtensionRuntime.ts',
+  router: SSR_BROWSER_BOOTSTRAP_SOURCES.navigation,
+  middleware: SSR_BROWSER_BOOTSTRAP_SOURCES.middleware,
+  seo: SSR_BROWSER_BOOTSTRAP_SOURCES.seo,
+  extensions: SSR_BROWSER_BOOTSTRAP_SOURCES.extensions,
 } as const
 
 export const assertBrowserActivationAccounting = (audit: Audit): void => {
@@ -181,7 +182,7 @@ export const assertCapabilityGraph = (profile: CapabilityProfile, audit: Audit, 
   // Reject whole unused families, not only one convenient sentinel file.
   for (const source of sources) {
     if (!capabilities.fetch && /^(?:data\/fetch\/)(?!runtime\/SsrFetchRuntimeScope\.ts)/.test(source) ||
-        !capabilities.middleware && /^middleware\/(?!SsrBrowserMiddleware\.ts)/.test(source) ||
+        !capabilities.middleware && /^middleware\/(?!SsrBrowserMiddleware\.ts|SsrMiddlewarePresence\.ts)/.test(source) ||
         !capabilities.seo && /^extensions\/seo\/(?!types\.ts)/.test(source) ||
         !capabilities.extensions && /^core\/extensions\/(?!ExtensionRuntimeKey\.ts)/.test(source)) {
       throw new Error(`${profile}: unused capability retained ${source}`)
