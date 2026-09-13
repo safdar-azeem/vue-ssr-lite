@@ -52,6 +52,10 @@ export interface CapabilityMatrixOptions {
   fixtureRoot: string
   mode: 'source' | 'installed'
   reportPath?: string
+  /** Defaults to the full Task 010/011 matrix. Task 012 compares a reviewed subset. */
+  profiles?: readonly CapabilityProfile[]
+  /** Defaults to bundled-peer and external-peer controls. */
+  externalPeers?: readonly boolean[]
 }
 
 /** Used by source coverage and npm smoke, with identical fixtures, peers and accounting. */
@@ -64,8 +68,9 @@ export const buildSsrCapabilityMatrix = async (options: CapabilityMatrixOptions)
     [name, JSON.parse(await readFile(require.resolve(`${name}/package.json`), 'utf8')).version]
   )))
   const rows: CapabilityRow[] = []
-  for (const externalPeers of [false, true]) {
-    for (const profile of Object.keys(CAPABILITY_PROFILES) as CapabilityProfile[]) {
+  const profiles = options.profiles ?? (Object.keys(CAPABILITY_PROFILES) as CapabilityProfile[])
+  for (const externalPeers of options.externalPeers ?? [false, true]) {
+    for (const profile of profiles) {
       let collected: Audit | undefined
       await build({
         root: options.fixtureRoot, configFile: false, mode: 'production', logLevel: 'error',
