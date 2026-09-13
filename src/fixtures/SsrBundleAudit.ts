@@ -1,3 +1,6 @@
+import { frameworkModuleSources } from '../SsrModuleAttribution'
+import { createSsrBootstrapAssetManifest, type SsrBootstrapBuildApplication } from '../vite/SsrViteBootstrap'
+export { frameworkModuleSources } from '../SsrModuleAttribution'
 import { brotliCompressSync, gzipSync } from 'node:zlib'
 import type { OutputAsset, OutputBundle, Plugin } from 'rollup'
 
@@ -19,7 +22,7 @@ export const bundleModuleOwner = (id: string, frameworkRoot: string): BundleOwne
     if (/\/core\/extensions\//.test(path)) return 'framework-extensions'
     if (/\/data\/fetch\/|SsrFetch/.test(path)) return 'framework-fetch'
     if (/\/extensions\/seo\//.test(path)) return 'framework-seo'
-    if (/SsrBrowserMiddleware/.test(path)) return 'framework-core'
+    if (/SsrBrowserMiddleware|SsrMiddlewarePresence/.test(path)) return 'framework-core'
     if (/\/middleware\/|SsrMiddleware/.test(path)) return 'framework-middleware'
     if (/\/navigation\/|SsrNavigation/.test(path)) return 'framework-navigation'
     return 'framework-core'
@@ -54,20 +57,11 @@ export interface BundleAuditOptions {
   moduleInfo?: (id: string) => { importedIds: readonly string[]; dynamicallyImportedIds: readonly string[] } | null
 }
 
-export const frameworkModuleSources = (id: string, frameworkRoot: string, options: BundleAuditOptions = {}): string[] => {
-  const path = normalize(id).split('?', 1)[0]!
-  const root = normalize(frameworkRoot).replace(/\/$/, '')
-  if (path.startsWith(`${root}/src/`)) return [path.slice(`${root}/src/`.length)]
-  const distribution = path.startsWith(`${root}/dist/`)
-    ? path.slice(`${root}/dist/`.length)
-    : path.split('/node_modules/vue-ssr-lite/dist/')[1]
-  return distribution ? options.moduleSources?.[distribution] ?? [] : []
-}
-
 export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, options: BundleAuditOptions = {}) => {
   const chunks = Object.values(bundle).filter((item) => item.type === 'chunk').map((chunk) => ({
     file: chunk.fileName,
     entry: chunk.isEntry,
+    facadeModuleId: chunk.facadeModuleId,
     imports: chunk.imports,
     dynamicImports: chunk.dynamicImports,
     css: [...((chunk as typeof chunk & { viteMetadata?: { importedCss?: Set<string> } }).viteMetadata?.importedCss ?? [])],
@@ -96,7 +90,7 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
   const cssByFile = new Map(stylesheets.map((asset) => [asset.file, asset]))
   // A rendered lazy chunk can be passed as a seed; never walk dynamicImports.
   // Explicit CSS seeds cover SSR-manifest relationships not attached to a JS chunk.
-  const critical = (seeds: readonly string[], stylesheetSeeds: readonly string[] = []) => {
+  const critical = (seeds: readonly string[], stylesheetSeeds: readonly string[] = [], selection: { exact?: boolean; css?: boolean } = {}) => {
     const files = new Set<string>()
     const external = new Set<string>()
     const visit = (file: string) => {
@@ -104,7 +98,7 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
       const chunk = byFile.get(file)
       if (!chunk) { external.add(file); return }
       files.add(file)
-      chunk.imports.forEach(visit)
+      if (!selection.exact) chunk.imports.forEach(visit)
     }
     seeds.forEach(visit)
     const selected = [...files].map((file) => byFile.get(file)!)
@@ -112,7 +106,7 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
     for (const chunk of selected) for (const module of chunk.modules) {
       ownership[module.owner] = (ownership[module.owner] ?? 0) + module.renderedLength
     }
-    const css = [...new Set([...selected.flatMap((chunk) => chunk.css), ...stylesheetSeeds])]
+    const css = [...new Set([...(selection.css === false ? [] : selected.flatMap((chunk) => chunk.css)), ...stylesheetSeeds])]
     const unresolvedCss = css.filter((file) => !cssByFile.has(file))
     const js = sumSizes(selected.map((chunk) => chunk.sizes))
     const cssSizes = sumSizes(css.flatMap((file) => cssByFile.has(file) ? [cssByFile.get(file)!.sizes] : []))
@@ -122,14 +116,60 @@ export const inspectSsrBundle = (bundle: OutputBundle, frameworkRoot: string, op
       resourceCount: files.size + external.size + css.length,
       // Compression across mixed-owner files cannot be allocated exactly.
       renderedLengthByOwner: ownership,
+      frameworkSources: [...new Set(selected.flatMap((chunk) => chunk.modules)
+        .filter((module) => module.owner.startsWith('framework-') && module.renderedLength > 0)
+        .flatMap((module) => module.sources))].sort(),
+      applicationSources: [...new Set(selected.flatMap((chunk) => chunk.modules)
+        .filter((module) => module.owner === 'application' && module.renderedLength > 0)
+        .map((module) => module.id))].sort(),
       frameworkModules: [...new Set(selected.flatMap((chunk) => chunk.modules)
         .filter((module) => module.owner.startsWith('framework-') && module.renderedLength > 0)
         .map((module) => module.id))],
     }
   }
+  const bootstrapReport = (entryFiles: readonly string[], capabilityFiles: readonly string[], routeFiles: readonly string[], routeCss: readonly string[] = []) => {
+    const entryStatic = critical(entryFiles)
+    const initial = critical(capabilityFiles)
+    const rendered = critical(routeFiles, routeCss)
+    const required = new Set([...entryStatic.files, ...initial.files, ...rendered.files])
+    const initialCapabilities = critical([...initial.files.filter((file) => !entryStatic.files.includes(file)), ...initial.external.filter((file) => !entryStatic.external.includes(file))], initial.css.filter((file) => !entryStatic.css.includes(file)), { exact: true, css: false })
+    const renderedRoute = critical([...rendered.files.filter((file) => !entryStatic.files.includes(file) && !initialCapabilities.files.includes(file)), ...rendered.external.filter((file) => !entryStatic.external.includes(file) && !initialCapabilities.external.includes(file))],
+      rendered.css.filter((file) => !entryStatic.css.includes(file) && !initialCapabilities.css.includes(file)), { exact: true, css: false })
+    const completeInitialPage = critical([...required, ...new Set([...entryStatic.external, ...initial.external, ...rendered.external])], [...entryStatic.css, ...initial.css, ...rendered.css], { exact: true })
+    const deferredOnly = critical(chunks.map((chunk) => chunk.file).filter((file) => !required.has(file)),
+      stylesheets.map((style) => style.file).filter((file) => !completeInitialPage.css.includes(file)), { exact: true, css: false })
+    // Module edges explain static retention; chunk co-location is reported when
+    // manual chunking retains a module without a static source import path.
+    const paths = new Map<string, string[]>()
+    const queue: string[] = []
+    for (const file of entryFiles) {
+      const id = byFile.get(file)?.facadeModuleId
+      if (id) { paths.set(id, [id]); queue.push(id) }
+    }
+    for (let index = 0; index < queue.length; index++) {
+      const id = queue[index]!
+      for (const dependency of options.moduleInfo?.(id)?.importedIds ?? []) {
+        if (paths.has(dependency)) continue
+        paths.set(dependency, [...paths.get(id)!, dependency])
+        queue.push(dependency)
+      }
+    }
+    const staticRetention = chunks.filter((chunk) => entryStatic.files.includes(chunk.file)).flatMap((chunk) =>
+      chunk.modules.filter((module) => module.renderedLength > 0 && module.owner.startsWith('framework-')).flatMap((module) =>
+        module.sources.map((source) => ({ source, file: chunk.file, moduleId: module.id,
+          renderedLength: module.renderedLength, path: paths.get(module.id) ?? [],
+          reason: paths.has(module.id) ? 'static-import-path' : 'emitted-static-chunk',
+        }))
+      )
+    ).sort((a, b) => a.source < b.source ? -1 : a.source > b.source ? 1 : 0)
+    return { entryStatic, initialCapabilities, renderedRoute, completeInitialPage, deferredOnly, staticRetention }
+  }
   return {
     chunks,
     stylesheets,
+    bootstrapReport,
+    bootstrapManifest: (applications: readonly SsrBootstrapBuildApplication[]) =>
+      createSsrBootstrapAssetManifest(bundle, applications, (id) => frameworkModuleSources(id, frameworkRoot, options)),
     entries: chunks.filter((chunk) => chunk.entry).map((chunk) => ({ file: chunk.file, ...critical([chunk.file]) })),
     critical,
   }
