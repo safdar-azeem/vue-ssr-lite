@@ -52,7 +52,11 @@ export const auditPackedCapabilities = async ({ repositoryRoot, consumerRoot, pa
 
   const fixtureRoot = join(consumerRoot, 'capability-consumer')
   await cp(join(repositoryRoot, 'fixtures/capability-consumer'), fixtureRoot, { recursive: true })
-  const helper = join(consumerRoot, 'capability-audit-helper.mjs')
+  // npm's nested install strategy keeps framework-owned audit dependencies
+  // beneath the installed package. Emit the temporary helper beside that
+  // package so its external imports use the package's normal dependency scope,
+  // while Vite and the Vue peers can still resolve from the consumer above it.
+  const helper = join(packageRoot, '.capability-audit-helper.mjs')
   await build({
     entryPoints: [join(repositoryRoot, 'src/fixtures/SsrCapabilityMatrix.ts')], outfile: helper,
     bundle: true, platform: 'node', format: 'esm', packages: 'external',
