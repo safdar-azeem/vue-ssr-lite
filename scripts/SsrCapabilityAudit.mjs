@@ -7,7 +7,7 @@ import { init, parse } from 'es-module-lexer'
 
 /** npm-smoke adapter for the same source-audit implementation used by Vitest. */
 export const auditPackedCapabilities = async ({ repositoryRoot, consumerRoot, packedFiles, assert }) => {
-  const reportRoot = process.env.SSR_AUDIT_DIR || join(repositoryRoot, 'node_modules/.cache/vue-ssr-lite/task-010')
+  const reportRoot = process.env.SSR_AUDIT_DIR || join(repositoryRoot, 'node_modules/.cache/vue-ssr-lite/task-011')
   await mkdir(reportRoot, { recursive: true })
   const packageRoot = join(consumerRoot, 'node_modules/vue-ssr-lite')
   const provenance = JSON.parse(await readFile(join(packageRoot, 'dist/module-attribution.json'), 'utf8'))
