@@ -35,6 +35,7 @@ describe('bundle attribution', () => {
     ['/app/node_modules/vue-ssr-lite/dist/client.mjs', 'framework-core'],
     ['/app/node_modules/.pnpm/vue@3/node_modules/vue/dist/vue.js', 'vue'],
     ['/app/node_modules/@vue/runtime-core/index.js', 'vue'],
+    ['/app/node_modules/@vue/apollo-composable/dist/index.js', 'third-party'],
     ['/app/node_modules/vue-router/dist/router.js', 'vue-router'],
     ['/app/node_modules/@iconify/vue/dist/iconify.js', 'third-party'],
     ['/app/src/App.vue', 'application'],
@@ -125,6 +126,15 @@ describe('capability attribution contracts', () => {
     // Even an already-reviewed client module needs an activation decision if
     // bootstrap starts acquiring it dynamically. No new byte limit is needed.
     expect(() => assertBrowserActivationAccounting(inspect(unexpected))).toThrow('Unaccounted browser capability import')
+  })
+
+  it('prefers Task 010 resolveSources over frameworkRoot path guessing', () => {
+    const entry = chunk('entry.js')
+    entry.modules = { '/consumer/node_modules/vue-ssr-lite/dist/client.mjs': module }
+    const report = inspectSsrBundle({ 'entry.js': entry }, '/other-checkout', {
+      resolveSources: () => ['client.ts'],
+    })
+    expect(report.chunks[0]!.modules[0]).toMatchObject({ owner: 'framework-core', sources: ['client.ts'] })
   })
 
   it('attributes installed code by emitted provenance and rejects opaque shared chunks', () => {
