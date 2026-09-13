@@ -340,6 +340,15 @@ const serializeSsrRenderedAssets = (
   return tags.join('')
 }
 
+/** Reuse the same serializer and duplicate checks for production SPA shells. */
+export const injectSsrRenderedAssets = (template: string, assets: readonly SsrRenderedApplicationAsset[]): string => {
+  const links = serializeSsrRenderedAssets(template, assets)
+  if (!links) return template
+  return /<\/head>/i.test(template)
+    ? template.replace(/<\/head>/i, () => `${links}</head>`)
+    : `${links}${template}`
+}
+
 const injectTeleportTarget = (
   template: string,
   target: string,
