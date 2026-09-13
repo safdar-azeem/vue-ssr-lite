@@ -4,6 +4,7 @@ import routes from './routes'
 export default defineApplication({
   name: 'admin',
   render: 'ssr',
+  seo: { enabled: false },
   domain: {
     development: 'admin.localhost',
     production: 'admin.test',
