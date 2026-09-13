@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build, createServer, type ViteDevServer } from 'vite'
+import { parseSsrBootstrapAssetManifest, SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
 import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
 import {
   createSsrManagedServer,
@@ -63,13 +64,13 @@ const createFixtureViteServer = async () => {
   })
 }
 
-const responseHtml = async (host: string): Promise<string> =>
+const responseHtml = async (host: string, path = '/lazy'): Promise<string> =>
   new Promise((resolve, reject) => {
     const request = requestHttp(
       {
         hostname: '127.0.0.1',
         port: managedServer!.address().port,
-        path: '/lazy',
+        path,
         headers: { accept: 'text/html', host },
       },
       (response) => {
@@ -127,6 +128,9 @@ describe('request-aware multi-application assets', () => {
       plugins: [ssrBundleAudit(frameworkRoot, (audit) => audits.push(audit))],
       build: { outDir: productionOutDir, emptyOutDir: true },
     })
+    const bootstrap = parseSsrBootstrapAssetManifest(await readFile(join(productionOutDir, SSR_BROWSER_BOOTSTRAP_METADATA_PATH), 'utf8'))
+    expect(bootstrap.applications.admin!.initial).toEqual(['navigation'])
+    expect(bootstrap.applications.website!.initial).toEqual(['extensions', 'navigation', 'seo'])
     const manifest = JSON.parse(
       await readFile(join(productionOutDir, '.vite/ssr-manifest.json'), 'utf8')
     ) as Record<string, string[]>
@@ -208,6 +212,23 @@ describe('request-aware multi-application assets', () => {
       responseHtml('admin.test'),
     ])
 
+    const websitePlain = await responseHtml('website.test', '/')
+    for (const file of bootstrap.applications.website!.capabilities.middleware ?? []) {
+      expect(website).toContain(`href="${base}${file}"`)
+      const staticWebsite = bootstrap.applications.website!.initial.flatMap((key) => bootstrap.applications.website!.capabilities[key] ?? [])
+      if (!staticWebsite.includes(file)) expect(websitePlain).not.toContain(`href="${base}${file}"`)
+      const staticAdmin = bootstrap.applications.admin!.initial.flatMap((key) => bootstrap.applications.admin!.capabilities[key] ?? [])
+      if (!staticAdmin.includes(file)) expect(admin).not.toContain(`href="${base}${file}"`)
+    }
+    for (const file of bootstrap.applications.website!.capabilities.seo ?? []) {
+      expect(website).toContain(`href="${base}${file}"`)
+      // Shared static dependencies may be naturally owned by both applications.
+      if (!(bootstrap.applications.admin!.capabilities.navigation ?? []).includes(file)) {
+        const adminStatic = audits.flatMap((audit) => audit.entries.filter((entry) =>
+          criticalHtmlAssets(admin, base).scripts.includes(entry.file)).flatMap((entry) => entry.files))
+        if (!adminStatic.includes(file)) expect(admin).not.toContain(`href="${base}${file}"`)
+      }
+    }
     expect(website).toContain(`href="${websiteCss}"`)
     expect(website).toContain(`href="${websiteJs}"`)
     expect(website).not.toContain(adminCss!)
@@ -221,8 +242,11 @@ describe('request-aware multi-application assets', () => {
         const actual = criticalHtmlAssets(html, base)
         const entry = audit.entries.find((candidate) => actual.scripts.includes(candidate.file))
         expect(entry).toBeDefined()
+        const application = bootstrap.applications[html === website ? 'website' : 'admin']!
+        const capabilities = [...application.initial, ...(html === website ? ['middleware' as const] : [])]
+        const initialFiles = capabilities.flatMap((key) => application.capabilities[key] ?? [])
         const expected = audit.critical(
-          [entry!.file, ...ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length))],
+          [entry!.file, ...initialFiles, ...ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length))],
           ownAssets.filter((file) => file.endsWith('.css')).map((file) => file.slice(base.length))
         )
         const delivered = audit.critical(actual.scripts, actual.styles)
@@ -232,6 +256,7 @@ describe('request-aware multi-application assets', () => {
         expect(delivered.total).toEqual(expected.total)
         expect(delivered.resourceCount).toBe(expected.resourceCount)
         console.info('[vue-ssr-lite] request-specific critical JS/CSS:', JSON.stringify({
+          criticalBootstrap: audit.bootstrapReport([entry!.file], initialFiles, ownAssets.filter((file) => file.endsWith('.js')).map((file) => file.slice(base.length)), actual.styles),
           entry: entry!.file, files: delivered.files, css: delivered.css,
           js: delivered.js, cssSizes: delivered.cssSizes, total: delivered.total,
           resourceCount: delivered.resourceCount,
