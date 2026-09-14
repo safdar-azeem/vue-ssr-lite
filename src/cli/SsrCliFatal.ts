@@ -1,4 +1,4 @@
-import { safeSsrLog } from '../SsrObservability'
+import { safeSsrLog } from '../diagnostics/SsrObservability'
 
 /** Production start failures use the shared operator diagnostic path. */
 export const reportSsrCliFatal = (command: string | undefined, error: unknown): void => {
