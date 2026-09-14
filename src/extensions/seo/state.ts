@@ -1,7 +1,7 @@
 import { isRef } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
-import { applySeoLayerResponseStatus } from '../../SsrResponseStatus'
-import type { SsrResponseState } from '../../SsrRuntimeTypes'
+import { applySeoLayerResponseStatus } from '../../request/SsrResponseStatus'
+import type { SsrResponseState } from '../../request/SsrRequestTypes'
 import type {
   JsonObject,
   SeoApplicationConfig,
