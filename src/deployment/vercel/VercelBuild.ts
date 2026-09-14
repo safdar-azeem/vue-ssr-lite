@@ -5,7 +5,7 @@ import { build } from 'esbuild'
 import { nodeFileTrace } from '@vercel/nft'
 import { collectDeploymentStaticAssets, copyDeploymentFile, deploymentFiles, type DeploymentStaticAsset } from '../DeploymentAssets'
 import { DEPLOYMENT_METADATA_PATH, parseDeploymentMetadata } from '../DeploymentMetadata'
-import { SSR_RUNTIME_LOAD_NODE_CODES } from '../../SsrRuntimeLoadDiagnostics'
+import { SSR_RUNTIME_LOAD_NODE_CODES } from '../../diagnostics/SsrRuntimeLoadDiagnostics'
 
 const posix = (path: string) => path.split(sep).join('/')
 const modulePath = (path: string) => { const value = posix(path); return value.startsWith('.') ? value : `./${value}` }
