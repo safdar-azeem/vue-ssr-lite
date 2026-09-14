@@ -1,6 +1,6 @@
 import { shallowRef, type ShallowRef } from 'vue'
-import type { SsrHydrationController } from '../../../SsrHydrationRuntime'
-import type { SsrRequestContext } from '../../../SsrRuntimeTypes'
+import type { SsrHydrationController } from '../../../hydration/SsrHydrationRuntime'
+import type { SsrRequestContext } from '../../../request/SsrRequestTypes'
 import type {
   SetContextOptions,
   UseFetchError,
