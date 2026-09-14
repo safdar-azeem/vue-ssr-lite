@@ -1,5 +1,5 @@
 import type { ShallowRef } from 'vue'
-import { serializeSsrState } from '../../../SsrSerialization'
+import { serializeSsrState } from '../../../hydration/SsrSerialization'
 import type { UseFetchError } from '../types/SsrFetchTypes'
 import type { FetchEntry, SsrFetchCache } from './SsrFetchCache'
 import type { FetchIdentity } from './SsrFetchIdentity'
