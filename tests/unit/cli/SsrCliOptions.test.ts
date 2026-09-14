@@ -1,0 +1,133 @@
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { parseSsrCliArguments } from '../../../src/cli/SsrCliOptions'
+
+let root = ''
+let alias = ''
+
+afterEach(async () => {
+  if (alias) await rm(alias, { recursive: true, force: true })
+  if (root) await rm(root, { recursive: true, force: true })
+  root = ''
+  alias = ''
+})
+
+describe('parseSsrCliArguments', () => {
+  it('start loads baked runtime without requiring server.ts in cwd', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-start-'))
+    const serverDir = join(root, 'dist', 'server')
+    await mkdir(serverDir, { recursive: true })
+    await writeFile(join(serverDir, 'SsrRuntime.js'), 'export default {}\n')
+
+    const options = await parseSsrCliArguments(['start', '--root', root])
+
+    expect(options.command).toBe('start')
+    expect(options.config).toBeUndefined()
+    expect(options.serverOutput).toBe(
+      resolve(await realpath(root), 'dist/server/SsrRuntime.js')
+    )
+  })
+
+  it('start accepts a custom --server-output path', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-start-custom-'))
+    const custom = join(root, 'out', 'runtime.mjs')
+    await mkdir(join(root, 'out'), { recursive: true })
+    await writeFile(custom, 'export default {}\n')
+
+    const options = await parseSsrCliArguments([
+      'start',
+      '--root',
+      root,
+      '--server-output',
+      'out/runtime.mjs',
+    ])
+
+    expect(options.serverOutput).toBe(await realpath(custom))
+    expect(options.config).toBeUndefined()
+  })
+
+  it('start fails clearly when the baked runtime is missing', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-start-missing-'))
+
+    await expect(parseSsrCliArguments(['start', '--root', root])).rejects.toThrow(
+      /could not find the production SSR runtime/
+    )
+  })
+
+  it('dev accepts a convention-based project without server.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-dev-'))
+
+    const options = await parseSsrCliArguments(['dev', '--root', root])
+    expect(options.command).toBe('dev')
+    expect(options.config).toBeUndefined()
+    expect(options.cliConfig).toBeUndefined()
+  })
+
+  it('build resolves an existing server.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-build-'))
+    await writeFile(join(root, 'server.ts'), 'export default {}\n')
+
+    const options = await parseSsrCliArguments(['build', '--root', root])
+
+    expect(options.command).toBe('build')
+    expect(options.config).toBe(resolve(await realpath(root), 'server.ts'))
+    expect(options.cliConfig).toBeUndefined()
+  })
+
+  it('does not auto-discover server.mts or ssr.config.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-legacy-config-'))
+    await writeFile(join(root, 'ssr.config.ts'), 'export default {}\n')
+    await writeFile(join(root, 'server.mts'), 'export default {}\n')
+
+    const options = await parseSsrCliArguments(['build', '--root', root])
+    expect(options.config).toBeUndefined()
+  })
+
+  it('loads an explicit --config path that is not server.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-explicit-config-'))
+    await writeFile(join(root, 'server.mts'), 'export default {}\n')
+
+    const options = await parseSsrCliArguments([
+      'build',
+      '--root',
+      root,
+      '--config',
+      'server.mts',
+    ])
+    expect(options.config).toBe(resolve(await realpath(root), 'server.mts'))
+    expect(options.cliConfig).toBe(options.config)
+  })
+
+  it('keeps an explicit --config distinct from a conventional server.ts', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-cli-config-authority-'))
+    await mkdir(join(root, 'config'), { recursive: true })
+    await writeFile(join(root, 'server.ts'), 'export default {}\n')
+    await writeFile(join(root, 'config/platform.ts'), 'export default {}\n')
+
+    const discovered = await parseSsrCliArguments(['dev', '--root', root])
+    expect(discovered.config).toBe(resolve(await realpath(root), 'server.ts'))
+    expect(discovered.cliConfig).toBeUndefined()
+
+    const explicit = await parseSsrCliArguments([
+      'dev',
+      '--root',
+      root,
+      '--config',
+      'config/platform.ts',
+    ])
+    expect(explicit.config).toBe(resolve(await realpath(root), 'config/platform.ts'))
+    expect(explicit.cliConfig).toBe(explicit.config)
+  })
+
+  it('canonicalizes a symlinked project root before Vite owns lifecycle resources', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-root-'))
+    alias = `${root}-alias`
+    await symlink(root, alias)
+
+    const options = await parseSsrCliArguments(['dev', '--root', alias])
+
+    expect(options.root).toBe(await realpath(root))
+  })
+})
