@@ -1,6 +1,6 @@
 import { hasInjectionContext, inject, type InjectionKey } from 'vue'
-import type { SsrHydrationController } from '../../../SsrHydrationRuntime'
-import type { SsrRequestContext } from '../../../SsrRuntimeTypes'
+import type { SsrHydrationController } from '../../../hydration/SsrHydrationRuntime'
+import type { SsrRequestContext } from '../../../request/SsrRequestTypes'
 import type { SsrFetchRuntime } from './SsrFetchRuntime'
 
 export const FETCH_HYDRATION_KEY = 'vue-ssr-lite:fetch'
@@ -79,4 +79,3 @@ export const readSsrFetchBinding = (setupOnly = false): FetchBinding | null => {
     : null
   return injected ?? (setupOnly ? null : readAsyncRuntime() ?? readBrowserRuntime())
 }
-
