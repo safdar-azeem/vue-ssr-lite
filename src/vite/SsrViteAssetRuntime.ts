@@ -1,4 +1,4 @@
-import { readSsrHtmlAttributes, readSsrHtmlStartTag } from '../SsrHtmlParsing'
+import { readSsrHtmlAttributes, readSsrHtmlStartTag } from '../rendering/SsrHtmlParsing'
 import type {
   EnvironmentModuleNode,
   HtmlTagDescriptor,
@@ -12,7 +12,7 @@ import {
   SSR_DEVELOPMENT_STYLESHEET_ATTRIBUTE,
   type SsrRenderedApplicationAsset,
   type SsrApplicationStylesheet,
-} from '../SsrApplicationAssetRuntime'
+} from '../assets/SsrApplicationAssetRuntime'
 
 const STYLE_LANGUAGE_RE =
   /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss|sss)$/i
