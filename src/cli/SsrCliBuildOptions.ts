@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
+import { SSR_RUNTIME_VIRTUAL_ID } from '../config/compile/SsrConfigCompileRuntime'
 
 /**
  * Vite 7 `resolveRollupOptions` path-resolves a string `build.ssr` entry against
