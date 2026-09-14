@@ -1,6 +1,6 @@
 /** Server/configuration APIs. Implementation runtimes are intentionally private. */
-export { defineServer } from './SsrConfigRuntime'
-export { defineSitemap } from './server/SsrSitemapConfig'
+export { defineServer } from './config/SsrConfigRuntime'
+export { defineSitemap } from './extensions/seo/SsrSitemapConfig'
 export type {
   SitemapContext,
   SitemapEntriesResult,
@@ -33,11 +33,11 @@ export {
   createSsrManagedServer,
   type SsrManagedServer,
   type SsrManagedServerOptions,
-} from './server/SsrServerRuntime'
+} from './server/runtime/SsrServerRuntime'
 export {
   createSsrMemoryResponseCache,
   type SsrMemoryResponseCacheOptions,
-} from './server/SsrResponseCacheRuntime'
+} from './server/runtime/SsrResponseCacheRuntime'
 
 /** Reusable server-configuration helpers. */
 export {
@@ -51,12 +51,12 @@ export {
   ssrEnvNumber,
   type SsrSeoEndpointMode,
   type SsrSeoEndpointOptions,
-} from './server/SsrRuntimeConfigRuntime'
+} from './config/SsrRuntimeConfigRuntime'
 
 /** Universal advanced helpers are mirrored here for server-only modules. */
-export { createDomainUrl, useDomain } from './SsrDomainRuntime'
-export type { SsrCreateDomainUrlOptions, SsrDomainApi } from './SsrDomainRuntime'
-export { useSsrRequestContext } from './SsrRequestContext'
+export { createDomainUrl, useDomain } from './request/SsrDomainRuntime'
+export type { SsrCreateDomainUrlOptions, SsrDomainApi } from './request/SsrDomainRuntime'
+export { useSsrRequestContext } from './request/SsrRequestContext'
 
 export type {
   ApplicationConfig,
@@ -65,7 +65,6 @@ export type {
   SsrApplicationDomainConfig,
   SsrAppShellConfig,
   SsrConfigServerOptions,
-  SsrDomainContext,
   SsrDomainMode,
   SsrDomainParamDefinition,
   SsrDomainParamSource,
@@ -74,25 +73,30 @@ export type {
   SsrRenderMode,
   SsrSeoConfig,
   SsrSiteSeoInput,
-} from './SsrConfigTypes'
+} from './config/SsrConfigTypes'
 export type {
-  SsrEndpointDefinition,
-  SsrEndpointTools,
-  SsrErrorRenderContext,
   SsrHeaders,
   SsrHeaderValue,
-  SsrHttpRequest,
-  SsrHttpResponse,
-  SsrLogger,
   SsrPublicConfigDomain,
   SsrPublicConfigHeaders,
   SsrPublicConfigHeaderValue,
   SsrPublicConfigRequest,
+} from './request/SsrRequestTypes'
+export type { SsrDomainContext } from './request/SsrRequestTypes'
+export type {
+  SsrEndpointDefinition,
+  SsrEndpointTools,
+  SsrErrorRenderContext,
+  SsrHttpRequest,
+  SsrHttpResponse,
   SsrReadinessProbe,
-  SsrRenderMetrics,
   SsrResponseCache,
   SsrResponseCacheInvalidation,
   SsrResponseCacheReadOptions,
   SsrResponseCacheStrategy,
   SsrResponseCacheWriteOptions,
-} from './SsrRuntimeTypes'
+} from './server/runtime/SsrServerTypes'
+export type {
+  SsrLogger,
+  SsrRenderMetrics,
+} from './diagnostics/SsrDiagnosticsTypes'
