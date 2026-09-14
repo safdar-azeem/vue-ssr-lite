@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { createRouter, RouterView, type RouterHistory } from 'vue-router'
-import { readSsrRequestBootstrap } from '../../../src/browser/SsrBrowserBootstrap'
+import { readSsrRequestBootstrap, requestBootstrapCapabilities } from '../../../src/browser/SsrBrowserBootstrap'
 import { renderSsrApplication } from '../../../src/rendering/SsrRenderRuntime'
 import { createTestRenderRequest } from '../../helpers/SsrTestFixtures'
 import { requiresSsrMiddlewareRuntime } from '../../../src/middleware/SsrMiddlewarePresence'
@@ -10,6 +10,12 @@ const Page = defineComponent({ render: () => h('main', 'page') })
 const Root = defineComponent({ render: () => h(RouterView) })
 
 describe('authoritative request bootstrap result', () => {
+  it('selects request bootstrap capabilities from router presence and middleware need', () => {
+    expect(requestBootstrapCapabilities(true, false)).toEqual(['navigation'])
+    expect(requestBootstrapCapabilities(true, true)).toEqual(['navigation', 'middleware'])
+    expect(requestBootstrapCapabilities(false, true)).toEqual(['middleware'])
+  })
+
   it('isolates matched middleware across concurrent requests, aliases and custom routers', async () => {
     const middleware = vi.fn(() => undefined)
     const definition = { id: 'app', root: Root, seo: { enabled: false }, router: ({ history }: { history: RouterHistory }) => createRouter({ history, routes: [
