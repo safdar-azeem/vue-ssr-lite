@@ -1,5 +1,5 @@
-import type { SsrNormalizedConfig } from '../SsrConfigCompileRuntime'
-import { compileServerRoutes } from '../server-routes/SsrServerRouteRuntime'
+import type { SsrNormalizedConfig } from '../config/compile/SsrConfigCompileRuntime'
+import { compileServerRoutes } from '../server/routes/SsrServerRouteRuntime'
 
 export const DEPLOYMENT_METADATA_PATH = '.vite/vue-ssr-lite-deployment.json'
 
