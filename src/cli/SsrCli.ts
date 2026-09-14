@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
-import { SSR_RUNTIME_VIRTUAL_ID } from '../SsrConfigCompileRuntime'
-import { createSsrManagedServer, type SsrManagedServerOptions } from '../server/SsrServerRuntime'
-import { attachSsrPhaseTimings, createSsrPhaseTimings } from '../SsrDiagnosticsRuntime'
+import { SSR_RUNTIME_VIRTUAL_ID } from '../config/compile/SsrConfigCompileRuntime'
+import { createSsrManagedServer, type SsrManagedServerOptions } from '../server/runtime/SsrServerRuntime'
+import { attachSsrPhaseTimings, createSsrPhaseTimings } from '../diagnostics/SsrDiagnosticsRuntime'
 import { importSsrViteModule } from '../vite/SsrViteModuleRuntime'
 import { createSsrProductionViteBuildOptions } from './SsrCliBuildOptions'
 import { resolveSsrCliHmrPort } from './SsrCliHmrPort'
