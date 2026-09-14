@@ -1,4 +1,4 @@
-import type { SsrRenderRequest, SsrResponseState } from '../SsrRuntimeTypes'
+import type { SsrRenderRequest, SsrResponseState } from '../request/SsrRequestTypes'
 import type {
   MiddlewareCookieOptions,
   MiddlewareCookies,
