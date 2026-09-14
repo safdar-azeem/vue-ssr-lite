@@ -1,9 +1,9 @@
 import { access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { RouteRecordRaw } from 'vue-router'
-import { composeCanonicalUrl } from '../../SsrCanonicalOrigin'
-import type { SsrRenderMode } from '../../SsrConfigTypes'
-import type { SsrEndpointDefinition, SsrHttpRequest, SsrHttpResponse } from '../../SsrRuntimeTypes'
+import { composeCanonicalUrl } from '../../request/SsrCanonicalOrigin'
+import type { SsrRenderMode } from '../../config/SsrConfigTypes'
+import type { SsrEndpointDefinition, SsrHttpRequest, SsrHttpResponse } from '../../server/runtime/SsrServerTypes'
 import { validateSeoApplicationConfig, validateSeoSiteDefaults } from './normalize'
 import {
   collectSitemapSource,
