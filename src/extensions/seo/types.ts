@@ -1,6 +1,6 @@
 import type { ComputedRef, Ref } from 'vue'
-import type { SsrDomainContext } from '../../SsrConfigTypes'
-import type { ManagedHeadLinkEntry, ManagedHeadMetaEntry } from '../../SsrManagedHead'
+import type { SsrDomainContext } from '../../request/SsrRequestTypes'
+import type { ManagedHeadLinkEntry, ManagedHeadMetaEntry } from '../../head/SsrManagedHead'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
