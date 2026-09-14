@@ -44,12 +44,10 @@ tests/
   environment/       Custom jsdom environment
   fixtures/          Consumer applications used by tests and audits
 tools/
-  audits/            Bundle, capability, and production-retention analysis
-  benchmarks/        Like-for-like and Nuxt comparison infrastructure
+  audits/            Bundle, capability, attribution, and release-regression analysis
   package/           Package artifact, declaration, and installed-consumer smoke checks
   resolution/        TypeScript module resolution hooks for test workers
 examples/            User-facing applications, separate from fixtures
-docs/                Existing historical task documentation
 ```
 
 ## Production ownership
@@ -126,11 +124,11 @@ Place focused tests under `tests/unit/<domain>`, scenarios across domains under
 `tests/integration/<domain>`, and package/source-boundary contracts under
 `tests/architecture`. Existing mixed suites remain whole to preserve coverage.
 Consumer fixtures belong in `tests/fixtures`; runnable demonstrations stay in
-`examples`. Audit and benchmark implementations belong in `tools`, with their
+`examples`. Audit implementations belong in `tools`, with their
 tests under `tests/unit/tools` or `tests/architecture`.
 
 Vitest discovers `tests/**/*.test.ts` and preserves the separate Admin SPA jsdom
-project. Typechecking includes production source, audit/benchmark TypeScript,
+project. Typechecking includes production source, audit TypeScript,
 and shared test helpers; package declaration generation includes only `src`.
 Keep reports and local migration artifacts under
 `node_modules/.cache/vue-ssr-lite`, outside the published package.
