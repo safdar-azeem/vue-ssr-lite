@@ -1,12 +1,12 @@
 import { copyFile, lstat, mkdir, readdir, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { parseSsrProductionAssetMetadata, SSR_PRODUCTION_ASSET_METADATA_PATH } from '../SsrAssetMetadata'
+import { parseSsrProductionAssetMetadata, SSR_PRODUCTION_ASSET_METADATA_PATH } from '../assets/SsrAssetMetadata'
 import {
   effectiveViteBasePath,
   parseSsrClientAssetManifest,
   resolveSsrImmutableAssetPaths,
   resolveSsrProductionAsset,
-} from '../server/SsrAssetRuntime'
+} from '../server/runtime/SsrAssetRuntime'
 import type { DeploymentMetadata } from './DeploymentMetadata'
 
 /** Do not follow public-directory symlinks into source, secrets or server output. */
