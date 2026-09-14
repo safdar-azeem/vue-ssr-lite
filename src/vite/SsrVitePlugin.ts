@@ -19,12 +19,12 @@ import {
   SSR_RUNTIME_VIRTUAL_ID,
   type SsrViteApplicationEntry,
   type SsrViteEntries,
-} from '../SsrConfigCompileRuntime'
-import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from '../server/SsrHtmlRuntime'
+} from '../config/compile/SsrConfigCompileRuntime'
+import { prepareSsrHtmlTemplate, SSR_HTML_TEMPLATE } from '../rendering/SsrHtmlRuntime'
 import {
   serializeSsrProductionAssetMetadata,
   SSR_PRODUCTION_ASSET_METADATA_PATH,
-} from '../SsrAssetMetadata'
+} from '../assets/SsrAssetMetadata'
 import {
   createSsrStylesheetLinkTags,
   prepareSsrViteComponentAssets,
@@ -32,8 +32,8 @@ import {
 } from './SsrViteAssetRuntime'
 import { readSsrViteCliConfig } from './SsrViteCliConfig'
 import { attachSsrViteResolvedConfigPath } from './SsrViteResolvedConfigPath'
-import { createSsrFrameworkSourceResolver } from '../SsrModuleAttribution'
-import { SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../SsrBootstrapAssetRuntime'
+import { createSsrFrameworkSourceResolver } from '../assets/SsrModuleAttribution'
+import { SSR_BROWSER_BOOTSTRAP_METADATA_PATH } from '../assets/SsrBootstrapAssetRuntime'
 import { createSsrBootstrapAssetManifest, resolveSsrBootstrapPreloadPolicy } from './SsrViteBootstrap'
 
 export {
@@ -84,7 +84,7 @@ const DISTRIBUTION_DIRECTORY =
     : CURRENT_MODULE_DIRECTORY
 const FALLBACK_SSR_RENDERER_ENTRY = normalizePath(
   CURRENT_MODULE_PATH.endsWith('.ts')
-    ? resolve(CURRENT_MODULE_DIRECTORY, '../SsrRenderRuntime.ts')
+    ? resolve(CURRENT_MODULE_DIRECTORY, '../rendering/SsrRenderRuntime.ts')
     : resolve(DISTRIBUTION_DIRECTORY, 'internal-ssr-renderer.mjs')
 )
 const RESOLVED_CLIENT_PREFIX = `\0${SSR_CLIENT_VIRTUAL_PREFIX}`
@@ -123,7 +123,7 @@ const findSourceRendererFromAncestor = async (
       ) as { name?: unknown }
       if (manifest.name === 'vue-ssr-lite') {
         const sourceRenderer = await existingFile(
-          resolve(directory, 'src/SsrRenderRuntime.ts')
+          resolve(directory, 'src/rendering/SsrRenderRuntime.ts')
         )
         if (sourceRenderer) return sourceRenderer
       }
