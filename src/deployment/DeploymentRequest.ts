@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { SsrHeaders } from '../SsrRuntimeTypes'
-import type { SsrNormalizedRequest } from '../server/SsrRequestHandler'
+import type { SsrHeaders } from '../request/SsrRequestTypes'
+import type { SsrNormalizedRequest } from '../server/runtime/SsrRequestHandler'
 
 /** Provider adapters supply authoritative metadata, never client Forwarded values. */
 export const normalizeDeploymentRequest = (options: {
