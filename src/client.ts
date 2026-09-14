@@ -6,30 +6,29 @@ export {
   type SsrHydrateOptions,
   type SsrMountedApplication,
   type SsrSpaMountOptions,
-} from './SsrBrowserRuntime'
+} from './browser/SsrBrowserRuntime'
 export {
   createDomainUrl,
   useDomain,
   type SsrCreateDomainUrlOptions,
   type SsrDomainApi,
-} from './SsrDomainRuntime'
+} from './request/SsrDomainRuntime'
 export {
   ssrWatch,
   ssrWatchEffect,
   type SsrWatchOptions,
-} from './SsrReactivityRuntime'
+} from './rendering/SsrReactivityRuntime'
 export {
   SSR_REQUEST_RESOLUTION,
   useSsrResolution,
   type SsrRequestResolution,
-} from './SsrRequestResolution'
+} from './request/SsrRequestResolution'
 export {
   SSR_HYDRATION_CONTEXT,
   type SsrHydrationContext,
-} from './SsrHydrationRuntime'
+} from './hydration/SsrHydrationRuntime'
 export type {
   SsrApplicationDefinition,
   SsrHydrationState,
-  SsrRenderRequest,
-} from './SsrRuntimeTypes'
-export type { SsrDomainContext } from './SsrConfigTypes'
+} from './application/SsrApplicationTypes'
+export type { SsrDomainContext, SsrRenderRequest } from './request/SsrRequestTypes'
