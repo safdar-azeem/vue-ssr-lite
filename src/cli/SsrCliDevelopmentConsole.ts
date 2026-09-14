@@ -1,11 +1,11 @@
 import { resolve } from 'node:path'
-import { describeSsrThrownValue } from '../SsrErrorDiagnostic'
+import { describeSsrThrownValue } from '../diagnostics/SsrErrorDiagnostic'
 import {
   formatSsrDevelopmentSourceLabel,
   readSsrDevelopmentErrorDetails,
   sourceBaseName,
   type SsrDevelopmentErrorDetails,
-} from '../SsrDevelopmentErrorDiagnostic'
+} from '../diagnostics/SsrDevelopmentErrorDiagnostic'
 
 export type SsrDevelopmentConsole = {
   readonly root: string
