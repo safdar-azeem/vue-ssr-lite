@@ -1,5 +1,5 @@
-import { composeCanonicalUrl, normalizeCanonicalPath, normalizeSiteOrigin } from '../../SsrCanonicalOrigin'
-import { isErrorResponseStatus, validateResponseStatus } from '../../SsrResponseStatus'
+import { composeCanonicalUrl, normalizeCanonicalPath, normalizeSiteOrigin } from '../../request/SsrCanonicalOrigin'
+import { isErrorResponseStatus, validateResponseStatus } from '../../request/SsrResponseStatus'
 import type {
   JsonObject,
   SeoApplicationConfig,
