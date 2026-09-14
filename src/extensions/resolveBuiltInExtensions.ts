@@ -1,5 +1,5 @@
-import type { ExtensionDefinition } from '../core/extensions/ExtensionDefinition'
-import type { SsrApplicationDefinition } from '../SsrRuntimeTypes'
+import type { ExtensionDefinition } from './core/ExtensionDefinition'
+import type { SsrApplicationDefinition } from '../application/SsrApplicationTypes'
 import { createSeoExtension } from './seo/index'
 import { isSeoEnabled } from './seo/types'
 import type { SeoSiteDefaults } from './seo/types'
