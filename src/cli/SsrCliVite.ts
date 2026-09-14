@@ -3,7 +3,7 @@ import {
   createSsrViteCliConfigMarker,
   createSsrViteCliInlineConfig,
 } from '../vite/SsrViteCliConfig'
-import { isSsrStructuredViteError } from '../SsrDevelopmentErrorDiagnostic'
+import { isSsrStructuredViteError } from '../diagnostics/SsrDevelopmentErrorDiagnostic'
 import {
   createSsrDevelopmentConsole,
   type SsrDevelopmentConsole,
