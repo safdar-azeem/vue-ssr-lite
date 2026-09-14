@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 const typescriptResolve = fileURLToPath(
-  new URL('./scripts/SsrRegisterTypeScriptResolve.mjs', import.meta.url)
+  new URL('./tools/resolution/SsrRegisterTypeScriptResolve.mjs', import.meta.url)
 )
 const execArgv = ['--import', typescriptResolve]
 
@@ -24,8 +24,8 @@ export default defineConfig({
         test: {
           name: 'admin-spa',
           execArgv,
-          include: ['src/fixtures/SsrArchitectureAdminSpa.test.ts'],
-          environment: './SsrTestJsdomEnvironment.ts',
+          include: ['tests/integration/consumers/SsrArchitectureAdminSpa.test.ts'],
+          environment: './tests/environment/jsdom.ts',
           environmentOptions: {
             jsdom: { url: 'http://admin.localhost/' },
           },
@@ -36,8 +36,8 @@ export default defineConfig({
         test: {
           name: 'unit',
           execArgv,
-          include: ['src/**/*.test.ts'],
-          exclude: ['src/fixtures/SsrArchitectureAdminSpa.test.ts'],
+          include: ['tests/**/*.test.ts'],
+          exclude: ['tests/integration/consumers/SsrArchitectureAdminSpa.test.ts'],
         },
       },
     ],
