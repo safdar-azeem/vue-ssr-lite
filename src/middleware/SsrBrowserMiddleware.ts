@@ -1,7 +1,7 @@
 import { requiresSsrMiddlewareRuntime } from './SsrMiddlewarePresence'
 import type { NavigationGuard, Router } from 'vue-router'
 import type { SsrMiddlewareExecutionController, SsrMiddlewareInstallation } from './SsrMiddlewareRuntime'
-import type { SsrRenderRequest } from '../SsrRuntimeTypes'
+import type { SsrRenderRequest } from '../request/SsrRequestTypes'
 
 /**
  * Keep one guard in its original position. Inspect the actual matched records
