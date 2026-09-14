@@ -1,6 +1,6 @@
 import { access, realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { resolveSsrConfigPath } from '../SsrConfigCompileRuntime'
+import { resolveSsrConfigPath } from '../config/compile/SsrConfigCompileRuntime'
 
 export type SsrCliCommand = 'dev' | 'build' | 'start'
 
