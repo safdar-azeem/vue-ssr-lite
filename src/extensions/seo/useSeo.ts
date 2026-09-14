@@ -1,8 +1,8 @@
 import { getCurrentInstance, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
-import { isSsrProduction } from '../../SsrCanonicalOrigin'
-import type { ExtensionRuntime } from '../../core/extensions/ExtensionRuntime'
-import { SSR_EXTENSION_RUNTIME } from '../../core/extensions/ExtensionRuntimeKey'
-import { useSsrRequestContext } from '../../SsrRequestContext'
+import { isSsrProduction } from '../../request/SsrCanonicalOrigin'
+import type { ExtensionRuntime } from '../core/ExtensionRuntime'
+import { SSR_EXTENSION_RUNTIME } from '../core/ExtensionRuntimeKey'
+import { useSsrRequestContext } from '../../request/SsrRequestContext'
 import {
   recomputeSeoResponseStatus,
   registerSeoLayer,
