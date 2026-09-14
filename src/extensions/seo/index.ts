@@ -1,5 +1,5 @@
-import { defineExtension } from '../../core/extensions/defineExtension'
-import type { InternalExtensionContext } from '../../core/extensions/ExtensionContext'
+import { defineExtension } from '../core/defineExtension'
+import type { InternalExtensionContext } from '../core/ExtensionContext'
 import { contributeSeoHead } from './client'
 import { createSeoState, type SeoState } from './state'
 import { validateSeoApplicationConfig, validateSeoSiteDefaults } from './normalize'
