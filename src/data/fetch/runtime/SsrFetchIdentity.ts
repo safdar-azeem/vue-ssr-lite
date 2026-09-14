@@ -1,4 +1,4 @@
-import type { SsrRenderRequest } from '../../../SsrRuntimeTypes'
+import type { SsrRenderRequest } from '../../../request/SsrRequestTypes'
 import type {
   UseFetchOptionsBase,
   UseFetchVariablePrimitive,
