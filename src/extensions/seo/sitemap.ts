@@ -1,7 +1,7 @@
 import type { RouteRecordRaw } from 'vue-router'
-import { composeCanonicalUrl, normalizeSiteOrigin } from '../../SsrCanonicalOrigin'
-import type { SsrRenderMode } from '../../SsrConfigTypes'
-import { validateResponseStatus } from '../../SsrResponseStatus'
+import { composeCanonicalUrl, normalizeSiteOrigin } from '../../request/SsrCanonicalOrigin'
+import type { SsrRenderMode } from '../../config/SsrConfigTypes'
+import { validateResponseStatus } from '../../request/SsrResponseStatus'
 import type { SeoEndpointContext, SeoEndpointResultMeta, SeoRouteInput } from './types'
 
 export interface SitemapImageEntry { loc: string }
