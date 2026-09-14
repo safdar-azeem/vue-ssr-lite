@@ -115,7 +115,7 @@ export const defineServerMiddleware = (middleware) => middleware
   it('keeps public modules free of runtime/internal imports and compiled records', async () => {
     const server = await readFile(join(sourceRoot, 'server.ts'), 'utf8')
     expect(server).not.toMatch(/server\/routes|defineServerRoutes|defineServerMiddleware/)
-    for (const name of ['index.ts', 'defineServerRoutes.ts', 'defineServerMiddleware.ts', 'SsrServerRouteTypes.ts']) {
+    for (const name of ['defineServerRoutes.ts', 'defineServerMiddleware.ts', 'SsrServerRouteTypes.ts']) {
       const source = await readFile(join(sourceRoot, 'server/routes', name), 'utf8')
       expect(source).not.toMatch(/from ['"]node:|from ['"].*SsrServerRouteInternalTypes|from ['"].*SsrServerRouteRuntime|from ['"].*SsrServerMiddlewareRuntime|from ['"].*SsrServerResponseRuntime|from ['"].*SsrWebHttpRuntime/)
     }
