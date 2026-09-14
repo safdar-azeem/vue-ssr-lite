@@ -5,7 +5,7 @@ import {
   type RouteLocationRaw,
   type Router,
 } from 'vue-router'
-import type { SsrRequestContext } from '../SsrRuntimeTypes'
+import type { SsrRequestContext } from '../request/SsrRequestTypes'
 import { collectMiddleware, middlewareLabel } from './SsrMiddlewareCollection'
 import { createMiddlewareCookies } from './SsrMiddlewareCookies'
 import type { MiddlewarePendingProps } from './SsrMiddlewareProps'
