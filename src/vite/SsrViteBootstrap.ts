@@ -1,7 +1,7 @@
 import type { Rollup, ResolvedConfig } from 'vite'
 import { isViteStylesheetModule } from './SsrViteAssetRuntime'
-import { SSR_BROWSER_BOOTSTRAP_SOURCES, type SsrBrowserBootstrapCapability } from '../SsrBrowserBootstrap'
-import { isSsrBootstrapAssetPath, parseSsrBootstrapAssetManifest, type SsrBootstrapAssetManifest, type SsrBootstrapPreloadPolicy } from '../SsrBootstrapAssetRuntime'
+import { SSR_BROWSER_BOOTSTRAP_SOURCES, type SsrBrowserBootstrapCapability } from '../browser/SsrBrowserBootstrap'
+import { isSsrBootstrapAssetPath, parseSsrBootstrapAssetManifest, type SsrBootstrapAssetManifest, type SsrBootstrapPreloadPolicy } from '../assets/SsrBootstrapAssetRuntime'
 
 /** Request-selected SSR hints have no equivalent Vite HTML import host.
  * Fail safe for policies whose host/path semantics we cannot reproduce. Never
