@@ -1,4 +1,4 @@
-import type { InternalExtensionContext } from '../../core/extensions/ExtensionContext'
+import type { InternalExtensionContext } from '../core/ExtensionContext'
 import { normalizeSeo } from './normalize'
 import { seoToHeadContribution } from './server'
 import { mergeSeoLayers, type SeoState } from './state'
