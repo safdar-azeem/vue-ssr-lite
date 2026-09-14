@@ -32,6 +32,7 @@ export default defineConfig({
       },
     },
     dts({
+      include: ['src/**/*.ts'],
       rollupTypes: true,
       // vite-plugin-dts collects ambient module augmentations globally and
       // appends them to every rolled entry. Their referenced public types are
@@ -49,7 +50,7 @@ export default defineConfig({
         client: resolve(repositoryRoot, 'src/client.ts'),
         'internal-ssr-renderer': resolve(
           repositoryRoot,
-          'src/SsrRenderRuntime.ts'
+          'src/rendering/SsrRenderRuntime.ts'
         ),
         'internal-vercel': resolve(repositoryRoot, 'src/deployment/vercel/VercelRuntime.ts'),
         server: resolve(repositoryRoot, 'src/server.ts'),
