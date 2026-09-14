@@ -7,7 +7,7 @@ import {
   type RouteLocationRaw,
   type Router,
 } from 'vue-router'
-import type { SsrRequestContext, SsrRenderRequest } from '../SsrRuntimeTypes'
+import type { SsrRequestContext, SsrRenderRequest } from '../request/SsrRequestTypes'
 import {
   executeMiddlewareChain,
   type MiddlewareNavigationPlan,
