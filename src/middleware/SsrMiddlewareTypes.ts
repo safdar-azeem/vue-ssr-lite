@@ -4,7 +4,7 @@ import type {
   RouteLocationRaw,
   Router,
 } from 'vue-router'
-import type { SsrDomainContext } from '../SsrConfigTypes'
+import type { SsrDomainContext } from '../request/SsrRequestTypes'
 
 export type MiddlewareRedirectStatus = 301 | 302 | 303 | 307 | 308
 
