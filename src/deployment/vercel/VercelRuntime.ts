@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { createSsrProductionRequestHandler } from '../../server/SsrProductionRequestRuntime'
-import { createSsrRequestBodySource, writeWebResponse } from '../../server/SsrWebHttpRuntime'
-import { safeSsrLog } from '../../SsrObservability'
+import { createSsrProductionRequestHandler } from '../../server/runtime/SsrProductionRequestRuntime'
+import { createSsrRequestBodySource, writeWebResponse } from '../../server/runtime/SsrWebHttpRuntime'
+import { safeSsrLog } from '../../diagnostics/SsrObservability'
 import {
   assertSsrRuntimeModuleExport,
   createSsrRuntimeLoadFailure,
-} from '../../SsrRuntimeLoadDiagnostics'
+} from '../../diagnostics/SsrRuntimeLoadDiagnostics'
 import { normalizeDeploymentRequest } from '../DeploymentRequest'
 
 /** Unwrap the generated SsrRuntime.js contract without evaluating application rendering. */
