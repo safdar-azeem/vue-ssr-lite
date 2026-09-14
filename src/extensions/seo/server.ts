@@ -3,8 +3,8 @@ import type {
   ManagedHeadLinkEntry,
   ManagedHeadMetaEntry,
   ManagedHeadScriptEntry,
-} from '../../SsrManagedHead'
-import { serializeJsonLd } from '../../SsrManagedHead'
+} from '../../head/SsrManagedHead'
+import { serializeJsonLd } from '../../head/SsrManagedHead'
 import type { NormalizedSeo } from './normalize'
 
 const pushMeta = (
