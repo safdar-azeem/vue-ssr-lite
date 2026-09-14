@@ -1,5 +1,5 @@
-import type { ExtensionRuntime } from '../../core/extensions/ExtensionRuntime'
-import type { SsrRequestContext } from '../../SsrRuntimeTypes'
+import type { ExtensionRuntime } from '../core/ExtensionRuntime'
+import type { SsrRequestContext } from '../../request/SsrRequestTypes'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { recomputeSeoResponseStatus, type SeoState } from './state'
 
