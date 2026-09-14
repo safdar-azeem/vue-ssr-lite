@@ -20,7 +20,7 @@ const CLIENT_MODULES = new Set([
   // This module converts head contributions; its filename is historical.
   'extensions/seo/server.ts',
   'middleware/SsrBrowserMiddleware.ts', 'middleware/SsrMiddlewarePresence.ts',
-  'middleware/index.ts', 'middleware/defineMiddleware.ts',
+  'middleware/defineMiddleware.ts',
   'middleware/SsrMiddlewareRuntime.ts', 'middleware/SsrMiddlewareExecution.ts',
   'middleware/SsrMiddlewareProps.ts', 'middleware/SsrMiddlewareCookies.ts',
   'middleware/SsrMiddlewareCollection.ts', 'middleware/SsrMiddlewareResult.ts',
