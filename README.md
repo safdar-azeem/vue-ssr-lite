@@ -66,7 +66,7 @@ export default defineConfig({
 }
 ```
 
-## 3. Configure the server
+## 3. Configure the server (optional)
 
 ```ts
 // server.ts
