@@ -51,9 +51,26 @@ export const scheduleFetchTimeout = (duration: number | undefined, expire: () =>
   return () => clearTimeout(timer)
 }
 
+/**
+ * Server hosts without a loopback listener (Cloudflare Workers) register a
+ * request-scoped same-origin dispatcher. Read through a global symbol so this
+ * browser-shared module never imports server-only APIs.
+ */
+const ORIGIN_DISPATCH = Symbol.for('vue-ssr-lite.cloudflare-request-context')
+const transport = (url: string, init: RequestInit): Promise<Response> => {
+  const store = (globalThis as Record<PropertyKey, unknown>)[ORIGIN_DISPATCH] as
+    { getStore?: () => { dispatchOrigin?: (url: string, init: RequestInit) => Promise<Response> | undefined } | undefined } | undefined
+  const context = store?.getStore?.()
+  if (!context) return fetch(url, init)
+  // workerd rejects RequestInit.cache values it does not implement; 'default' is a no-op.
+  const { cache, ...rest } = init
+  const portable = cache === undefined || cache === 'default' ? rest : init
+  return context.dispatchOrigin?.(url, portable) ?? fetch(url, portable)
+}
+
 const performFetch = async (identity: FetchIdentity, signal: AbortSignal): Promise<FetchOutcome> => {
   try {
-    const response = await fetch(identity.url, { ...identity.init, signal })
+    const response = await transport(identity.url, { ...identity.init, signal })
     if (signal.aborted) return { kind: 'cancelled' }
     const metadata = { status: response.status, statusText: response.statusText }
     if (!response.ok) {
