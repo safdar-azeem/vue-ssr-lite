@@ -23,6 +23,7 @@ export const assertPackedArtifact = ({ record, manifest, assert }) => {
     'dist/vite.d.ts',
     'dist/internal-ssr-renderer.mjs',
     'dist/internal-vercel.mjs',
+    'dist/internal-cloudflare.mjs',
     'dist/cli.mjs',
   ]
   for (const path of required) {
@@ -70,6 +71,7 @@ export const assertPackedArtifact = ({ record, manifest, assert }) => {
     'dist/vite.d.ts',
     'dist/internal-ssr-renderer.d.ts',
     'dist/internal-vercel.d.ts',
+    'dist/internal-cloudflare.d.ts',
     'dist/cli.d.ts',
   ])
   for (const declaration of declarations) {
