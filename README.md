@@ -18,6 +18,7 @@ Small, fast, and simple.
 - Canonical URLs, Open Graph, Twitter Cards, and JSON-LD
 - First-party SSR-aware `useFetch()` with optional await, hydration, reactive state, and request-safe caching
 - Zero-config Vercel deployment with automatic SSR runtime generation
+- Cloudflare Workers deployment with `vue-ssr-lite build --target cloudflare`
 
 # Installation
 
@@ -38,6 +39,7 @@ See [`examples/`](./examples) for small, practical examples showing recommended 
 - [`multi-domain-apps`](./examples/3-multi-domain-apps/) — multiple applications and host routing
 - [`server-api-app`](./examples/4-server-api-app/) — complete Server Routes, Server Middleware, and `useFetch()` example
 - [`middleware-example`](./examples/middleware-example/) — Vue navigation middleware
+- [`cloudflare-workers`](./examples/5-cloudflare-workers/) — SSR, SPA, APIs, cookies, SEO and bindings on Cloudflare Workers
 
 # Minimal Setup
 
@@ -1218,6 +1220,46 @@ Public production origins still require HTTPS by default. The existing `seo.allo
 
 On **Vercel**, deploy as a normal Vite project with the existing build command. `vue-ssr-lite` detects the build environment and generates the SSR runtime automatically; no adapter configuration is required.
 
+## Cloudflare Workers
+
+Cloudflare is selected explicitly (no environment detection):
+
+```bash
+vue-ssr-lite build --target cloudflare
+npx wrangler deploy -c dist/cloudflare/wrangler.json
+```
+
+The build runs the normal client and server Vite builds, then generates `dist/cloudflare/`:
+
+- `worker.mjs` — a self-contained module Worker (`fetch()` entry). It runs the same Core request pipeline as Node: host selection, global middleware, server routes, SSR/SPA rendering, SEO endpoints, admission limits, deadlines and cancellation. You never write a Worker yourself.
+- `assets/` — only files Core would serve publicly. Templates, manifests, server bundles, source maps and dot-files are embedded privately in the Worker or omitted, never uploaded.
+- `wrangler.json` — `nodejs_compat`, Static Assets binding `ASSETS`, `not_found_handling: "none"` (Cloudflare never substitutes an SPA shell for unknown paths). When the app has global server middleware or legacy endpoints, `run_worker_first: true` keeps every asset behind middleware; otherwise static files are served directly with Core's cache headers via a generated `_headers` file.
+
+Name, variables and secrets are supplied at deploy time; nothing is provisioned automatically:
+
+```bash
+npx wrangler deploy -c dist/cloudflare/wrangler.json --name my-app --var PUBLIC_URL:https://www.example.com
+npx wrangler secret put API_TOKEN -c dist/cloudflare/wrangler.json --name my-app
+```
+
+**Bindings.** Read the Worker `env` for the current request from server-only code (server routes, server middleware, server-side SSR setup):
+
+```ts
+import { getCloudflareEnv } from 'vue-ssr-lite/server'
+
+const env = getCloudflareEnv<{ API_TOKEN: string }>() // undefined outside a Worker request
+```
+
+Bindings are request-scoped (AsyncLocalStorage), never stored in module globals, and never serialized into HTML or hydration data — only return values your code deliberately sends to the browser.
+
+**Origin.** `seo.siteUrl` or a `PUBLIC_URL` var wins; otherwise the validated HTTPS request URL (e.g. your `workers.dev` or Preview hostname) is the canonical origin. Client `Forwarded` / `X-Forwarded-*` headers are ignored.
+
+**Server `useFetch`.** Same-origin SSR fetches (`useFetch('/api/...')`) are dispatched through the Worker in-process as independent requests (middleware included) instead of a network round-trip to the Worker's own hostname.
+
+**Custom domain.** Add one later in the Cloudflare dashboard (Workers & Pages → your Worker → Domains & Routes) or with `routes` in your own Wrangler config; the generated config never registers routes or changes DNS. Existing host/domain configuration in `defineServer()` applies unchanged.
+
+**Limitations.** Server code must only use Node APIs that `nodejs_compat` implements. The build stops and names the importer if it finds `child_process`, `worker_threads`, `vm`, `v8`, `cluster`, `dgram`, `inspector`, `repl`, `trace_events` or `wasi`. Reading project files at runtime (`fs`) is not available on Workers; there is no polyfill. The response cache and admission limits are per isolate, not global.
+
 **Netlify is not supported in this version.** Detected Netlify builds stop because its current framework integration cannot automatically select a safe static publish directory while preserving the portable server output. Use Vercel or Node hosting; never publish the complete `dist` directory as a static site.
 
 ## Diagnostics
@@ -1276,6 +1318,7 @@ vue-ssr-lite start
 --config <path>
 --server-output <path>
 --hmr-port <port>
+--target cloudflare   # build only: also generate dist/cloudflare
 ```
 
 | Variable                | Description                           |
@@ -1343,7 +1386,7 @@ import { vueSsrLite } from 'vue-ssr-lite/vite'
 Advanced genuinely server-only APIs:
 
 ```ts
-import { defineSitemap, createSsrManagedServer, createSsrMemoryResponseCache } from 'vue-ssr-lite/server'
+import { defineSitemap, createSsrManagedServer, createSsrMemoryResponseCache, getCloudflareEnv } from 'vue-ssr-lite/server'
 ```
 
 Beginner-facing configuration belongs in `vue-ssr-lite`, not this subpath.
