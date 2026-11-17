@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises'
+import { ssrProductionFileExists } from '../../server/runtime/SsrProductionFiles'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { RouteRecordRaw } from 'vue-router'
 import { compileServerRoutes, snapshotServerMiddleware } from '../../server/routes/SsrServerRouteRuntime'
@@ -228,14 +228,7 @@ export interface CompileSsrConfigOptions extends NormalizeSsrConfigOptions {
   importModule?: (specifier: string) => Promise<Record<string, unknown>>
 }
 
-const exists = async (filePath: string): Promise<boolean> => {
-  try {
-    await access(filePath)
-    return true
-  } catch {
-    return false
-  }
-}
+const exists = (filePath: string): Promise<boolean> => ssrProductionFileExists(filePath)
 
 export const resolveProjectPath = (
   root: string,
