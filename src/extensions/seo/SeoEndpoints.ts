@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises'
+import { ssrProductionFileExists } from '../../server/runtime/SsrProductionFiles'
 import { resolve } from 'node:path'
 import type { RouteRecordRaw } from 'vue-router'
 import { composeCanonicalUrl } from '../../request/SsrCanonicalOrigin'
@@ -55,9 +55,8 @@ export class SeoProviderFailure extends Error {
   }
 }
 
-const physicalFileExists = async (directory: string, fileName: string): Promise<boolean> => {
-  try { await access(resolve(directory, fileName)); return true } catch { return false }
-}
+const physicalFileExists = (directory: string, fileName: string): Promise<boolean> =>
+  ssrProductionFileExists(resolve(directory, fileName))
 
 const ownedEndpoint = (
   existing: readonly SsrEndpointDefinition<any>[],
