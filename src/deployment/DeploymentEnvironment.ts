@@ -1,4 +1,8 @@
-export type DeploymentEnvironment = 'node' | 'vercel' | 'netlify'
+export type DeploymentEnvironment = 'node' | 'vercel' | 'netlify' | 'cloudflare'
+
+/** Targets a consumer may select explicitly with `vue-ssr-lite build --target`. */
+export const EXPLICIT_DEPLOYMENT_TARGETS = ['cloudflare'] as const
+export type ExplicitDeploymentTarget = (typeof EXPLICIT_DEPLOYMENT_TARGETS)[number]
 
 /** Provider-owned build markers only; a URL, NODE_ENV or CI alone is insufficient. */
 export const resolveDeploymentEnvironment = (
@@ -9,6 +13,16 @@ export const resolveDeploymentEnvironment = (
   if (vercel && netlify) throw new Error('[vue-ssr-lite] Conflicting Vercel and Netlify build environments.')
   return vercel ? 'vercel' : netlify ? 'netlify' : 'node'
 }
+
+/**
+ * Cloudflare exposes no reliable build marker, so it is only ever selected
+ * explicitly. An explicit target describes the artifact being produced and
+ * takes precedence over the provider whose CI happens to run the build.
+ */
+export const resolveDeploymentTarget = (
+  explicit: ExplicitDeploymentTarget | undefined,
+  environment: Readonly<Record<string, string | undefined>>
+): DeploymentEnvironment => explicit ?? resolveDeploymentEnvironment(environment)
 
 export const assertSupportedDeploymentEnvironment = (environment: DeploymentEnvironment): void => {
   if (environment !== 'netlify') return
