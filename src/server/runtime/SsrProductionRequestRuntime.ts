@@ -1,4 +1,4 @@
-import { createSsrRequestRuntime } from './SsrRequestRuntime'
+import { createSsrRequestRuntime, type SsrProductionAssetResponseResolver } from './SsrRequestRuntime'
 import {
   createSsrRequestScope,
   SsrRequestCancelledError,
@@ -19,6 +19,7 @@ import { safeSsrLog } from '../../diagnostics/SsrObservability'
 export const createSsrProductionRequestHandler = (options: {
   root: string
   loadRuntime: () => Promise<unknown>
+  resolveProductionAssetResponse?: SsrProductionAssetResponseResolver
 }) => {
   let initialization: ReturnType<typeof createSsrRequestRuntime> | undefined
   const initialize = () => initialization ??= createSsrRequestRuntime({ ...options, production: true })
