@@ -31,18 +31,38 @@ export interface DeploymentStaticAsset {
   contentType: string
 }
 
+export interface DeploymentClassifiedAsset extends DeploymentStaticAsset {
+  /** Physical robots.txt / sitemap XML: SEO configuration decides ownership per request. */
+  seo: boolean
+}
+
+/** Static CDN ownership only. Dynamic applications keep every file runtime-owned. */
 export const collectDeploymentStaticAssets = async (
   clientRoot: string,
   metadata: DeploymentMetadata
 ): Promise<DeploymentStaticAsset[]> => {
   if (metadata.dynamicAssets) return []
+  return (await classifyDeploymentPublicAssets(clientRoot, metadata))
+    .filter((asset) => !asset.seo)
+    .map(({ seo: _seo, ...asset }) => asset)
+}
+
+/**
+ * Every client file that the production runtime may ever serve publicly, by the
+ * same exact rules as Core. Templates, manifests, private metadata, source maps,
+ * control files and route-owned paths are never included.
+ */
+export const classifyDeploymentPublicAssets = async (
+  clientRoot: string,
+  metadata: DeploymentMetadata
+): Promise<DeploymentClassifiedAsset[]> => {
   const immutable = resolveSsrImmutableAssetPaths(
     parseSsrClientAssetManifest(await readFile(resolve(clientRoot, '.vite/manifest.json'), 'utf8')),
     parseSsrProductionAssetMetadata(await readFile(resolve(clientRoot, SSR_PRODUCTION_ASSET_METADATA_PATH), 'utf8'))
   )
   const matchers = metadata.serverRouteMatchers.map((source) => new RegExp(source))
   const base = effectiveViteBasePath(metadata.viteBase)
-  const assets: DeploymentStaticAsset[] = []
+  const assets: DeploymentClassifiedAsset[] = []
   for (const file of await deploymentFiles(clientRoot)) {
     // HTML stays runtime-owned, including SPA templates and multi-app shells.
     // Reject control files and source artifacts even if copied from public/.
@@ -51,13 +71,13 @@ export const collectDeploymentStaticAssets = async (
         /(?:^|\/)(?:package(?:-lock)?\.json|yarn\.lock|_redirects|_headers|vercel\.json|netlify\.toml)$/i.test(file) ||
         /[?#%\\\u0000-\u0020\u007f]/.test(file)) continue
     const pathname = `${base}${file}`
-    if (/\/(?:robots\.txt|sitemap(?:-[1-9]\d*)?\.xml)$/.test(pathname) ||
-        metadata.controlPaths.includes(pathname) || matchers.some((matcher) => matcher.test(pathname))) continue
+    if (metadata.controlPaths.includes(pathname) || matchers.some((matcher) => matcher.test(pathname))) continue
+    const seo = /\/(?:robots\.txt|sitemap(?:-[1-9]\d*)?\.xml)$/.test(pathname)
     const asset = await resolveSsrProductionAsset({
       clientRoot, pathname, viteBase: metadata.viteBase,
       protectedTemplates: metadata.templates, immutableAssetPaths: immutable,
     })
-    if (asset) assets.push({ file, pathname, cacheControl: asset.cacheControl, contentType: asset.contentType })
+    if (asset) assets.push({ file, pathname, cacheControl: asset.cacheControl, contentType: asset.contentType, seo })
   }
   return assets
 }
