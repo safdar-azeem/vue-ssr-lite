@@ -5,8 +5,13 @@ import {
   writeWebResponse,
 } from './SsrWebHttpRuntime'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { existsSync } from 'node:fs'
-import { open, readFile, realpath, stat } from 'node:fs/promises'
+import { open } from 'node:fs/promises'
+import {
+  isSsrProductionFile,
+  readSsrProductionText,
+  realSsrProductionPath,
+  ssrProductionFileExistsSync,
+} from './SsrProductionFiles'
 import { resolve } from 'node:path'
 import {
   compileSsrConfig,
@@ -77,7 +82,19 @@ export interface SsrRequestRuntimeOptions {
   loadDevelopmentControlPlane?: () => Promise<SsrResolvedServerOptions>
   development?: SsrRequestDevelopmentRuntime
   startupTimings?: SsrPhaseTimings
+  /**
+   * Production hosts without a client directory on disk (Cloudflare Workers)
+   * serve classified public assets through their platform asset binding.
+   */
+  resolveProductionAssetResponse?: SsrProductionAssetResponseResolver
 }
+
+export type SsrProductionAssetResponseResolver = (
+  pathname: string,
+  requestHeaders: SsrHeaders,
+  requestMethod: string,
+  signal: AbortSignal
+) => Promise<Response | null>
 
 export interface SsrRequestDevelopmentRuntime {
   importModule: (specifier: string) => Promise<Record<string, unknown>>
@@ -171,7 +188,7 @@ const readProductionArtifact = async (
   artifact: 'client-manifest' | 'asset-cache-metadata' | 'ssr-manifest' | 'bootstrap-metadata'
 ): Promise<string> => {
   try {
-    return await readFile(filename, 'utf8')
+    return await readSsrProductionText(filename)
   } catch (error) {
     throw new SsrProductionArtifactError(`${artifact}.${isExpectedUnavailableAssetError(error) ? 'missing' : 'read-failed'}`)
   }
@@ -444,7 +461,7 @@ export const createSsrRequestRuntime = async (
   // Replacing the server invalidates this server-local store after deployment.
   const productionTemplates = options.production
     ? createSsrProductionTemplateStore({
-        load: (templatePath) => readFile(templatePath, 'utf8'),
+        load: (templatePath) => readSsrProductionText(templatePath),
         prepare: prepareSsrHtmlTemplate,
       })
     : undefined
@@ -523,7 +540,7 @@ export const createSsrRequestRuntime = async (
       return prepareSsrCompiledMetadata(definition).applications.get(entry)!.templatePath
     }
     const split = resolve(clientRoot, '.vue-ssr-lite', `${entry.id}.html`)
-    const path = existsSync(split) ? split : resolve(clientRoot, entry.template)
+    const path = ssrProductionFileExistsSync(split) ? split : resolve(clientRoot, entry.template)
     templatePaths.set(entry, path)
     return path
   }
@@ -544,7 +561,7 @@ export const createSsrRequestRuntime = async (
     try {
       template = entry.templateMissing
         ? SSR_HTML_TEMPLATE
-        : await readFile(templatePath, { encoding: 'utf8', signal })
+        : await readSsrProductionText(templatePath, signal)
     } finally {
       finishRead?.()
     }
@@ -588,8 +605,7 @@ export const createSsrRequestRuntime = async (
     await Promise.all(
       definition.applications.map(async (application) => {
         if (application.templateMissing && !options.production) return
-        const information = await stat(resolveTemplatePath(definition, application))
-        if (!information.isFile()) {
+        if (!(await isSsrProductionFile(resolveTemplatePath(definition, application)))) {
           throw new Error(`SSR client entry is missing: ${application.template}`)
         }
       })
@@ -611,12 +627,11 @@ export const createSsrRequestRuntime = async (
   const validateInitialTemplatePaths = async () => {
     await Promise.all(
       initialTemplatePaths.map(async (templatePath) => {
-        const information = await stat(templatePath)
-        if (!information.isFile()) {
+        if (!(await isSsrProductionFile(templatePath))) {
           throw new Error(`Missing client entry: ${templatePath}`)
         }
         if (options.production) {
-          productionTemplatePaths.set(templatePath, await realpath(templatePath))
+          productionTemplatePaths.set(templatePath, await realSsrProductionPath(templatePath))
         }
       })
     )
@@ -707,7 +722,9 @@ export const createSsrRequestRuntime = async (
     isPrivateProductionAssetPath: (pathname) =>
       isSsrPrivateProductionAssetPath(pathname, viteBase),
     resolveProductionAssetResponse: (pathname, protectedTemplates, headers, method, signal) =>
-      resolveProductionAssetResponse({
+      options.resolveProductionAssetResponse
+        ? options.resolveProductionAssetResponse(pathname, headers, method, signal)
+        : resolveProductionAssetResponse({
         clientRoot,
         pathname,
         protectedTemplates,
