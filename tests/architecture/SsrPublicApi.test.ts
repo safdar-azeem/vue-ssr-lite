@@ -47,6 +47,8 @@ const SERVER_RUNTIME_EXPORTS = [
   'createSsrSeoEndpoints',
   'defineServer',
   'defineSitemap',
+  'getCloudflareEnv',
+  'getCloudflareExecutionContext',
   'requireSsrEnum',
   'requireSsrEnv',
   'requireSsrHostname',
@@ -165,6 +167,7 @@ const CLIENT_TYPE_EXPORTS = [
 /** ADVANCED PUBLIC CONTRACT: server hosting, endpoint, cache, and SEO types. */
 const SERVER_TYPE_EXPORTS = [
   'ApplicationConfig',
+  'CloudflareRequestContext',
   'RobotsConfig',
   'RobotsGroup',
   'ServerConfig',
