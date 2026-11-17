@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import type { SsrHeaders } from '../request/SsrRequestTypes'
 import type { SsrNormalizedRequest } from '../server/runtime/SsrRequestHandler'
 
@@ -22,7 +21,7 @@ export const normalizeDeploymentRequest = (options: {
   headers['x-forwarded-host'] = options.host
   headers['x-forwarded-proto'] = options.protocol
   return Object.freeze({
-    requestId: randomUUID(),
+    requestId: globalThis.crypto.randomUUID(),
     startedAt: Date.now(),
     method: options.method,
     url: options.url,
