@@ -68,7 +68,7 @@ const runServer = async (options: SsrCliOptions, production: boolean) => {
 }
 
 const runBuild = async (options: SsrCliOptions) => {
-  const deployment = createDeploymentBuild(options.root)
+  const deployment = createDeploymentBuild(options.root, process.env, options.target)
   const { build: viteBuild } = await import('vite')
   const cliInline = createSsrViteCliInlineConfig(options.cliConfig)
   const cliMarker = options.cliConfig
@@ -81,7 +81,9 @@ const runBuild = async (options: SsrCliOptions) => {
   })
   await viteBuild({
     ...createSsrProductionViteBuildOptions(options.root),
-    plugins: cliMarker.length ? cliMarker : undefined,
+    plugins: cliMarker.length || deployment.serverPlugins.length
+      ? [...deployment.serverPlugins, ...cliMarker]
+      : undefined,
     ...cliInline,
   })
   await deployment.complete(options.serverOutput)
