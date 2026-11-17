@@ -4,8 +4,9 @@ import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Plugin, ResolveFn, Rollup, ViteDevServer } from 'vite'
 import { normalizePath } from 'vite'
-import { assertSupportedDeploymentEnvironment, resolveDeploymentEnvironment } from '../deployment/DeploymentEnvironment'
+import { assertSupportedDeploymentEnvironment, resolveDeploymentEnvironment, resolveDeploymentTarget } from '../deployment/DeploymentEnvironment'
 import { createDeploymentMetadata, DEPLOYMENT_METADATA_PATH } from '../deployment/DeploymentMetadata'
+import { readExplicitDeploymentTarget } from '../deployment/DeploymentRuntime'
 import {
   extractSsrViteEntries,
   generateSsrClientModule,
@@ -362,7 +363,11 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
     },
     async config(userConfig, environment) {
       if (environment.command === 'build') {
-        assertSupportedDeploymentEnvironment(resolveDeploymentEnvironment(process.env))
+        // An explicit `--target` describes the artifact; provider detection
+        // (including the unsupported-Netlify guard) applies only without one.
+        assertSupportedDeploymentEnvironment(
+          resolveDeploymentTarget(readExplicitDeploymentTarget(userConfig.plugins), process.env)
+        )
       }
       root = resolve(options.root || userConfig.root || process.cwd())
       cliConfig = readSsrViteCliConfig(userConfig)
@@ -645,7 +650,10 @@ export const vueSsrLite = (options: SsrVitePluginOptions = {}): Plugin => {
         fileName: SSR_PRODUCTION_ASSET_METADATA_PATH,
         source: serializeSsrProductionAssetMetadata(immutable),
       })
-      if (resolveDeploymentEnvironment(process.env) === 'vercel' && loadedConfig) {
+      const deploymentTarget = resolveDeploymentTarget(
+        readExplicitDeploymentTarget(this.environment.config.plugins), process.env
+      )
+      if ((deploymentTarget === 'cloudflare' || deploymentTarget === 'vercel') && loadedConfig) {
         this.emitFile({
           type: 'asset',
           fileName: DEPLOYMENT_METADATA_PATH,
