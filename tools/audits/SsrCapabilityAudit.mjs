@@ -29,7 +29,7 @@ export const auditPackedCapabilities = async ({ repositoryRoot, consumerRoot, pa
       sizes: { bytes: Buffer.byteLength(code), gzip: gzipSync(code).byteLength, brotli: brotliCompressSync(code).byteLength },
     }
   }
-  const roots = ['index.mjs', 'client.mjs', 'server.mjs', 'vite.mjs', 'cli.mjs', 'internal-ssr-renderer.mjs', 'internal-vercel.mjs']
+  const roots = ['index.mjs', 'client.mjs', 'server.mjs', 'vite.mjs', 'cli.mjs', 'internal-ssr-renderer.mjs', 'internal-vercel.mjs', 'internal-cloudflare.mjs']
   const closure = (entry, dynamic = false) => {
     const files = new Set()
     const external = new Set()
