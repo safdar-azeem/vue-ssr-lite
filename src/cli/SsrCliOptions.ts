@@ -1,6 +1,7 @@
 import { access, realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { resolveSsrConfigPath } from '../config/compile/SsrConfigCompileRuntime'
+import { EXPLICIT_DEPLOYMENT_TARGETS, type ExplicitDeploymentTarget } from '../deployment/DeploymentEnvironment'
 
 export type SsrCliCommand = 'dev' | 'build' | 'start'
 
@@ -21,6 +22,8 @@ export interface SsrCliOptions {
   cliConfig?: string
   serverOutput: string
   hmrPort?: string
+  /** `build --target cloudflare`; absent for ordinary builds. */
+  target?: ExplicitDeploymentTarget
 }
 
 const DEFAULT_SERVER_OUTPUT = 'dist/server/SsrRuntime.js'
@@ -28,6 +31,23 @@ const DEFAULT_SERVER_OUTPUT = 'dist/server/SsrRuntime.js'
 const readFlag = (args: string[], name: string): string | undefined => {
   const index = args.indexOf(name)
   return index >= 0 ? args[index + 1] : undefined
+}
+
+const readTarget = (args: string[], command: string): ExplicitDeploymentTarget | undefined => {
+  const values = args.flatMap((arg, index) =>
+    arg === '--target' ? [args[index + 1] ?? ''] : arg.startsWith('--target=') ? [arg.slice(9)] : []
+  )
+  if (!values.length) return undefined
+  if (command !== 'build') throw new Error('`--target` is only supported by `vue-ssr-lite build`.')
+  const unique = [...new Set(values)]
+  if (unique.length > 1) {
+    throw new Error(`Conflicting deployment targets: ${unique.map((value) => JSON.stringify(value)).join(', ')}. Pass one --target.`)
+  }
+  const target = unique[0]!
+  if (!(EXPLICIT_DEPLOYMENT_TARGETS as readonly string[]).includes(target)) {
+    throw new Error(`Unsupported deployment target ${JSON.stringify(target)}. Supported targets: ${EXPLICIT_DEPLOYMENT_TARGETS.join(', ')}.`)
+  }
+  return target as ExplicitDeploymentTarget
 }
 
 const assertProductionRuntimeExists = async (serverOutput: string) => {
@@ -56,7 +76,7 @@ export const parseSsrCliArguments = async (
   const command = args[0]
   if (!['dev', 'build', 'start'].includes(command)) {
     throw new Error(
-      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config server.ts] [--hmr-port 31001]'
+      'Usage: vue-ssr-lite <dev|build|start> [--root .] [--config server.ts] [--hmr-port 31001] [--target cloudflare]'
     )
   }
   // Vite's watcher and custom-base module URLs resolve filesystem paths to
@@ -68,6 +88,7 @@ export const parseSsrCliArguments = async (
     readFlag(args, '--server-output') || DEFAULT_SERVER_OUTPUT
   )
   const hmrPort = readFlag(args, '--hmr-port') || process.env.VUE_SSR_LITE_HMR_PORT
+  const target = readTarget(args, command)
 
   if (command === 'start') {
     await assertProductionRuntimeExists(serverOutput)
@@ -88,5 +109,6 @@ export const parseSsrCliArguments = async (
     cliConfig: configFlag ? config : undefined,
     serverOutput,
     hmrPort,
+    ...(target ? { target } : {}),
   }
 }
