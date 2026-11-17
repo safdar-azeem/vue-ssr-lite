@@ -53,6 +53,7 @@ export default defineConfig({
           'src/rendering/SsrRenderRuntime.ts'
         ),
         'internal-vercel': resolve(repositoryRoot, 'src/deployment/vercel/VercelRuntime.ts'),
+        'internal-cloudflare': resolve(repositoryRoot, 'src/deployment/cloudflare/CloudflareRuntime.ts'),
         server: resolve(repositoryRoot, 'src/server.ts'),
         vite: resolve(repositoryRoot, 'src/vite.ts'),
         cli: resolve(repositoryRoot, 'src/cli/SsrCli.ts'),
