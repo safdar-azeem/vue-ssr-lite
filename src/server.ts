@@ -28,6 +28,13 @@ export type {
   SiteSeoResolver,
 } from './extensions/seo/types'
 
+/** Cloudflare Workers bindings for the current server request (server-only). */
+export {
+  getCloudflareEnv,
+  getCloudflareExecutionContext,
+  type CloudflareRequestContext,
+} from './deployment/cloudflare/CloudflareContext'
+
 /** Advanced programmatic hosting and cache integrations. */
 export {
   createSsrManagedServer,
