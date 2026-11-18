@@ -243,6 +243,24 @@ describe('generated Worker (examples/5-cloudflare-workers sources)', () => {
     expect((await get('/robots.txt')).status).toBe(200)
     expect(await (await get('/sitemap.xml')).text()).toContain('<loc>https://demo.example.com/posts/hello-workers</loc>')
 
+    // The adapter supplies pathname+search. A leading // is not a protocol-relative
+    // URL: it is a client error, never HTTP 500 and never the home page.
+    for (const path of ['//', '///', '//x.php', '//foo/bar', '//nope?x=1']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await get(path, { method, headers: { accept: 'text/html' } })
+        expect(response.status, `${method} ${path}`).toBe(404)
+        expect(response.headers.get('cache-control')).toBe('no-store')
+        const body = await response.text()
+        expect(body).not.toContain('Hello from a server route')
+        expect(body).not.toContain('<!--vue-ssr-lite')
+      }
+    }
+    // Internal double slashes and queries keep their meaning.
+    expect((await get('/posts//hello-workers')).status).toBe(404)
+    const queried = await get('/isolation?id=a//b')
+    expect(queried.status).toBe(200)
+    expect(await queried.text()).toContain('query=a//b')
+
     const ids = Array.from({ length: 24 }, (_, index) => `user-${index}`)
     const pages = await Promise.all(ids.map(async (id) => (await get(`/isolation?id=${id}`)).text()))
     pages.forEach((page, index) => expect(page).toContain(`query=${ids[index]} fetched=${ids[index]}<`))

@@ -270,11 +270,23 @@ describe('authoritative application HTTP pipeline', () => {
     expect(seen?.signal.reason).toBe(reason)
   })
 
-  it('keeps a network-path request target on the selected trusted host', async () => {
+  // A network-path target (//host/path) is not an origin-form path. It used to be
+  // read as host "other.test" and served as /path; it is now a 404 that never
+  // reaches middleware, so it can neither select a host nor render another page.
+  it('rejects a network-path request target before middleware instead of serving its path', async () => {
+    let called = false
+    const definition = await compile({ serverMiddleware: [defineServerMiddleware(() => { called = true; return new Response('ok') })] })
+    const response = await respond(input('//other.test/path'), runtimeFor(definition))
+    expect(response.status).toBe(404)
+    expect(called).toBe(false)
+  })
+
+  it('keeps an absolute-form request target on the selected trusted host', async () => {
     let url = ''
     const definition = await compile({ serverMiddleware: [defineServerMiddleware((request) => { url = request.url; return new Response('ok') })] })
-    await respond(input('//other.test/path'), runtimeFor(definition))
+    await respond(input('http://other.test/path'), runtimeFor(definition))
     expect(new URL(url).host).toBe('example.test')
+    expect(new URL(url).pathname).toBe('/path')
   })
 
   it.each(['endpoint', 'asset', '404', 'spa'])('continues legacy null responses into %s', async (target) => {

@@ -5,6 +5,7 @@ import { dispatchServerRoute, matchServerRoute, SsrServerRouteBadRequest } from 
 import type { SsrCompiledConfig } from '../../config/compile/SsrRuntimeConfigCompile'
 import { attachSsrPhaseTimings, createSsrPhaseTimings, hasSsrTimingSink, type SsrPhaseTimings } from '../../diagnostics/SsrDiagnosticsRuntime'
 import { resolveSsrDomainContext } from '../../request/SsrDomainRuntime'
+import { parseSsrRequestTarget } from '../../request/SsrRequestTarget'
 import { readSsrDevelopmentErrorDetails } from '../../diagnostics/SsrDevelopmentErrorDiagnostic'
 import { createSsrErrorDiagnostic, describeSsrThrownValue } from '../../diagnostics/SsrErrorDiagnostic'
 import { createSafeSsrLogger, safeSsrLog, safeSsrMetrics } from '../../diagnostics/SsrObservability'
@@ -353,7 +354,17 @@ export const handleSsrRequest = async (
     activeDefinition = definition
     const serverOptions = definition.server
     const metadata = prepareSsrCompiledMetadata(definition)
-    const requestUrl = new URL(request.url || '/', 'http://internal')
+    const requestUrl = parseSsrRequestTarget(request.url || '/')
+    // A target that is not a valid origin-form path (for example one that begins
+    // with //) is a client error. It never reaches host selection, SEO, endpoints
+    // or rendering, so it cannot select another host or render as a valid page.
+    if (!requestUrl) {
+      return jsonResponse(404, {
+        status: 'error',
+        service: definition.name,
+        message: 'Resource not found.',
+      })
+    }
     pathname = requestUrl.pathname
     rawAssetPathname = (request.url || '/').split('?', 1)[0]
 

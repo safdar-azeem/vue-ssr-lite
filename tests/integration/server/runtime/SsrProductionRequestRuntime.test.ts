@@ -373,6 +373,40 @@ describe('shared production executor', () => {
     expect(loadRuntime).toHaveBeenCalledOnce()
   })
 
+  it('rejects leading // targets before host selection, SEO, endpoints and rendering', async () => {
+    const execute = createSsrProductionRequestHandler({ root, loadRuntime: async () => definition() })
+    const request = (path: string, host: string, method = 'GET') =>
+      execute(normalizeDeploymentRequest({ method, url: path, host, protocol: 'https', headers: { cookie: 'session=A', accept: 'text/html' } }), new AbortController().signal)
+    for (const path of ['//', '///', '//x.php', '//foo/bar', '//legacy', '//about', '//b.test/about', '//api/echo']) {
+      // Not even an unknown host reaches host selection (421): the target is invalid first.
+      for (const host of ['a.test', 'b.test', 'unknown.test']) {
+        for (const method of ['GET', 'HEAD']) {
+          const response = await request(path, host, method)
+          expect(response.status, `${method} ${host}${path}`).toBe(404)
+          expect(response.headers.get('cache-control')).toBe('no-store')
+          const body = await response.text()
+          expect(body).not.toContain('rendered')
+          expect(body).not.toContain('legacy')
+        }
+      }
+    }
+    // The same request without the leading // is served normally; a query keeps its meaning.
+    const legacy = await request('/legacy?next=//evil.test', 'a.test')
+    expect(legacy.status).toBe(202)
+    expect(await legacy.text()).toBe('legacy')
+    const page = await request('/about?next=//evil.test&p=%2F%2F', 'a.test')
+    expect(page.status).toBe(200)
+    expect(await page.text()).toContain('<main>A:a.test:session=A:rendered</main>')
+    // An internal // is an ordinary (here unmatched) path, not a rejected target.
+    const internal = await request('/about//x', 'a.test')
+    expect(internal.status).not.toBe(500)
+    expect(await internal.text()).not.toContain('rendered')
+    // Genuine application failures remain HTTP 500.
+    expect((await request('/error', 'a.test')).status).toBe(500)
+    // Malformed percent-encoding stays a deliberate 400.
+    expect((await request('/%E0%A4%A', 'a.test')).status).toBe(400)
+  })
+
   it('isolates cookies, hosts, public config, useFetch hydration and SEO across concurrent requests', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init)
@@ -800,6 +834,38 @@ describe('Vercel Node transport', () => {
     expect(outgoing.statusCode).toBe(201)
     expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 255, 1, 128]))
     expect(headers.get('set-cookie')).toEqual(['one=1', 'two=2'])
+  })
+
+  it('answers a leading // request target with 404 through the Node transport and routes the rest normally', async () => {
+    const handler = createVercelHandler({ root, loadRuntime: async () => definition() })
+    const invoke = async (url: string, method = 'GET') => {
+      const incoming = Object.assign(new PassThrough(), {
+        method, url, headers: { host: 'a.test', 'x-forwarded-proto': 'https', accept: 'text/html' },
+      })
+      incoming.end()
+      const headers = new Map<string, unknown>()
+      const outgoing = Object.assign(new PassThrough(), {
+        statusCode: 200,
+        setHeader: (name: string, value: unknown) => { headers.set(name, value) },
+      })
+      const chunks: Buffer[] = []
+      outgoing.on('data', (chunk) => chunks.push(chunk))
+      await handler(incoming as unknown as IncomingMessage, outgoing as unknown as ServerResponse)
+      return { status: outgoing.statusCode, headers, body: Buffer.concat(chunks).toString() }
+    }
+    // Vercel passes request.url through unchanged, so Node's raw target (including a
+    // backslash form) reaches Core.
+    for (const url of ['//', '///', '//x.php', '//foo/bar', '/\\x.php']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await invoke(url, method)
+        expect(response.status, `${method} ${url}`).toBe(404)
+        expect(response.headers.get('cache-control')).toBe('no-store')
+        expect(response.body).not.toContain('rendered')
+      }
+    }
+    const legacy = await invoke('/legacy?next=//evil.test')
+    expect(legacy.status).toBe(202)
+    expect(legacy.body).toBe('legacy')
   })
 
   it('logs a streamed transport failure once when Vercel writes the response', async () => {

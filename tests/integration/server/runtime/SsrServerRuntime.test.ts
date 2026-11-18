@@ -1293,6 +1293,47 @@ describe('managed SSR server lifecycle', () => {
     }
   })
 
+  it('answers leading // request targets with 404 on the production Node server and keeps queries and internal // intact', async () => {
+    root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
+    await mkdir(join(root, 'dist', 'client'), { recursive: true })
+    await writeFile(
+      join(root, 'dist', 'client', 'index.html'),
+      '<!doctype html><html><body><div id="app"></div></body></html>'
+    )
+    const previousPublicUrl = process.env.PUBLIC_URL
+    delete process.env.PUBLIC_URL
+    try {
+      managed = await createSsrManagedServer({
+        production: true,
+        root,
+        loadRuntime: async () => ({ default: spaConfig() }),
+      })
+      await managed.listen()
+      const { port } = managed.address()
+      const origin = `http://127.0.0.1:${port}`
+      for (const path of ['//', '///', '//x.php', '//foo/bar', '//index.html']) {
+        const html = await fetch(`${origin}${path}`, { headers: { accept: 'text/html', 'sec-fetch-mode': 'navigate' } })
+        expect(html.status, path).toBe(404)
+        expect(html.headers.get('cache-control')).toBe('no-store')
+        expect(await html.text()).not.toContain('vue-ssr-lite-domain')
+        const head = await fetch(`${origin}${path}`, { method: 'HEAD', headers: { accept: 'text/html' } })
+        expect(head.status, `HEAD ${path}`).toBe(404)
+        expect((await head.arrayBuffer()).byteLength).toBe(0)
+      }
+      // Node delivers the raw request target, including the backslash form.
+      expect(await requestRawPathStatus(port, '/\\x.php')).toBe(404)
+      // Normal requests, queries and internal // are unaffected.
+      for (const path of ['/', '/index.html', '/a//b', '/?next=//evil.test']) {
+        const ok = await fetch(`${origin}${path}`, { headers: { accept: 'text/html' } })
+        expect(ok.status, path).toBe(200)
+        expect(await ok.text()).toContain('vue-ssr-lite-domain')
+      }
+    } finally {
+      if (previousPublicUrl === undefined) delete process.env.PUBLIC_URL
+      else process.env.PUBLIC_URL = previousPublicUrl
+    }
+  })
+
   it('keeps production SSR head, hydration, domain, and public config request-local', async () => {
     root = await mkdtemp(join(tmpdir(), 'vue-ssr-lite-'))
     const clientRoot = join(root, 'dist', 'client')

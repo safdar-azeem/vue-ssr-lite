@@ -1300,3 +1300,198 @@ describe('transport-independent SSR request handler', () => {
     }
   })
 })
+
+describe('request target ownership (leading // and malformed targets)', () => {
+  // The adapters supply a pathname and query. A path that begins with // must
+  // never be read as a protocol-relative URL (a different host), and must never
+  // reach host selection, SEO, endpoints, classification or rendering.
+  const twoApplications = () => {
+    const publicConfigA = vi.fn(() => ({}))
+    const publicConfigB = vi.fn(() => ({}))
+    const endpointMatch = vi.fn(() => false)
+    const classify = vi.fn(() => 'spa' as const)
+    const definition = compiledDefinition({ id: 'probe', match: endpointMatch, handle: vi.fn() }, publicConfigA)
+    const first = definition.applications[0]!
+    first.resolveRouteRender = classify
+    definition.applications.push({
+      ...first,
+      id: 'other',
+      hosts: ['other.test'],
+      publicConfigFactory: publicConfigB,
+      endpoints: [],
+      resolveRouteRender: classify,
+    })
+    return { definition, publicConfigA, publicConfigB, endpointMatch, classify }
+  }
+
+  it.each(['//', '///', '////', '//x.php', '//buy.php', '//foo/bar', '//other.test/path', '/\\x.php', '/\\\\x', '//?a=1', '//x?q=//'])(
+    'rejects %j with 404 before any host, SEO, endpoint or render work',
+    async (url) => {
+      const { definition, publicConfigA, publicConfigB, endpointMatch, classify } = twoApplications()
+      const scope = createSsrRequestScope(0)
+      const loadTemplate = vi.fn(async () => '<html></html>')
+      const loadPreparedSsrTemplate = vi.fn(async () => '<html></html>')
+      try {
+        for (const accept of ['text/html', 'application/json', '*/*']) {
+          for (const host of ['example.test', 'other.test', 'unknown.test']) {
+            const response = await handleSsrRequest(
+              { ...normalizedRequest(url), headers: { host, accept } },
+              { ...handlerRuntime(scope, definition), loadTemplate, loadPreparedSsrTemplate }
+            )
+            expect(response?.statusCode).toBe(404)
+            expect(response?.headers?.['cache-control']).toBe('no-store')
+            expect(JSON.parse(String(response?.body))).toMatchObject({ status: 'error', message: 'Resource not found.' })
+          }
+        }
+        expect(publicConfigA).not.toHaveBeenCalled()
+        expect(publicConfigB).not.toHaveBeenCalled()
+        expect(endpointMatch).not.toHaveBeenCalled()
+        expect(classify).not.toHaveBeenCalled()
+        expect(loadTemplate).not.toHaveBeenCalled()
+        expect(loadPreparedSsrTemplate).not.toHaveBeenCalled()
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
+  it('answers HEAD for a leading // target with the same 404', async () => {
+    const { definition } = twoApplications()
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(
+        { ...normalizedHtmlRequest('//x.php'), method: 'HEAD' },
+        handlerRuntime(scope, definition)
+      )
+      expect(response?.statusCode).toBe(404)
+      expect(response?.headers?.['cache-control']).toBe('no-store')
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('rejects a leading // on every method without invoking application code', async () => {
+    const { definition, publicConfigA } = twoApplications()
+    const scope = createSsrRequestScope(0)
+    try {
+      for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+        const response = await handleSsrRequest(
+          { ...normalizedRequest('//x'), method },
+          handlerRuntime(scope, definition)
+        )
+        expect(response?.statusCode).toBe(404)
+      }
+      expect(publicConfigA).not.toHaveBeenCalled()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it.each([
+    ['/', '/'],
+    ['/blog', '/blog'],
+    ['/a//b', '/a//b'],
+    ['/a///b/', '/a///b/'],
+    ['/blog//', '/blog//'],
+    ['/?next=//evil.test', '/?next=//evil.test'],
+    ['/a//b?x=1&y=%2F%2F&z=//', '/a//b?x=1&y=%2F%2F&z=//'],
+    ['/%2F%2Fx', '/%2F%2Fx'],
+    ['/a%252Fb', '/a%252Fb'],
+    ['/caf%C3%A9', '/caf%C3%A9'],
+  ])('keeps %j routable with the exact path and query', async (url, expected) => {
+    const { definition, publicConfigA, classify } = twoApplications()
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(normalizedHtmlRequest(url), handlerRuntime(scope, definition))
+      expect(response?.statusCode).toBe(200)
+      expect(classify).toHaveBeenCalledWith(expected)
+      expect(publicConfigA).toHaveBeenCalledOnce()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('exposes the unaltered pathname and search to endpoints (no double decoding, no host rewrite)', async () => {
+    const seen: Array<{ pathname: string; search: string; url: string }> = []
+    const definition = compiledDefinition({
+      id: 'probe',
+      match: (request) => { seen.push({ pathname: request.pathname, search: request.search, url: request.url }); return false },
+      handle: vi.fn(),
+    })
+    const scope = createSsrRequestScope(0)
+    try {
+      await handleSsrRequest(normalizedHtmlRequest('/a//b%252Fc?x=%2F%2F&y=1'), handlerRuntime(scope, definition))
+      expect(seen).toEqual([{
+        pathname: '/a//b%252Fc',
+        search: '?x=%2F%2F&y=1',
+        url: 'https://example.test/a//b%252Fc?x=%2F%2F&y=1',
+      }])
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  // matchServerRoute rejects an undecodable path with SsrServerRouteBadRequest
+  // before the application lifecycle starts: a deliberate 400, never a 500.
+  it.each(['/%', '/%E0%A4%A', '/%zz', '/a%2', '/%C3', '/blog//%'])(
+    'answers malformed percent-encoding %j with 400 before any application work',
+    async (url) => {
+      const { definition, publicConfigA, endpointMatch, classify } = twoApplications()
+      const scope = createSsrRequestScope(0)
+      try {
+        for (const accept of ['text/html', 'application/json']) {
+          const response = await handleSsrRequest(
+            { ...normalizedRequest(url), headers: { host: 'example.test', accept } },
+            handlerRuntime(scope, definition)
+          )
+          expect(response?.statusCode).toBe(400)
+        }
+        expect(publicConfigA).not.toHaveBeenCalled()
+        expect(endpointMatch).not.toHaveBeenCalled()
+        expect(classify).not.toHaveBeenCalled()
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
+  it.each(['/%00', '/a%00b', '/%C3%A9'])(
+    'routes validly encoded %j unchanged',
+    async (url) => {
+      const { definition, classify } = twoApplications()
+      const scope = createSsrRequestScope(0)
+      try {
+        const response = await handleSsrRequest(normalizedHtmlRequest(url), handlerRuntime(scope, definition))
+        expect(response?.statusCode).toBe(200)
+        expect(classify).toHaveBeenCalledWith(url)
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
+  it('turns an unparseable target into a client error instead of HTTP 500', async () => {
+    const { definition, publicConfigA } = twoApplications()
+    const scope = createSsrRequestScope(0)
+    try {
+      for (const url of ['http://', 'http://[::1', 'https://exa mple/']) {
+        const response = await handleSsrRequest(normalizedRequest(url), handlerRuntime(scope, definition))
+        expect(response?.statusCode).toBe(404)
+      }
+      expect(publicConfigA).not.toHaveBeenCalled()
+    } finally {
+      scope.dispose()
+    }
+  })
+
+  it('still reports genuine application failures as HTTP 500', async () => {
+    const definition = compiledDefinition(undefined, () => { throw new Error('boom') })
+    const scope = createSsrRequestScope(0)
+    try {
+      const response = await handleSsrRequest(normalizedHtmlRequest('/ok'), handlerRuntime(scope, definition))
+      expect(response?.statusCode).toBe(500)
+    } finally {
+      scope.dispose()
+    }
+  })
+})
