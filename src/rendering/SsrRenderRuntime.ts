@@ -263,10 +263,12 @@ export const renderSsrApplication = async <
                   response: snapshotSerializable(active.context.response),
                 }
               : undefined
+          const finishDrain = timings?.start('resolution drain')
           resolutionSettled = await resolution.drain(
             deadlineMs,
             request.signal
           )
+          finishDrain?.()
           throwIfRequestAborted(request.signal)
           if (!resolutionSettled) {
             deadlineSnapshot = fallbackSnapshot

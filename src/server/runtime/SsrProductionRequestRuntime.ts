@@ -27,6 +27,7 @@ export const createSsrProductionRequestHandler = (options: {
 
   return async (request: SsrNormalizedRequest, signal: AbortSignal): Promise<Response> => {
     if (signal.aborted) throw new SsrRequestCancelledError()
+    const arrivedAtMs = performance.now()
     let scope: SsrRequestScope | undefined
     const onAbort = () => scope?.cancel()
     const dispose = () => {
@@ -51,7 +52,7 @@ export const createSsrProductionRequestHandler = (options: {
       if (signal.aborted) throw new SsrRequestCancelledError()
       scope = createSsrRequestScope(runtime.definition().server.requestTimeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
-      const result = await runtime.execute(request, scope)
+      const result = await runtime.execute(request, scope, undefined, arrivedAtMs)
       if (!result) throw new Error('Production request did not produce a response.')
       const response = normalizeServerResponse(result instanceof Response ? result : ssrHttpResponseToWebResponse(result))
       sanitizeFetchedResponseHeaders(response)

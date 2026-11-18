@@ -189,6 +189,14 @@ export interface SsrConfigServerOptions {
   maxResolutionPasses?: number
   resolutionDeadlineMs?: number
   diagnostics?: boolean
+  /**
+   * Opt-in per-request phase timings, in any mode. Off by default. When true and
+   * `logger.debug` exists, each application request emits one bounded
+   * `ssr.diagnostic.timing` event with fixed phase names and durations only: no
+   * URL, header, cookie, body or tenant data. Unlike `diagnostics`, it does not
+   * run the render diagnostics that scan the HTML.
+   */
+  phaseTimings?: boolean
   logger?: SsrLogger
   onMetrics?: (metrics: SsrRenderMetrics) => void | Promise<void>
   renderError?: (

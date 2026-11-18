@@ -175,6 +175,11 @@ export interface SsrRequestHandlerRuntime {
   readonly loadDefinition: () => Promise<SsrCompiledConfig>
   readonly fallbackDefinition: () => SsrCompiledConfig | undefined
   readonly fallbackLogger?: () => SsrLogger | undefined
+  /**
+   * `performance.now()` when the transport accepted the request, so work that
+   * precedes the handler (production runtime initialization) is traced too.
+   */
+  readonly requestStartedAtMs?: number
   /** Authoritative project root used only for development source presentation. */
   readonly root?: string
   /** Development console presentation for one active human-visible failure. */
@@ -333,9 +338,16 @@ export const handleSsrRequest = async (
   let selectedEntryId = 'unknown'
   let activeRenderRequest: SsrHttpRequest<any> | undefined
   let activeDefinition = runtime.fallbackDefinition()
-  const timings = !runtime.production && activeDefinition?.server.diagnostics && hasSsrTimingSink(activeDefinition.server.logger)
-    ? createSsrPhaseTimings()
-    : undefined
+  // Phase timings are request-scoped and off unless diagnostics (development) or
+  // server.phaseTimings (any mode) is enabled and the logger can receive them.
+  const arrivedAtMs = runtime.requestStartedAtMs ?? performance.now()
+  const wantsTimings = (definition: SsrCompiledConfig | undefined): boolean =>
+    Boolean(
+      definition &&
+        ((!runtime.production && definition.server.diagnostics) || definition.server.phaseTimings) &&
+        hasSsrTimingSink(definition.server.logger)
+    )
+  let timings = wantsTimings(activeDefinition) ? createSsrPhaseTimings(arrivedAtMs) : undefined
   let timingDetails: Record<string, unknown> | undefined
   let applicationRequest = false
   let applicationFailure: { error: unknown } | undefined
@@ -348,8 +360,12 @@ export const handleSsrRequest = async (
       if (await scope.run(runtime.serveViteRequest)) return undefined
     }
     applicationRequest = true
-    timings?.mark('vite')
+    // Development only: in production the interval since arrival is runtime
+    // initialization (cold) or ~0 (warm), counted by the "runtime" phase below.
+    if (!runtime.production) timings?.mark('vite')
     const definition = await scope.run(runtime.loadDefinition)
+    // Production only learns its configuration here; the origin stays the arrival time.
+    if (!timings && wantsTimings(definition)) timings = createSsrPhaseTimings(arrivedAtMs)
     timings?.mark('runtime')
     activeDefinition = definition
     const serverOptions = definition.server
@@ -463,6 +479,8 @@ export const handleSsrRequest = async (
     // Preserve the existing application lifecycle, including cache/admission
     // ownership, inside the unmatched-route continuation (plan Section 25).
     const applicationFallback = async (): Promise<SsrHttpResponse | Response> => {
+      // Time since host selection: server middleware and server-route matching.
+      timings?.mark('middleware')
       const domain = snapshotRequestDomain(
         resolveSsrDomainContext(incomingHost, entry, definition.development, protocol)
       )
@@ -517,6 +535,7 @@ export const handleSsrRequest = async (
           trustedLocalConnection: request.trustedLocalConnection,
         })
       )
+      timings?.mark('siteOrigin')
       if (request.trustedLocalConnection) {
         attachSsrTrustedLocalOrigin(renderRequest, renderRequest.siteOrigin!)
       }
@@ -961,6 +980,8 @@ export const handleSsrRequest = async (
     })
   } finally {
     if (applicationRequest && activeDefinition) {
+      // Whatever follows the last phase (response caching, header assembly).
+      timings?.mark('response')
       timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
     }
   }

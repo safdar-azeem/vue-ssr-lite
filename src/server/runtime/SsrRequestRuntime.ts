@@ -691,9 +691,11 @@ export const createSsrRequestRuntime = async (
   const execute = (
     request: SsrNormalizedRequest,
     scope: SsrRequestScope,
-    serveViteRequest?: () => Promise<boolean>
+    serveViteRequest?: () => Promise<boolean>,
+    requestStartedAtMs?: number
   ): Promise<SsrRequestHandlerResult> => handleSsrRequest(request, {
     production: options.production,
+    requestStartedAtMs,
     scope,
     loadDefinition,
     fallbackDefinition: () => lastDefinition,

@@ -15,8 +15,8 @@ export const hasSsrTimingSink = (logger: SsrLogger | undefined): boolean => {
   }
 }
 
-export const createSsrPhaseTimings = () => {
-  const startedAt = performance.now()
+/** `startedAt` lets production count work that began before the definition loaded. */
+export const createSsrPhaseTimings = (startedAt: number = performance.now()) => {
   let checkpoint = startedAt
   const phases: Record<string, number> = Object.create(null)
   const add = (phase: string, duration: number) => {

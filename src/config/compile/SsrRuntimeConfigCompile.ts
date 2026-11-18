@@ -143,6 +143,7 @@ export type SsrResolvedServerOptions = Omit<
   | 'maxResolutionPasses'
   | 'resolutionDeadlineMs'
   | 'diagnostics'
+  | 'phaseTimings'
 > & {
   root: string
   host: string
@@ -157,6 +158,7 @@ export type SsrResolvedServerOptions = Omit<
   maxResolutionPasses: number
   resolutionDeadlineMs: number
   diagnostics: boolean
+  phaseTimings: boolean
 }
 
 export interface SsrViteApplicationEntry {
@@ -768,6 +770,7 @@ const normalizeCompiledServerOptions = (
       'server.resolutionDeadlineMs'
     ),
     diagnostics: config.server?.diagnostics ?? development,
+    phaseTimings: config.server?.phaseTimings === true,
     logger: config.server?.logger,
     onMetrics: config.server?.onMetrics,
     renderError: config.server?.renderError,
