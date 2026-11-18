@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const TOP_LEVEL = [
   'runtime', 'host', 'middleware', 'publicConfig', 'siteOrigin', 'seo', 'endpoints',
   'static assets', 'route classification', 'response cache', 'template', 'admission',
-  'renderer', 'asset resolution', 'HTML injection', 'response',
+  'renderer', 'asset resolution', 'HTML injection', 'server route', 'response',
 ]
 const NESTED = [
   'app/router creation', 'router navigation', 'Vue render', 'resolution drain',
@@ -59,6 +59,8 @@ const build = (options: {
   delays?: Record<string, Delays>
   phaseTimings?: boolean
   maxConcurrentSsrRequests?: number
+  /** Extra controlled delays for the early-return and middleware paths. */
+  extra?: { asset?: number; cache?: number; afterNext?: number; short?: number; route?: number; recover?: number; mwThrow?: boolean; renderError?: number }
 }) => {
   const events: TimingEvent[] = []
   const delay = (host: string, stage: Stage) => sleep(options.delays?.[host]?.[stage] ?? 0)
@@ -89,6 +91,18 @@ const build = (options: {
       },
     },
     routes: [{ path: '/', component: Page }, { path: '/about', component: Page }],
+    ...(options.extra?.cache ? { responseCache: {
+      ttlMs: 1000,
+      store: {
+        get: async () => { await sleep(options.extra!.cache!); return { statusCode: 200, body: 'cached-page', headers: {} } },
+        set: async () => undefined,
+        invalidate: async () => 0,
+      },
+    } } : {}),
+    serverRoutes: [{ routes: {
+      '/native': { GET: async () => { await sleep(options.extra?.route ?? 0); return new Response('native') } },
+      '/boom': { GET: async () => { throw new Error('route failed') } },
+    } }],
     endpoints: [{
       id: 'slow',
       match: () => true,
@@ -99,13 +113,31 @@ const build = (options: {
     server: {
       trustProxy: true,
       logger,
+      ...(options.extra?.renderError ? { renderError: async () => {
+        await sleep(options.extra!.renderError!)
+        return { statusCode: 500, body: 'rendered-error', headers: { 'content-type': 'text/plain' } }
+      } } : {}),
       maxConcurrentSsrRequests: options.maxConcurrentSsrRequests ?? 8,
       ...(options.phaseTimings === false ? {} : { phaseTimings: true }),
     },
     resolveSiteUrl: async (request) => { await delay(request.host, 'siteOrigin'); return undefined },
-    serverMiddleware: [defineServerMiddleware(async (request, _context, next) => {
+    serverMiddleware: [
+      ...(options.extra?.recover ? [defineServerMiddleware(async (_request, _context, next) => {
+        try { return await next() } catch {
+          await sleep(options.extra!.recover!) // recovery work after a downstream failure
+          return new Response('Recovered', { status: 503 })
+        }
+      })] : []),
+      defineServerMiddleware(async (request, _context, next) => {
+      if (options.extra?.mwThrow && new URL(request.url).pathname === '/mwthrow') throw new Error('middleware failed')
       await delay(new URL(request.url).hostname, 'middleware')
-      return next()
+      if (new URL(request.url).pathname === '/short') {
+        await sleep(options.extra?.short ?? 0)
+        return new Response('short-circuit')
+      }
+      const response = await next()
+      await sleep(options.extra?.afterNext ?? 0) // work after next() returns
+      return response
     })],
     applications: apps,
   }), { a: { root: Shell }, b: { root: Shell } })
@@ -113,7 +145,15 @@ const build = (options: {
     await sleep(options.delays?.runtime?.runtime ?? 0)
     return definition
   })
-  const execute = createSsrProductionRequestHandler({ root, loadRuntime })
+  const execute = createSsrProductionRequestHandler({
+    root,
+    loadRuntime,
+    resolveProductionAssetResponse: async (pathname) => {
+      if (pathname !== '/logo.svg') return null
+      await sleep(options.extra?.asset ?? 0)
+      return new Response('svg', { headers: { 'content-type': 'image/svg+xml' } })
+    },
+  })
   const request = (path: string, host: string, requestId = `req-${Math.random().toString(36).slice(2)}`, headers: Record<string, string> = {}) =>
     execute(
       Object.freeze({
@@ -138,6 +178,76 @@ const topLevelSum = (event: TimingEvent) =>
 
 describe('production phase timings (opt-in)', () => {
   const D = 160
+
+  // B-1/B-2: early returns and middleware paths must not be booked as "response".
+  const early = async (extra: NonNullable<Parameters<typeof build>[0]['extra']>, path: string) => {
+    const { events, request } = build({ extra })
+    await (await request('/', 'a.test', 'warm')).text()
+    const response = await request(path, 'a.test', 'measured')
+    const body = await response.text()
+    return { event: eventFor(events, 'measured'), body, status: response.status }
+  }
+  const expectOwned = (event: TimingEvent, phase: string, delay: number) => {
+    expect(event.phases[phase] ?? 0).toBeGreaterThanOrEqual(delay * 0.9)
+    expect(event.phases.response ?? 0, 'must not be booked as response').toBeLessThan(delay * 0.5)
+    expect(Math.abs(topLevelSum(event) - event.phases.total)).toBeLessThan(1)
+  }
+
+  it('B-1: books a slow successful static asset lookup to "static assets"', async () => {
+    const { event, body } = await early({ asset: D }, '/logo.svg')
+    expect(body).toBe('svg')
+    expectOwned(event, 'static assets', D)
+  })
+
+  it('B-1: books a slow response-cache hit to "response cache"', async () => {
+    const { event, body } = await early({ cache: D }, '/about')
+    expect(body).toBe('cached-page')
+    expectOwned(event, 'response cache', D)
+  })
+
+  it('B-2: books middleware work after next() to "middleware"', async () => {
+    const { event, body } = await early({ afterNext: D }, '/about')
+    expect(body).toContain('page:a.test')
+    expectOwned(event, 'middleware', D)
+    expect(event.phases.renderer).toBeGreaterThan(0)
+  })
+
+  it('B-2: books a middleware short-circuit to "middleware"', async () => {
+    const { event, body } = await early({ short: D }, '/short')
+    expect(body).toBe('short-circuit')
+    expectOwned(event, 'middleware', D)
+    expect(event.phases.publicConfig ?? 0).toBe(0)
+  })
+
+  it('B-2: books a matched native server route to "server route", not "response"', async () => {
+    const { event, body } = await early({ route: D }, '/native')
+    expect(body).toBe('native')
+    expectOwned(event, 'server route', D)
+    expect(event.phases.publicConfig ?? 0).toBe(0)
+  })
+
+  it('B-2: books middleware recovery after a rejected next() to "middleware"', async () => {
+    const { event, body, status } = await early({ recover: D }, '/boom')
+    expect(status).toBe(503) // recovery response preserved
+    expect(body).toBe('Recovered')
+    expectOwned(event, 'middleware', D)
+  })
+
+  it('B-2: books asynchronous renderError work after a middleware exception to "response"', async () => {
+    const { event, body, status } = await early({ mwThrow: true, renderError: D }, '/mwthrow')
+    expect(status).toBe(500)
+    expect(body).toBe('rendered-error')
+    expect(event.phases.response ?? 0).toBeGreaterThanOrEqual(D * 0.9)
+    expect(event.phases.middleware ?? 0, 'error rendering must not be middleware').toBeLessThan(D * 0.5)
+    expect(Math.abs(topLevelSum(event) - event.phases.total)).toBeLessThan(1)
+  })
+
+  it('B-2: does not double-count middleware before and after next()', async () => {
+    const { event } = await early({ afterNext: 100 }, '/about')
+    expect(event.phases.middleware).toBeLessThan(100 * 1.5 + 60)
+    expect(Math.abs(topLevelSum(event) - event.phases.total)).toBeLessThan(1)
+  })
+
   const cases: Array<[Stage, string]> = [
     ['middleware', 'middleware'],
     ['publicConfig', 'publicConfig'],

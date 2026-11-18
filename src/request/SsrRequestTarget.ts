@@ -11,13 +11,17 @@ const INTERNAL_ORIGIN = 'http://internal'
  * variants into a pathname that begins with `//`, which this rejects as well.
  *
  * Returns `undefined` for a target that is not a valid origin-form path: a
- * pathname beginning with `//`, a leading backslash, or one the URL parser
+ * pathname beginning with `//`, a leading backslash, a leading control or space, or one the URL parser
  * cannot represent. Callers answer those with a client error. Percent-encoding
  * is left untouched here (no decoding), so it cannot be decoded twice.
  */
 export const parseSsrRequestTarget = (target: string): URL | undefined => {
   const raw = target || '/'
   const first = raw.charCodeAt(0)
+  // The URL parser trims leading C0 controls and spaces and removes tab/newline,
+  // so " //host/x" would otherwise be read as a network-path reference. No valid
+  // origin-form or absolute-form target begins with one.
+  if (first <= 32) return undefined
   // 92 is a backslash: not a valid origin-form target, and the URL parser would
   // read it as a path separator and then as an authority delimiter.
   if (first === 92) return undefined

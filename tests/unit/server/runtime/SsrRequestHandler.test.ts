@@ -1355,6 +1355,31 @@ describe('request target ownership (leading // and malformed targets)', () => {
     }
   )
 
+  // M-1: the URL parser trims leading whitespace, which would expose a //authority.
+  it.each(['\t//other.test/secure', '\n//other.test/secure', '\r//other.test/secure', ' //other.test/secure', '\u0000//x', '  //x.php', '\t/secure'])(
+    'rejects whitespace-prefixed target %j before host selection, endpoints, SEO and rendering',
+    async (url) => {
+      const { definition, publicConfigA, publicConfigB, endpointMatch, classify } = twoApplications()
+      const scope = createSsrRequestScope(0)
+      try {
+        for (const host of ['example.test', 'other.test', 'unknown.test']) {
+          const response = await handleSsrRequest(
+            { ...normalizedHtmlRequest(url), headers: { host, accept: 'text/html' } },
+            handlerRuntime(scope, definition)
+          )
+          expect(response?.statusCode).toBe(404)
+          expect(response?.headers?.['cache-control']).toBe('no-store')
+        }
+        expect(publicConfigA).not.toHaveBeenCalled()
+        expect(publicConfigB).not.toHaveBeenCalled()
+        expect(endpointMatch).not.toHaveBeenCalled()
+        expect(classify).not.toHaveBeenCalled()
+      } finally {
+        scope.dispose()
+      }
+    }
+  )
+
   it('answers HEAD for a leading // target with the same 404', async () => {
     const { definition } = twoApplications()
     const scope = createSsrRequestScope(0)

@@ -349,6 +349,9 @@ export const handleSsrRequest = async (
     )
   let timings = wantsTimings(activeDefinition) ? createSsrPhaseTimings(arrivedAtMs) : undefined
   let timingDetails: Record<string, unknown> | undefined
+  // Phase that owns time after the last explicit mark: middleware code that runs
+  // after next() returns (or short-circuits), otherwise response assembly.
+  let tailPhase = 'response'
   let applicationRequest = false
   let applicationFailure: { error: unknown } | undefined
 
@@ -582,6 +585,8 @@ export const handleSsrRequest = async (
             signal
           )
         )
+        // Counted before the early return so a slow resolver is not "response".
+        timings?.mark('static assets')
         if (assetResponse) return assetResponse
       }
 
@@ -628,6 +633,7 @@ export const handleSsrRequest = async (
             error: error instanceof Error ? error.message : 'Unknown cache error',
           })
         }
+        timings?.mark('response cache')
         if (cachedResponse) {
           return validateSsrHttpResponse({
             ...cachedResponse,
@@ -845,21 +851,33 @@ export const handleSsrRequest = async (
     }
 
     const webRequest = createWebRequest(request, url, signal)
-    const terminal = async (): Promise<SsrHttpResponse | Response> => {
-      let match
-      try { match = matchServerRoute(entry.serverRoutes, pathname) } catch (error) {
-        if (error instanceof SsrServerRouteBadRequest) {
-          return isHtmlNavigation(request, pathname)
-            ? publicErrorResponse(request, 400)
-            : new Response(null, { status: 400 })
-        }
-        throw error
-      }
-      return match ? dispatchServerRoute(match, webRequest, context) : fallback()
-    }
     const middleware = definition.serverMiddleware ?? []
-    // Preserve the legacy transport contract exactly when there is no Web onion.
+    const terminal = async (): Promise<SsrHttpResponse | Response> => {
+      // Middleware work before next(), plus server-route matching, ends here.
+      timings?.mark('middleware')
+      tailPhase = 'response'
+      let ownPhase = 'response'
+      try {
+        let match
+        try { match = matchServerRoute(entry.serverRoutes, pathname) } catch (error) {
+          if (error instanceof SsrServerRouteBadRequest) {
+            return isHtmlNavigation(request, pathname)
+              ? publicErrorResponse(request, 400)
+              : new Response(null, { status: 400 })
+          }
+          throw error
+        }
+        if (match) ownPhase = 'server route'
+        return await (match ? dispatchServerRoute(match, webRequest, context) : fallback())
+      } finally {
+        // Also on rejection: an outer middleware may catch it and keep working,
+        // and that recovery work belongs to middleware, not to the response.
+        timings?.mark(ownPhase)
+        if (middleware.length) tailPhase = 'middleware'
+      }
+    }
     if (!middleware.length) return await scope.run(terminal)
+    tailPhase = 'middleware'
     return await scope.run(() => executeServerMiddleware(middleware, webRequest, context, async () => {
       const result = await terminal()
       return result instanceof Response ? result : ssrHttpResponseToWebResponse(result)
@@ -867,6 +885,10 @@ export const handleSsrRequest = async (
   } catch (error) {
     if (error instanceof SsrLegacyInformationalResponse) return error.response
     if (error instanceof SsrRequestCancelledError) throw error
+    // Time up to the failure belongs to whoever owned it; error rendering below
+    // (renderError, diagnostics) is response work, never middleware.
+    timings?.mark(tailPhase)
+    tailPhase = 'response'
     const definition = activeDefinition
     const diagnostic = createSsrErrorDiagnostic({
       error,
@@ -980,8 +1002,7 @@ export const handleSsrRequest = async (
     })
   } finally {
     if (applicationRequest && activeDefinition) {
-      // Whatever follows the last phase (response caching, header assembly).
-      timings?.mark('response')
+      timings?.mark(tailPhase)
       timings?.report(activeDefinition.server.logger, request.requestId, selectedEntryId, timingDetails)
     }
   }
