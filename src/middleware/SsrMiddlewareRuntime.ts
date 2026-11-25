@@ -1,3 +1,4 @@
+import { showRouteRecovery } from '../browser/SsrRouteRecovery'
 import type { App } from 'vue'
 import { requiresSsrMiddlewareRuntime } from './SsrMiddlewarePresence'
 import {
@@ -220,8 +221,13 @@ export const createSsrMiddlewareExecutionController = (options: {
       }
     }
 
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let abortWait: (() => void) | undefined
     try {
-      return await executeMiddlewareChain({
+      if (navigationController && from === START_LOCATION) {
+        timer = setTimeout(() => navigationController?.abort(abortReason()), 20000)
+      }
+      const work = executeMiddlewareChain({
         app,
         router,
         context,
@@ -231,10 +237,19 @@ export const createSsrMiddlewareExecutionController = (options: {
         server: options.server,
         signal,
       })
+      if (!navigationController) return await work
+      const cancelled = new Promise<MiddlewareNavigationPlan>(resolve => {
+        abortWait = () => resolve({ kind: 'cancel' })
+        if (signal.aborted) abortWait()
+        else signal.addEventListener('abort', abortWait, { once: true })
+      })
+      return await Promise.race([work, cancelled])
     } catch (error) {
       if (!options.server && signal.aborted) return { kind: 'cancel' }
       throw error
     } finally {
+      if (timer) clearTimeout(timer)
+      if (abortWait) signal.removeEventListener('abort', abortWait)
       removeRequestAbort()
       if (activeBrowserNavigation === navigationController) {
         activeBrowserNavigation = undefined
@@ -356,6 +371,7 @@ export const createSsrMiddlewareExecutionController = (options: {
           : undefined
       }
 
+      let dismissRecovery: (() => void) | undefined
       const removeBefore = registerBeforeEach(async (to, from) => {
         if (options.server && options.onBootstrapRequirement) {
           options.onBootstrapRequirement(requiresSsrMiddlewareRuntime(applicationMiddleware, to))
@@ -417,6 +433,11 @@ export const createSsrMiddlewareExecutionController = (options: {
           return true
         }
         if (plan.kind === 'cancel') {
+          if (plan.unavailable && options.server) context.response.statusCode = 503
+          if (plan.unavailable && !options.server && from !== START_LOCATION) {
+            dismissRecovery?.()
+            dismissRecovery = showRouteRecovery(router, to.fullPath)
+          }
           publishOutcome('cancel')
           return false
         }
@@ -487,6 +508,7 @@ export const createSsrMiddlewareExecutionController = (options: {
         dispose() {
           if (installationDisposed) return
           installationDisposed = true
+          dismissRecovery?.()
           removeBefore()
           removeAfter()
           removeError()
