@@ -25,7 +25,7 @@ export type MiddlewareNavigationPlan =
       props: MiddlewarePendingProps[]
       enteredMatchedIndices: number[]
     }
-  | { kind: 'cancel' }
+  | { kind: 'cancel'; unavailable?: boolean }
   | { kind: 'redirect'; location: RouteLocationRaw }
   | { kind: 'special-redirect'; redirect: MiddlewareRedirectResult }
 
@@ -60,6 +60,7 @@ export const executeMiddlewareChain = async (options: {
   for (let index = 0; index < collection.entries.length; index += 1) {
     throwIfAborted(options.signal)
     const entry = collection.entries[index]!
+    let unavailable = false
     const middlewareContext: MiddlewareContext<any> = {
       app: options.app,
       router: options.router,
@@ -72,6 +73,7 @@ export const executeMiddlewareChain = async (options: {
       publicConfig: options.context.publicConfig,
       signal: options.signal,
       redirect: createMiddlewareRedirectResult,
+      unavailable: () => { unavailable = true; return false },
     }
     // Router guards execute outside component setup. Run every middleware in
     // the owning app context so application-scoped composables/plugins can use
@@ -82,7 +84,7 @@ export const executeMiddlewareChain = async (options: {
       options.to.fullPath
     )
     if (classified.kind === 'continue') continue
-    if (classified.kind === 'cancel') return { kind: 'cancel' }
+    if (classified.kind === 'cancel') return unavailable ? { kind: 'cancel', unavailable: true } : { kind: 'cancel' }
     if (classified.kind === 'redirect') {
       return { kind: 'redirect', location: classified.location }
     }
