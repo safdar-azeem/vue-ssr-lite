@@ -5,7 +5,7 @@ import { SSR_BROWSER_BOOTSTRAP_SOURCES } from '../../src/browser/SsrBrowserBoots
 // A new runtime file requires an explicit boundary review before this list grows.
 const CLIENT_MODULES = new Set([
   'index.ts', 'client.ts', 'config/SsrPublicConfigHelpers.ts', 'application/SsrApplicationCore.ts', 'browser/SsrBrowserRuntime.ts',
-  'browser/SsrBrowserResolution.ts', 'browser/SsrBrowserTiming.ts', 'request/SsrCanonicalOrigin.ts',
+  'browser/SsrBrowserResolution.ts', 'browser/SsrBrowserTiming.ts', 'browser/SsrRouteRecovery.ts', 'request/SsrCanonicalOrigin.ts',
   'request/SsrDomainRuntime.ts', 'request/SsrHostnameRuntime.ts', 'head/SsrManagedHead.ts',
   'request/SsrRequestOrigin.ts', 'request/SsrRequestContext.ts', 'request/SsrRequestResolution.ts',
   'request/SsrResponseStatus.ts', 'rendering/SsrReactivityRuntime.ts', 'navigation/SsrRouteRenderRuntime.ts',
