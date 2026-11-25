@@ -64,6 +64,8 @@ export interface MiddlewareContext<TPublicConfig = unknown> {
   origin: string
   publicConfig: TPublicConfig
   signal: AbortSignal
+  /** Cancel and offer retry for a temporary service failure. */
+  unavailable(): false
   redirect(
     location: RouteLocationRaw,
     options?: MiddlewareRedirectOptions
