@@ -1,3 +1,4 @@
+import { showRouteRecovery } from './SsrRouteRecovery'
 import type { App } from 'vue'
 import {
   isNavigationFailure,
@@ -180,6 +181,40 @@ const readSpaDomainState = <TPublicConfig>(): {
   }
 }
 
+type BrowserApplication = Awaited<ReturnType<typeof createSsrApplication>>
+
+async function navigateInitially(created: BrowserApplication, target: string, id: string) {
+  const { router, middleware } = created
+  if (!router) return 'ready'
+  const path = router.resolve(target).fullPath
+  try {
+    const current = router.currentRoute.value
+    const handled = middleware?.navigationOutcome(path) ||
+      (current !== START_LOCATION && (current.fullPath === path || current.redirectedFrom?.fullPath === path))
+    const failure = handled ? undefined : await router.push(target)
+    if (middleware?.navigationOutcome(path) === 'redirect') return 'redirect'
+    if (router.currentRoute.value === START_LOCATION &&
+        (middleware?.navigationOutcome(path) || isNavigationFailure(failure, NavigationFailureType.aborted))) {
+      return 'recover'
+    }
+    await router.isReady()
+    markSsrBrowserPhase(id, 'router-ready')
+    resolveResponseStatusForRoute(created.context.response, router.currentRoute.value)
+    return 'ready'
+  } catch (error) {
+    if (router.currentRoute.value !== START_LOCATION) throw error
+    return 'recover'
+  } finally {
+    middleware?.completeBrowserBootstrap()
+  }
+}
+
+function showInitialRecovery(created: BrowserApplication, mountSelector: string, target: string) {
+  if (created.router?.currentRoute.value === START_LOCATION) {
+    created.hydration.onDispose(showRouteRecovery(created.router, target, document.querySelector(mountSelector)))
+  }
+}
+
 export const hydrateSsrApplication = async (
   definition: SsrClientApplicationDefinition<any, any>,
   options: SsrHydrateOptions = {}
@@ -223,51 +258,20 @@ export const hydrateSsrApplication = async (
     })
     releaseSsrBrowserDocumentOnDispose(created.hydration, releaseDocument)
     markSsrBrowserPhase(definition.id, 'application-ready')
-    if (created.router) {
-      try {
-        const target =
-          `${window.location.pathname}${window.location.search}${window.location.hash}`
-        const targetFullPath = created.router.resolve(target).fullPath
-        const current = created.router.currentRoute.value
-        const middlewareOutcomeBeforePush =
-          created.middleware?.navigationOutcome(targetFullPath)
-        const automaticNavigationHandled =
-          Boolean(middlewareOutcomeBeforePush) ||
-          (current !== START_LOCATION &&
-            (current.fullPath === targetFullPath ||
-              current.redirectedFrom?.fullPath === targetFullPath))
-        const navigationFailure = automaticNavigationHandled
-          ? undefined
-          : await created.router.push(target)
-        const middlewareOutcome =
-          created.middleware?.navigationOutcome(targetFullPath)
-        const navigationAborted = isNavigationFailure(
-          navigationFailure,
-          NavigationFailureType.aborted
-        )
-        if (!middlewareOutcome && !navigationAborted) {
-          await created.router.isReady()
-          markSsrBrowserPhase(definition.id, 'router-ready')
-          resolveResponseStatusForRoute(
-            created.context.response,
-            created.router.currentRoute.value
-          )
-        } else if (middlewareOutcome === 'redirect') {
-          controller.abort()
-          created.hydration.dispose()
-          return
-        }
-      } finally {
-        created.middleware?.completeBrowserBootstrap()
-      }
+    const target = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    const navigation = await navigateInitially(created, target, definition.id)
+    if (navigation === 'redirect') {
+      controller.abort()
+      created.hydration.dispose()
+      return
     }
-
     // The initial START_LOCATION navigation is intentionally outside browser
     // loading UI. Server markup remains visible until this hydration mount;
     // RouterView and LoadingIndicator observe subsequent navigations only.
     markSsrBrowserPhase(definition.id, 'mount-start')
     mountStarted = true
     created.app.mount(options.mountSelector ?? '#app')
+    if (navigation === 'recover') showInitialRecovery(created, options.mountSelector ?? '#app', target)
     await completeSsrBrowserHydration(created.app, created.hydration)
     created.managedHead.hydrate(document.head)
     stateElement.remove()
@@ -338,44 +342,12 @@ export const mountSpaApplication = async <
     })
     releaseSsrBrowserDocumentOnDispose(created.hydration, releaseDocument)
     markSsrBrowserPhase(definition.id, 'application-ready')
-    if (created.router) {
-      try {
-        const target =
-          options.url ??
-          `${window.location.pathname}${window.location.search}${window.location.hash}`
-        const targetFullPath = created.router.resolve(target).fullPath
-        const current = created.router.currentRoute.value
-        const middlewareOutcomeBeforePush =
-          created.middleware?.navigationOutcome(targetFullPath)
-        const automaticNavigationHandled =
-          Boolean(middlewareOutcomeBeforePush) ||
-          (current !== START_LOCATION &&
-            (current.fullPath === targetFullPath ||
-              current.redirectedFrom?.fullPath === targetFullPath))
-        const navigationFailure = automaticNavigationHandled
-          ? undefined
-          : await created.router.push(target)
-        const middlewareOutcome =
-          created.middleware?.navigationOutcome(targetFullPath)
-        const navigationAborted = isNavigationFailure(
-          navigationFailure,
-          NavigationFailureType.aborted
-        )
-        if (!middlewareOutcome && !navigationAborted) {
-          await created.router.isReady()
-          markSsrBrowserPhase(definition.id, 'router-ready')
-          resolveResponseStatusForRoute(
-            created.context.response,
-            created.router.currentRoute.value
-          )
-        } else if (middlewareOutcome === 'redirect') {
-          controller.abort()
-          created.hydration.dispose()
-          return { app: created.app, unmount: () => undefined }
-        }
-      } finally {
-        created.middleware?.completeBrowserBootstrap()
-      }
+    const target = options.url ?? `${window.location.pathname}${window.location.search}${window.location.hash}`
+    const navigation = await navigateInitially(created, target, definition.id)
+    if (navigation === 'redirect') {
+      controller.abort()
+      created.hydration.dispose()
+      return { app: created.app, unmount: () => undefined }
     }
     const app = created.app
     const activeCreated = created
@@ -384,6 +356,7 @@ export const mountSpaApplication = async <
     markSsrBrowserPhase(definition.id, 'mount-start')
     mountStarted = true
     app.mount(options.mountSelector ?? '#app')
+    if (navigation === 'recover') showInitialRecovery(created, options.mountSelector ?? '#app', target)
     activeCreated.managedHead.hydrate(document.head)
     document.getElementById('vue-ssr-lite-domain')?.remove()
     markSsrBrowserPhase(definition.id, 'spa-mounted')
