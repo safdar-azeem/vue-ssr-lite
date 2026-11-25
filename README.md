@@ -1474,3 +1474,7 @@ Provide those URLs through `seo.sitemap`.
 # License
 
 MIT
+
+### Recoverable route checks
+
+Return `context.unavailable()` from middleware when a route cannot be verified temporarily. The browser keeps the current view, offers a Retry action for the intended URL, and cancels superseded navigation. The server returns HTTP 503. Use ordinary redirects for a confirmed sign-in requirement or access denial. Browser middleware receives an abort signal so network requests can release work after cancellation.
