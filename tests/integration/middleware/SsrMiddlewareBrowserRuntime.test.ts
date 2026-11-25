@@ -12,6 +12,8 @@ import {
 } from 'vue'
 import {
   createRouter,
+  isNavigationFailure,
+  NavigationFailureType,
   RouterLink,
   RouterView,
   START_LOCATION,
@@ -368,6 +370,7 @@ describe('browser middleware navigation', () => {
     }
     expect(setups).toBe(0)
     expect(mount.textContent).toBe('')
+    expect(mount.previousElementSibling?.querySelector('button')?.textContent).toBe('Try again')
   })
 
   it('runs middleware again when a user retries after cancelled SPA bootstrap', async () => {
@@ -425,11 +428,89 @@ describe('browser middleware navigation', () => {
     expect(mount.querySelector('.blocked-link')).not.toBeNull()
 
     allow = true
-    await router.push('/blocked')
-
+    const retry = mount.previousElementSibling!.querySelector('button')!
+    retry.click()
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/blocked'))
+    expect(retry.isConnected).toBe(false)
     expect(runs).toBe(2)
     expect(router.currentRoute.value.path).toBe('/blocked')
   })
+
+  it.each(['SPA startup', 'SSR hydration', 'later navigation'] as const)(
+    'keeps Retry usable without recovery-module delivery during %s',
+    async phase => {
+      const id = 'offline-recovery'
+      const initial = phase === 'later navigation' ? '/' : '/target'
+      const domain = createTestDomain('localhost', { protocol: 'http' })
+      let online = false
+      let disposed = false
+      let router!: Router
+      let app!: App
+      const middleware = defineMiddleware(context => {
+        if (context.server || online) return
+        // The route runtime is already running. Fail any subsequent request for its recovery UI.
+        vi.doMock('../../../src/browser/SsrRouteRecovery', () => {
+          throw new Error('Recovery asset unavailable')
+        })
+        return context.unavailable()
+      })
+      const definition = createTestApplication({
+        id,
+        root: defineComponent({ setup: () => () => h('div', { id: 'mounted-shell' }) }),
+        routes: [
+          { path: '/', component: Page },
+          { path: '/target', component: Page, meta: { middleware: [middleware] } },
+        ],
+        install(setup) {
+          if (setup.server) return
+          app = setup.app
+          router = setup.router!
+          setup.hydration.onDispose(() => { disposed = true })
+        },
+      })
+      window.history.replaceState({}, '', initial)
+      document.body.innerHTML = '<div id="app"></div>'
+      try {
+        if (phase === 'SSR hydration') {
+          const rendered = await renderSsrApplication(definition, createTestRenderRequest('localhost', {
+            url: 'http://localhost/target', protocol: 'http', domain,
+          }))
+          document.querySelector('#app')!.innerHTML = rendered.html
+          const state = document.createElement('script')
+          state.id = getSsrStateElementId(id)
+          state.type = 'application/json'
+          state.textContent = JSON.stringify(rendered.hydrationState)
+          document.body.append(state)
+          await hydrateSsrApplication(definition)
+        } else {
+          await mountSpaApplication(definition, { domain, url: initial, publicConfig: {} })
+        }
+        if (phase === 'later navigation') {
+          const previous = router.currentRoute.value
+          const failure = await router.push('/target')
+          expect(isNavigationFailure(failure, NavigationFailureType.aborted)).toBe(true)
+          expect(router.currentRoute.value).toBe(previous)
+        } else {
+          expect(router.currentRoute.value).toBe(START_LOCATION)
+        }
+        const shell = document.getElementById('mounted-shell')
+        expect(shell).not.toBeNull()
+        expect(disposed).toBe(false)
+        const retry = document.querySelector('section button') as HTMLButtonElement
+        expect(retry.textContent).toBe('Try again')
+        online = true
+        retry.click()
+        await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/target'))
+        expect(document.getElementById('mounted-shell')).toBe(shell)
+        expect(document.querySelector('section button')).toBeNull()
+        expect(disposed).toBe(false)
+      } finally {
+        vi.doUnmock('../../../src/browser/SsrRouteRecovery')
+        if (app && !disposed) app.unmount()
+        document.body.innerHTML = ''
+      }
+    }
+  )
 
   it('does not replay successful authorization after downstream bootstrap cancellation', async () => {
     let authenticated = true
